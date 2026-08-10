@@ -1,0 +1,21 @@
+# portioneer — protected interactive slice (Ausfallschutz).
+# Rendered defaults for a ~9.7 GiB host; install.sh recomputes from detected RAM.
+# Holds always-on services (web UI, voice, sshd-helpers, pnd/pn-llmd themselves).
+# MemoryMin is UNRECLAIMABLE: the kernel will OOM-kill elsewhere before reclaiming
+# these below the floor — this is what stops interactive services from flapping.
+[Unit]
+Description=portioneer protected interactive services
+Before=pn-batch.slice
+
+[Slice]
+MemoryAccounting=yes
+MemoryMin=1536M
+MemoryLow=2560M
+# H4: interactive never swaps (no swap-in latency for portal/voice). Batch keeps a bounded
+# swap band as the PSI/oomd reaction runway.
+MemorySwapMax=0
+CPUAccounting=yes
+CPUWeight=100
+IOAccounting=yes
+IOWeight=100
+TasksAccounting=yes

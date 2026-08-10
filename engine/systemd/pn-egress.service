@@ -1,0 +1,18 @@
+[Unit]
+Description=portioneer egress-broker (pn-egress) — governed default-deny internet proxy
+After=pnd.service pn-egress-netns.service
+Requires=pnd.service
+
+[Service]
+Type=simple
+ExecStart=%h/portioneer/tools/pn-egress --proxy
+Slice=pn-interactive.slice
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,62 @@
+<!doctype html><html lang=de><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Boot-Check — Brainbox</title>
+<style>
+:root{--bg:#0f1216;--card:#171b21;--ln:#242a33;--tx:#e7ecf3;--mut:#93a0b0;--acc:#43c59e;--warn:#e0b341;--bad:#e0614f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:26px 18px 60px}
+a.back{color:var(--mut);text-decoration:none;font-size:14px}
+h1{font-size:22px;margin:14px 0 4px}
+.sub{color:var(--mut);font-size:14px;margin-bottom:20px;max-width:64ch}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:18px 20px;margin-bottom:16px}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.big{font-size:19px;font-weight:700}
+.pill{font-size:12.5px;font-weight:600;padding:3px 11px;border-radius:999px;border:1px solid var(--ln);white-space:nowrap}
+.pill.ok{color:#0d130f;background:var(--acc);border-color:var(--acc)}
+.pill.warn{color:#0d130f;background:var(--warn);border-color:var(--warn)}
+.pill.fail{color:#fff;background:var(--bad);border-color:var(--bad)}
+.pill.info{color:var(--mut)}
+.pill.sm{font-size:11.5px;padding:2px 9px}
+button{font:600 14px/1 inherit;padding:10px 16px;border-radius:10px;border:1px solid var(--ln);cursor:pointer;background:#1e242c;color:var(--tx);margin-left:auto}
+button:disabled{opacity:.5;cursor:default}
+.rows{display:flex;flex-direction:column}
+.r{display:flex;align-items:center;gap:12px;padding:11px 4px;border-bottom:1px solid var(--ln)}
+.r:last-child{border-bottom:0}
+.r .nm{font-weight:600;min-width:210px}
+.r .dt{color:var(--mut);font-size:13px}
+.ts{font-size:12.5px;color:var(--mut);margin-top:10px}
+.note{font-size:12.5px;color:var(--mut);margin-top:12px;line-height:1.55}
+</style><script src="/portal-nav.js" defer></script></head><body><div class=wrap>
+<a class=back href="/">&larr; Zurueck</a>
+<h1>🩺 Boot-Check</h1>
+<div class=sub>Reboot-Robustheit: nach jedem Neustart verifiziert die Box selbst, dass alle Kern-Invarianten
+wieder da sind — Dispatcher, Broker-Socket, Portal, VIP, cgroup-Tiers, Mounts. Dienste, die absichtlich
+aus sind (z.B. Off-LAN-Relay), zaehlen NICHT als Fehler.</div>
+<div id=top class=card><div class=top><span class=big>Status</span><span class="pill info">Lade…</span></div></div>
+<div class=card><div id=rows class=rows>…</div><div id=ts class=ts></div></div>
+<div class=note>Grün = alle Kern-Invarianten ok. Gelb = etwas Nicht-Kritisches fehlt (z.B. NAS-Mount, Peer haelt VIP).
+Rot = eine Kern-Invariante ist nach dem Boot NICHT wiedergekommen — dann greift Selbstheilung / Alarm.
+„Jetzt prüfen" führt den Check sofort erneut aus.</div>
+<script>
+const P=(s)=>({ok:'ok',warn:'warn',fail:'fail',info:'info'}[s]||'info');
+async function load(run){
+ const b=document.getElementById('btn'); if(b){b.disabled=true;b.textContent='Prüfe…';}
+ let j; try{j=await (await fetch('/api/selftest'+(run?'?run=1':''),{cache:'no-store'})).json();}catch(e){return;}
+ const top=document.getElementById('top');
+ if(!j.ok){top.innerHTML='<div class=top><span class=big>Status</span><span class="pill fail">'+(j.error||'Fehler')+'</span></div>';return;}
+ const d=j.selftest, ov=d.overall;
+ top.innerHTML='<div class=top><span class=big>Status</span>'
+   +'<span class="pill '+P(ov)+'">'+({ok:'● gesund',warn:'▲ Warnungen',fail:'✕ Fehler'}[ov]||ov)+'</span>'
+   +'<span style="color:var(--mut);font-size:13px">'+d.summary+'</span>'
+   +'<button id=btn onclick="load(1)">Jetzt prüfen</button></div>';
+ const rows=document.getElementById('rows');rows.innerHTML='';
+ for(const c of d.checks){
+   const r=document.createElement('div');r.className='r';
+   r.innerHTML='<span class="pill '+P(c.status)+' sm">'+c.status.toUpperCase()+'</span>'
+     +'<span class=nm>'+c.name+'</span><span class=dt>'+c.detail+'</span>';
+   rows.appendChild(r);
+ }
+ const when=new Date(d.ts*1000).toLocaleString('de-DE');
+ document.getElementById('ts').textContent='Letzter Check: '+when+(d.boot?' (Boot)':'')+' · Host: '+(d.host||'?');
+}
+load(0);
+</script></div></body></html>

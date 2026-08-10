@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+
+"""Hält die Speicherbremse an ihrem Platz — und sagt, wenn sie mahlt statt zu bremsen.
+
+Zwei getrennte Aufgaben, absichtlich in einem Wächter:
+
+1. NACHZIEHEN. pn-init schreibt `memory.high` bei JEDEM Dienststart neu. Das laufende PID 1 ist
+   noch das alte Binary (⛔ PID 1 wird im Laufen nicht getauscht), also holt jeder Neustart die
+   alte Bremse zurück. Gemessen am 09.08.2026 an `institut-wache`:
+
+       vorher  2428 MiB   (15/16 der Blattwand — der Wert seit heute)
+       nachher 1942 MiB   ( 3/4  der Blattwand — der Wert von vorher)
+
+   Eine Bremse, die nach jedem Neustart zurückfällt, ist keine Einstellung, sondern ein Zufall.
+   Dieser Wächter zieht sie wieder hoch. Ab dem nächsten Bootvorgang mit dem neuen Binary macht
+   PID 1 es selbst — dann findet der Wächter nichts mehr und wird zur stillen Wache.
+
+2. BEURTEILEN. `memory.high` zählt den Seitencache mit; „Cache ausklammern" gibt cgroup v2
+   nicht her. Solange genug abwerfbarer Cache im Topf liegt, ist eine Drosselung billig: der
+   Kern wirft ihn weg und geht weiter. Teuer wird sie, wenn das meiste FESTGENAGELT ist — bei
+   `memory.swap.max=0` sind anonymer Speicher und shmem unauslagerbar. Dann dreht der Kern beim
+   Drosseln leer. Genau dieser Zustand war am 09.08. der Schaden: Last 75, PSI 80,8 %, und
+   **kein einziger OOM-Kill**, also nichts, was ein gewöhnlicher Wächter bemerkt hätte.
+
+   Deshalb wird nicht die Zahl der Drosselungen gemeldet (die läuft bei jedem Dateizugriff mit),
+   sondern ihr Takt zusammen mit der Frage, woran sie greift.
+
+⛔ Was dieser Wächter NIE tut:
+   - `memory.max` anfassen. Nach unten ist eine Wand eine Guillotine; die Nie-OOM-Zusage hängt
+     allein an den max-Werten. (Auch nach oben nicht: mehr Wand nimmt sie einer anderen Stufe.)
+   - `memory.high` senken. Er hebt nur an, und nur bis auf den Wert, den pn-init selbst rechnet.
+   - Ein Blatt anfassen, dessen Bremse auf `max` steht oder von Hand gesetzt wurde. Dort wäre
+     eine geschriebene Zahl eine NEUE Bremse, keine wiederhergestellte.
+   - Eine echte Knappheit stillschweigend wegregeln. Wenn Anheben nicht hilft, wird gemeldet.
+
+Aufruf:  pn-bremsenwache [--takt SEK] [--einmal] [--trocken]
+Stand:   /run/pn-bremsenwache.stand   (eine Zeile je Stufe, für Menschen und für die Selbstprobe)
+"""
+import argparse
+import errno
+import io
+import os
+import sys
+import time
+
+CG = "/sys/fs/cgroup"
+STAND = "/run/pn-bremsenwache.stand"
+MIB = 1048576.0
+
+PCT = {"pn-critical.slice": (38, 40), "pn-batch.slice": (26, 28), "pn-misc.slice": (17, 18)}
+LEAF_MAX_NUM, LEAF_MAX_DEN = 8, 10
+LEAF_HIGH_NUM, LEAF_HIGH_DEN = 15, 16
+BLATTSTUFEN = ("pn-batch.slice", "pn-misc.slice")
+
+TAKT_SCHWELLE = 30.0
+PSI_SCHWELLE = 5.0
+MINDESTLUFT = 256 * 1048576
+
+ab = lambda v: (v // 4096) * 4096
+
+def lies(pfad):
+    try:
+        with io.open(pfad, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+def zahl(pfad):
+    t = lies(pfad)
+    if t is None or t == "max":
+        return None
+    try:
+        return int(t.split()[0])
+    except ValueError:
+        return None
+
+def stat(d):
+    raus = {}
+    for z in (lies(os.path.join(d, "memory.stat")) or "").splitlines():
+        t = z.split()
+        if len(t) == 2:
+            try:
+                raus[t[0]] = int(t[1])
+            except ValueError:
+                pass
+    return raus
+
+def drosselungen(d):
+    for z in (lies(os.path.join(d, "memory.events")) or "").splitlines():
+        t = z.split()
+        if len(t) == 2 and t[0] == "high":
+            try:
+                return int(t[1])
+            except ValueError:
+                return 0
+    return 0
+
+def psi_voll(d):
+    for z in (lies(os.path.join(d, "memory.pressure")) or "").splitlines():
+        if z.startswith("full"):
+            for stueck in z.split():
+                if stueck.startswith("avg10="):
+                    try:
+                        return float(stueck[6:])
+                    except ValueError:
+                        return 0.0
+    return 0.0
+
+def festgenagelt(d):
+
+    s = stat(d)
+    return (s.get("anon", 0) + s.get("shmem", 0) + s.get("slab_unreclaimable", 0)
+            + s.get("kernel_stack", 0) + s.get("percpu", 0) + s.get("sock", 0))
+
+def abwerfbar(d):
+
+    s = stat(d)
+    return max(0, s.get("file", 0) - s.get("shmem", 0))
+
+def sollwerte():
+
+    with io.open("/proc/meminfo", encoding="utf-8") as f:
+        memtotal = int(f.readline().split()[1]) * 1024
+    X = memtotal // 100
+    soll = {}
+    for stufe, (p_high, p_max) in PCT.items():
+        d = os.path.join(CG, stufe)
+        if not os.path.isdir(d):
+            continue
+        soll[os.path.join(d, "memory.high")] = ab(X * p_high)
+        if stufe not in BLATTSTUFEN:
+            continue
+        blattwand = X * p_max * LEAF_MAX_NUM // LEAF_MAX_DEN
+        blatthigh = ab(blattwand * LEAF_HIGH_NUM // LEAF_HIGH_DEN)
+        for blatt in sorted(os.listdir(d)):
+            bd = os.path.join(d, blatt)
+            if os.path.isdir(bd) and os.path.exists(os.path.join(bd, "memory.high")):
+                soll[os.path.join(bd, "memory.high")] = blatthigh
+    return soll
+
+def nachziehen(trocken, sagen):
+    getan = 0
+    for pfad, wert in sorted(sollwerte().items()):
+        ist = lies(pfad)
+        if ist is None or ist == "max":
+            continue
+        try:
+            istz = int(ist)
+        except ValueError:
+            continue
+        if istz >= wert:
+            continue
+        wand = zahl(os.path.join(os.path.dirname(pfad), "memory.max"))
+        if wand is not None and wert >= wand:
+            sagen("UEBERSPRUNGEN %s: Soll %.0f MiB liegt an der Wand %.0f MiB"
+                  % (kurz(pfad), wert / MIB, wand / MIB))
+            continue
+        if trocken:
+            sagen("wuerde nachziehen %s: %.0f -> %.0f MiB" % (kurz(pfad), istz / MIB, wert / MIB))
+            getan += 1
+            continue
+        try:
+            with io.open(pfad, "w") as f:
+                f.write(str(wert))
+        except OSError as e:
+            sagen("FEHLER %s: %s" % (kurz(pfad), e))
+            continue
+        nach = lies(pfad)
+        sagen("nachgezogen %s: %.0f -> %.0f MiB%s"
+              % (kurz(pfad), istz / MIB, wert / MIB,
+                 "" if nach == str(wert) else "  ABWEICHUNG gelesen=%s" % nach))
+        getan += 1
+    return getan
+
+def kurz(pfad):
+    return os.path.relpath(os.path.dirname(pfad), CG)
+
+def urteil(luft, takt, psi):
+
+    if takt < TAKT_SCHWELLE:
+        return "ruhig", ""
+    if luft is not None and luft < MINDESTLUFT:
+        return "mahlt am Festgenagelten", (
+            "Die Bremse steht nur %.0f MiB über dem, was der Kern gar nicht hergeben kann. "
+            "Drosseln bringt hier nichts mehr — diese Stufe ist zu klein für das, was in ihr "
+            "liegt. Das gehoert in die Zuteilung, nicht in diesen Waechter." % (luft / MIB))
+    ernst = " Und die Arbeit steht dabei still (PSI %.1f %%)." % psi if psi > PSI_SCHWELLE else ""
+    return "mahlt am Cache", (
+        "Der Arbeitsvorrat passt nicht unter die Bremse: %.0f Drosselungen/min, obwohl noch "
+        "abwerfbarer Cache da ist. Die Bremse steht bereits auf ihrer Marke, hoeher darf sie "
+        "nicht.%s" % (takt, ernst))
+
+def runde(vorher, sagen):
+
+    jetzt = time.monotonic()
+    zeilen, nachher = [], {}
+    for stufe in sorted(PCT):
+        d = os.path.join(CG, stufe)
+        if not os.path.isdir(d):
+            continue
+        hi, mx = zahl(d + "/memory.high"), zahl(d + "/memory.max")
+        genagelt, abwerf = festgenagelt(d), abwerfbar(d)
+        zaehler = drosselungen(d)
+        nachher[stufe] = (zaehler, jetzt)
+        takt = 0.0
+        if stufe in vorher:
+            alt, wann = vorher[stufe]
+            dt = max(1e-6, jetzt - wann)
+            takt = max(0.0, (zaehler - alt)) * 60.0 / dt
+        luft = (hi - genagelt) if hi is not None else None
+        lage, warum = urteil(luft, takt, psi_voll(d))
+        zeilen.append("%-18s bremse=%6.0f wand=%6.0f genagelt=%6.0f abwerfbar=%6.0f "
+                      "luft=%7s takt=%6.1f/min  %s"
+                      % (stufe, (hi or 0) / MIB, (mx or 0) / MIB, genagelt / MIB, abwerf / MIB,
+                         ("%.0f" % (luft / MIB)) if luft is not None else "—", takt, lage))
+        if warum:
+            sagen("%s: %s %s" % (stufe, lage.upper(), warum))
+    return zeilen, nachher
+
+def stand_schreiben(zeilen):
+
+    text = ("# pn-bremsenwache — %s\n" % time.strftime("%Y-%m-%d %H:%M:%S")) + "\n".join(zeilen) + "\n"
+    tmp = STAND + ".neu"
+    try:
+        with io.open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, STAND)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="pn-bremsenwache", description=__doc__.splitlines()[0])
+    p.add_argument("--takt", type=int, default=60, help="Sekunden zwischen zwei Runden")
+    p.add_argument("--einmal", action="store_true", help="eine Runde, dann Schluss")
+    p.add_argument("--trocken", action="store_true", help="nichts schreiben, nur sagen")
+    a = p.parse_args(argv)
+
+    def sagen(t):
+        sys.stderr.write("%s pn-bremsenwache: %s\n" % (time.strftime("%H:%M:%S"), t))
+        sys.stderr.flush()
+
+    if not os.path.isdir(os.path.join(CG, "pn-critical.slice")):
+        sagen("Keine pn-Stufen unter %s — hier gibt es nichts zu bewachen." % CG)
+        return 0
+    if os.geteuid() != 0 and not a.trocken:
+        sagen("Ohne root laesst sich memory.high nicht schreiben — nur --trocken moeglich.")
+        return 3
+
+    vorher = {}
+    erste = True
+    while True:
+        gezogen = nachziehen(a.trocken, sagen)
+        if gezogen:
+            sagen("%d Bremse(n) nachgezogen — ein Dienstneustart hatte den alten Wert "
+                  "zurueckgeholt." % gezogen)
+        zeilen, vorher = runde(vorher, sagen)
+        if not a.trocken:
+            stand_schreiben(zeilen)
+        if erste:
+
+            for z in zeilen:
+                sagen(z)
+            erste = False
+        if a.einmal:
+            return 0
+        try:
+            time.sleep(a.takt)
+        except KeyboardInterrupt:
+            return 0
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except OSError as e:
+        if e.errno == errno.EPIPE:
+            sys.exit(0)
+        raise

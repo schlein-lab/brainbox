@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import argparse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from pnlib.overlay import keys, topology
+from pnlib.overlay.peer import PeerRegistry
+from pnlib.overlay.keys import generate_keypair, keypair_from_private_b64
+from pnlib.overlay.wizard import OnboardingWizard, WizardConfig, DONE
+
+def _write_priv(path, kp):
+    with open(path, "w") as f:
+        f.write(kp.private_b64 + "\n")
+    os.chmod(path, 0o600)
+
+def cmd_genkey(a):
+    kp = generate_keypair()
+    print(kp.public_b64)
+    if a.out:
+        _write_priv(a.out, kp)
+        print(f"private key written 0600 -> {a.out}", file=sys.stderr)
+    elif a.print_private:
+        print(f"PRIVATE {kp.private_b64}", file=sys.stderr)
+    return 0
+
+def cmd_pubkey(a):
+    priv_b64 = open(a.in_file).read().strip()
+    print(keypair_from_private_b64(priv_b64).public_b64)
+    return 0
+
+def cmd_gen(a):
+    reg = PeerRegistry.from_dict(json.load(open(a.registry)))
+    ks_raw = json.load(open(a.keystore))
+    keystore = {n: keypair_from_private_b64(p) for n, p in ks_raw.items()}
+    if a.mode == "hub":
+        if not a.hub:
+            print("hub mode needs --hub NAME", file=sys.stderr)
+            return 2
+        _, paths = topology.generate_hub_and_spoke(reg, keystore, a.hub, a.out)
+    else:
+        _, paths = topology.generate_mesh(reg, keystore, a.out)
+    for p in paths:
+        print(p)
+    return 0
+
+def cmd_wizard(a):
+    if a.state and os.path.exists(a.state):
+        w = OnboardingWizard.resume(a.state)
+    else:
+        cfg = WizardConfig(**json.load(open(a.config)))
+        cfg.out_dir = a.out
+        w = OnboardingWizard(cfg)
+    w.run()
+    if a.state:
+        w.save(a.state)
+    print(f"state={w.state} verified={w.verified}")
+    for n, _ in sorted(w.emitted.items()):
+        print(os.path.join(a.out, f"{n}.conf"))
+    return 0 if w.state == DONE and w.verified else 1
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-overlay", description="WireGuard overlay config/control (no live iface)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    g = sub.add_parser("genkey"); g.add_argument("--out"); g.add_argument("--print-private", action="store_true")
+    g.set_defaults(fn=cmd_genkey)
+
+    pk = sub.add_parser("pubkey"); pk.add_argument("--in", dest="in_file", required=True)
+    pk.set_defaults(fn=cmd_pubkey)
+
+    ge = sub.add_parser("gen")
+    ge.add_argument("--registry", required=True); ge.add_argument("--keystore", required=True)
+    ge.add_argument("--mode", choices=["mesh", "hub"], default="mesh")
+    ge.add_argument("--hub"); ge.add_argument("--out", required=True)
+    ge.set_defaults(fn=cmd_gen)
+
+    wz = sub.add_parser("wizard")
+    wz.add_argument("--config"); wz.add_argument("--out", required=True); wz.add_argument("--state")
+    wz.set_defaults(fn=cmd_wizard)
+
+    a = ap.parse_args()
+    return a.fn(a)
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,22 @@
+[Unit]
+Description=portioneer accounting / metrics daemon (pn-acctd) — the slurmdbd half, closing the estimate->ETA loop
+After=default.target pnd.service
+Wants=pnd.service
+
+[Service]
+Type=simple
+ExecStart=%h/portioneer/tools/pn-acctd
+Slice=pn-interactive.slice
+OOMScoreAdjust=300
+Restart=always
+RestartSec=5
+MemoryAccounting=yes
+TasksAccounting=yes
+TasksMax=32
+MemoryMax=128M
+MemoryHigh=96M
+CPUWeight=20
+Environment=PN_ACCT_SOCK=%t/pn-acctd.sock
+
+[Install]
+WantedBy=default.target

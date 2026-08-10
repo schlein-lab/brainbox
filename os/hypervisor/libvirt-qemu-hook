@@ -1,0 +1,7 @@
+#!/bin/bash
+case "$2" in
+    started|restore|reconnect)
+        ( sleep 3; /usr/local/sbin/vm-oom-guard.sh >/dev/null 2>&1 ) &
+        ;;
+esac
+exit 0

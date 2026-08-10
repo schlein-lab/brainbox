@@ -1,0 +1,5 @@
+#!/bin/sh
+mkdir -p /run/portioneer
+chgrp pnbroker /run/portioneer 2>/dev/null || echo "[portioneer-run] WARN chgrp pnbroker failed"
+chmod 2770 /run/portioneer
+echo "[portioneer-run] /run/portioneer ready: $(ls -ld /run/portioneer)"

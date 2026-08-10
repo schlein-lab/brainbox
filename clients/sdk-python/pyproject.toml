@@ -1,0 +1,16 @@
+[project]
+name = "brainarbeit-connect"
+version = "0.1.0"
+description = "Brainarbeit Connect — Python SDK + the pn-connect reference CLI. The account-bound, connect-once client over the one-contract: per-device handshake + mandatory 2FA -> durable token, single reality (user/<principal>), voice/text/file/path intake, approve/reject/revise. Drives the REAL relay protocol (relaylib) for the off-LAN path."
+requires-python = ">=3.10"
+license = { text = "Proprietary — schlein-lab" }
+dependencies = []
+
+[project.optional-dependencies]
+relay = ["cryptography>=41"]
+
+[project.scripts]
+pn-connect = "connectlib.cli:main"
+
+[tool.setuptools]
+packages = ["connectlib"]

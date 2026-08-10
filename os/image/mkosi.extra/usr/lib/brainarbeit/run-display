@@ -1,0 +1,32 @@
+#!/bin/sh
+# run-display — exec a pinned display-tier binary (phantomd / pn-atspid / streamd).
+#
+# These are first-party (components/phantom + os/display), installed into the DATA layer at
+# first boot. Like run-engine, this is the stable argv0 in /etc/pn-init.conf; the display tier
+# is NON-sacred (pn-batch.slice) — display death != box death (docs/display.md, architecture §2).
+#
+# Before exec, set the Wayland/AT-SPI session env phantomd needs so portals + GTK + AT-SPI find
+# the seat (display.md §3: dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+# XDG_SESSION_TYPE). llvmpipe (software GL) is the universal default — zero host-GPU dependency.
+set -eu
+
+DATA="${BRAINARBEIT_DATA:-/var/lib/brainarbeit}"
+BINDIR="$DATA/display/bin"
+TOOL="${1:?run-display: missing tool name}"
+shift || true
+
+if [ ! -x "$BINDIR/$TOOL" ]; then
+    echo "[run-display] $TOOL not installed yet ($BINDIR/$TOOL) — display tier unseeded; backing off" >&2
+    exit 69
+fi
+
+export BRAINARBEIT_DATA="$DATA"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=brainarbeit
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+# Force software rendering — the appliance has no host GPU passthrough (display.md §3/§9.3).
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+export EGL_PLATFORM=surfaceless
+exec "$BINDIR/$TOOL" "$@"

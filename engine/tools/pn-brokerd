@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import re
+import json
+import grp
+import socket
+import threading
+import signal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import ipc as pn_ipc
+import relaylib
+
+IN_SOCK = os.environ.get("BROKERD_IN_SOCK", "/run/portioneer/broker.sock")
+PND_SOCK = os.environ.get("PND_BROKER_SOCK", "/run/portioneer/pnd-broker.sock")
+IN_GROUP = os.environ.get("BROKERD_IN_GROUP", "pnbroker")
+
+_SELECTOR_RE = re.compile(r"^web:[a-z0-9][a-z0-9_.-]{0,63}$")
+
+ALLOWED_VERBS = frozenset({
+    "ping", "submit", "my-jobs", "my-outputs", "my-history", "job", "events", "log", "cvm",
+    "replay", "subscribe", "cancel", "result", "whereis", "group", "eta", "extend", "via-inflight",
+
+    "get-approval-prefs", "set-approval-pref",
+})
+
+_STRIP = ("_method", "_ceiling_caps", "_peer_uid")
+_MAXFRAME = 1 << 20
+
+def _policy(req):
+
+    if not isinstance(req, dict):
+        return False, {"ok": False, "error": "malformed request"}
+    verb = req.get("verb")
+    if verb not in ALLOWED_VERBS:
+        return False, {"ok": False, "error": f"verb '{verb}' not permitted via the web-session broker"}
+    sel = req.get("_selector")
+    if not isinstance(sel, str) or not _SELECTOR_RE.match(sel):
+        return False, {"ok": False, "error": "invalid _selector (must be web:<uid>)"}
+    clean = {k: v for k, v in req.items() if k not in _STRIP}
+    clean["_method"] = "web-session"
+    clean["_selector"] = sel
+    return True, clean
+
+def _recv_line(conn):
+    buf = b""
+    while b"\n" not in buf:
+        ch = conn.recv(65536)
+        if not ch:
+            break
+        buf += ch
+        if len(buf) > _MAXFRAME:
+            return None
+    return buf.split(b"\n", 1)[0] if buf else None
+
+def _handle(conn):
+    try:
+        line = _recv_line(conn)
+        if not line:
+            return
+        try:
+            req = json.loads(line.decode("utf-8"))
+        except Exception:
+            conn.sendall(b'{"ok": false, "error": "bad json"}\n'); return
+        ok, out = _policy(req)
+        if not ok:
+            conn.sendall((json.dumps(out) + "\n").encode()); return
+        if out.get("verb") == "subscribe":
+            _proxy_subscribe(conn, out); return
+
+        try:
+            reply = pn_ipc.send_request(out, timeout=30, path=PND_SOCK)
+        except Exception as e:
+            reply = {"ok": False, "error": f"pnd unreachable: {type(e).__name__}"}
+        conn.sendall((json.dumps(reply) + "\n").encode())
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+def _proxy_subscribe(portal_conn, req):
+
+    try:
+        up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        up.settimeout(30)
+        up.connect(PND_SOCK)
+        up.sendall((json.dumps(req) + "\n").encode())
+    except Exception as e:
+        try:
+            portal_conn.sendall((json.dumps(
+                {"ok": False, "error": f"pnd unreachable: {type(e).__name__}"}) + "\n").encode())
+        except OSError:
+            pass
+        return
+    up.settimeout(None)
+    try:
+        while True:
+            data = up.recv(65536)
+            if not data:
+                break
+            portal_conn.sendall(data)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
+    finally:
+        try:
+            up.close()
+        except OSError:
+            pass
+
+def _bind_inbound():
+
+    d = os.path.dirname(IN_SOCK)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    if os.path.exists(IN_SOCK):
+        try:
+            os.unlink(IN_SOCK)
+        except OSError:
+            pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(IN_SOCK)
+    mode = 0o660
+    try:
+        gid = grp.getgrnam(IN_GROUP).gr_gid
+        os.chown(IN_SOCK, -1, gid)
+    except (KeyError, PermissionError, OSError) as e:
+        sys.stderr.write(f"pn-brokerd: group '{IN_GROUP}' not applied ({e}); "
+                         f"{IN_SOCK} left uid-only (0600)\n")
+        mode = 0o600
+    os.chmod(IN_SOCK, mode)
+    s.listen(128)
+    return s
+
+def main():
+
+    reasons = []
+    if not relaylib.broker_is_deprivileged(os.getuid(), reasons=reasons):
+        sys.stderr.write("pn-brokerd REFUSING to start (not de-privileged): %s\n" % "; ".join(reasons))
+        sys.exit(2)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    srv = _bind_inbound()
+    sys.stderr.write(f"pn-brokerd up: in={IN_SOCK} -> pnd={PND_SOCK} (uid={os.getuid()})\n")
+    sys.stderr.flush()
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            continue
+        threading.Thread(target=_handle, args=(conn,), daemon=True).start()
+
+if __name__ == "__main__":
+    main()

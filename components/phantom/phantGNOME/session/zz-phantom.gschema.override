@@ -1,0 +1,20 @@
+# phantGNOME — system-layer GSettings override (FUSION-FRAMEWORK.md §9.3, STRESS #4/#12).
+#
+# This pins disable-extension-version-validation=true at the SYSTEM layer,
+# independent of any extension's load state. It is the PRIMARY defense for the
+# OUT_OF_DATE case: a 46.x point release flips the umbrella to OUT_OF_DATE in
+# ExtensionManager.loadExtension() (via _isOutOfDate + the _checkVersion gate)
+# BEFORE the umbrella's enable() ever runs — so the umbrella's own runtime pin can
+# never protect the very case it exists for. With validation disabled here, the
+# one load-bearing phantom-ui extension (and the phantom-lifeboat) are never
+# refused on a point-release bump.
+#
+# Installed by install-system.sh into /usr/share/glib-2.0/schemas/ and compiled
+# there with glib-compile-schemas. The "zz-" prefix makes it sort LAST so it wins
+# over any distro default. Reversible: rm the file + recompile.
+#
+# Belt-and-braces: the umbrella ALSO pins this at runtime (secondary), so even a
+# host that has not yet run install-system.sh is covered once enable() runs — but
+# only the override below covers the pre-enable() OUT_OF_DATE refusal.
+[org.gnome.shell]
+disable-extension-version-validation=true

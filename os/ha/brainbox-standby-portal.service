@@ -1,0 +1,13 @@
+[Unit]
+Description=Brainbox standby portal (started only while this host holds the VIP)
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=8
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/local/bin/brainbox-standby fence
+ExecStart=/usr/bin/python3 %h/.local/bin/phantom-portal serve
+Restart=on-failure
+RestartSec=3

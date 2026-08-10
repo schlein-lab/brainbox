@@ -1,0 +1,59 @@
+#!/bin/sh
+set -u
+
+CONF=/etc/brainbox/site.conf
+get() { [ -r "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | tail -1 | tr -d '"' | tr -d "'" || true; }
+
+[ "$(get FIREWALL_ENABLED)" = "0" ] && { echo "[firewall] per site.conf abgeschaltet"; exit 0; }
+command -v nft >/dev/null 2>&1 || { echo "[firewall] nft fehlt — KEINE Firewall aktiv" >&2; exit 0; }
+
+PROFILE="$(get NET_PROFILE)"; PROFILE="${PROFILE:-managed}"
+EXTRA_TCP="$(get FIREWALL_EXTRA_TCP)"
+SETUP_HINWEIS=""
+
+TCP_OPEN="22 80 443 8076"
+
+if [ "$PROFILE" = "home" ]; then
+  TCP_OPEN="$TCP_OPEN 445 8200 8096 8121"
+  UDP_OPEN="5353 1900 3702"
+else
+  UDP_OPEN=""
+fi
+
+if [ ! -f /etc/brainbox/setup-complete ]; then
+  case " $UDP_OPEN " in *" 5353 "*) ;; *) UDP_OPEN="$UDP_OPEN 5353" ;; esac
+  SETUP_HINWEIS=" (mDNS offen bis zur Einrichtung)"
+fi
+[ -n "$EXTRA_TCP" ] && TCP_OPEN="$TCP_OPEN $EXTRA_TCP"
+
+mk_set() { s=""; for p in $1; do s="$s$p, "; done; echo "${s%, }"; }
+TCP_SET="$(mk_set "$TCP_OPEN")"
+UDP_SET="$(mk_set "$UDP_OPEN")"
+
+RULES="/run/brainbox-firewall.nft"
+{
+  echo 'table inet brainbox { }'
+  echo 'delete table inet brainbox'
+  echo 'table inet brainbox {'
+  echo '  chain input {'
+  echo '    type filter hook input priority 0; policy drop;'
+  echo '    ct state established,related accept'
+  echo '    ct state invalid drop'
+  echo '    iif lo accept'
+  echo '    iifname { "pnbr*", "pntap*", "tap*", "virbr*" } accept'
+  echo '    ip protocol icmp icmp type { echo-request, destination-unreachable, time-exceeded } accept'
+  echo '    ip6 nexthdr ipv6-icmp accept'
+  echo '    udp dport { 68, 546 } accept'
+  [ -n "$TCP_SET" ] && echo "    tcp dport { $TCP_SET } accept"
+  [ -n "$UDP_SET" ] && echo "    udp dport { $UDP_SET } accept"
+  echo '  }'
+  echo '}'
+} > "$RULES"
+
+if nft -f "$RULES"; then
+  echo "[firewall] aktiv — Profil '$PROFILE', TCP offen: $TCP_OPEN${UDP_OPEN:+, UDP: $UDP_OPEN}${SETUP_HINWEIS:-}"
+else
+  echo "[firewall] FEHLER beim Laden der Regeln — Box laeuft UNGESCHUETZT" >&2
+  exit 1
+fi
+exit 0

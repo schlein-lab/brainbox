@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portal-contract/1/error",
+  "title": "Uniform error object (contract.md §8.1)",
+  "type": "object",
+  "required": ["code", "message"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "ERR_UNKNOWN_VERB",
+        "ERR_CONTRACT_MISMATCH",
+        "ERR_NOT_ENROLLED",
+        "ERR_NOT_APPROVED",
+        "ERR_PRINCIPAL_MISMATCH",
+        "ERR_BAD_SIG",
+        "ERR_STALE",
+        "ERR_REPLAY",
+        "ERR_AMBIGUOUS",
+        "ERR_CEREMONY_REQUIRED",
+        "ERR_CEREMONY_FAILED",
+        "ERR_CAP_MISSING",
+        "ERR_NO_SUBSIDY",
+        "ERR_INTERLOCK",
+        "ERR_TOO_LARGE",
+        "ERR_QUOTA"
+      ],
+      "description": "Canonical error code (§8.1). No partial side effects on any error."
+    },
+    "message": { "type": "string" },
+    "detail": {
+      "type": "object",
+      "description": "e.g. ERR_CAP_MISSING names the missing capability + the degraded fallback (§7)."
+    }
+  },
+  "additionalProperties": true
+}

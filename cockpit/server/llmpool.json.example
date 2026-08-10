@@ -1,0 +1,9 @@
+{
+  "_comment": "Pool of Claude Max accounts for the governed LLM lane. Copy to ~/.config/brainbox-portal/llmpool.json. OMIT this file entirely (or list one account) to keep the pre-pool behavior: a single account on the portal's own HOME. Each account is isolated by its HOME ($HOME/.claude.json holds that Max account's OAuth); log each in once with `HOME=<home> claude login` (or llmpool-provision.py login <id>). max_concurrent caps concurrent governed calls (semaphore, sized at portal start).",
+  "max_concurrent": 6,
+  "accounts": [
+    { "id": "primary", "home": "/home/USER",                 "enabled": true,  "weight": 1 },
+    { "id": "max-2",   "home": "/home/USER/.llmpool/max-2",   "enabled": false, "weight": 1 },
+    { "id": "max-3",   "home": "/home/USER/.llmpool/max-3",   "enabled": false, "weight": 1 }
+  ]
+}

@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+
+import os, sys, json, argparse, subprocess
+
+def _seed_crng_from_host():
+    import struct, fcntl, binascii
+    seed_hex = os.environ.get("PN_RNGSEED", "").strip()
+    if not seed_hex:
+        try:
+            for tok in open("/proc/cmdline").read().split():
+                if tok.startswith("pn_rngseed="):
+                    seed_hex = tok.split("=", 1)[1].strip(); break
+        except OSError:
+            pass
+    try:
+        seed = binascii.unhexlify(seed_hex)
+    except (binascii.Error, ValueError):
+        return False
+    if len(seed) < 16:
+        return False
+    RNDADDENTROPY = 0x40085203
+    payload = struct.pack("ii", len(seed) * 8, len(seed)) + seed
+    for dev, minor in (("/dev/random", 8), ("/dev/urandom", 9)):
+        try:
+            fd = os.open(dev, os.O_RDONLY)
+        except OSError:
+            try:
+                os.mknod(dev, 0o020000 | 0o600, os.makedev(1, minor)); fd = os.open(dev, os.O_RDONLY)
+            except OSError:
+                continue
+        try:
+            fcntl.ioctl(fd, RNDADDENTROPY, payload); return True
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+    return False
+
+_seed_crng_from_host()
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+try:
+    import deaddrop
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "relaylib"))
+    import deaddrop
+
+KEYS = os.environ.get("BRAINBOX_CELL_KEYS", os.path.expanduser("~/.brainbox-cell/keys.json"))
+
+import re as _re
+_DESTRUCTIVE = _re.compile(r"\b(rm|rmdir|mkfs|dd|shred|drop\s+table|truncate|kill|reboot|shutdown|"
+                           r"delete|destroy|format|wipe|--force)\b", _re.I)
+_EXTERNAL = _re.compile(r"\b(send|email|mail|pay|transfer|publish|post|tweet|deploy|release)\b", _re.I)
+_WRITE = _re.compile(r"\b(write|save|create|mkdir|touch|install|commit|chmod|chown|mv|cp|update|set)\b", _re.I)
+_AUTO_AT = {"read": 1, "write": 2, "destructive": 3, "external": 5}
+
+def _classify(cmd):
+    c = cmd or ""
+    if _EXTERNAL.search(c):
+        return "external"
+    if _DESTRUCTIVE.search(c):
+        return "destructive"
+    if _WRITE.search(c):
+        return "write"
+    return "read"
+
+def _autonomy_decision(command, level):
+
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 1
+    cls = _classify(command)
+    if level <= 0:
+        return "approval", cls
+    return ("auto" if level >= _AUTO_AT.get(cls, 3) else "approval"), cls
+
+def _load_or_make():
+    if os.path.exists(KEYS):
+        return json.load(open(KEYS))
+    cx_priv, cx_pub, cid_seed, cid_pub = deaddrop.gen_cell_keys()
+    k = {"cell_x_priv": cx_priv.hex(), "cell_x_pub": cx_pub.hex(),
+         "cell_id_seed": cid_seed.hex(), "cell_id_pub": cid_pub.hex()}
+    os.makedirs(os.path.dirname(KEYS), exist_ok=True)
+    fd = os.open(KEYS, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w") as f:
+        json.dump(k, f)
+    return k
+
+def cmd_keygen(a):
+    k = _load_or_make()
+    print(json.dumps({"cell_x_pub": k["cell_x_pub"], "cell_id_pub": k["cell_id_pub"]}))
+
+def cmd_pubkeys(a):
+    if not os.path.exists(KEYS):
+        sys.exit("no cell keys yet; run keygen")
+    k = json.load(open(KEYS))
+    print(json.dumps({"cell_x_pub": k["cell_x_pub"], "cell_id_pub": k["cell_id_pub"]}))
+
+def cmd_run(a):
+    k = _load_or_make()
+    env = json.load(sys.stdin)
+
+    inner = deaddrop.cell_open(bytes.fromhex(k["cell_x_priv"]), bytes.fromhex(k["cell_x_pub"]), env)
+    command = (inner or {}).get("command")
+
+    level = (inner or {}).get("autonomy", a.autonomy)
+    if not isinstance(command, str):
+        result = {"state": "failed", "rc": 2, "stdout": "", "error": "no command in sealed payload"}
+    else:
+
+        decision, cls = _autonomy_decision(command, level)
+        if decision == "approval":
+            result = {"state": "needs_approval", "rc": 0, "action_class": cls, "autonomy": int(level),
+                      "command_preview": command[:400],
+                      "reason": "autonomy L%s requires human confirmation for a %s action" % (level, cls)}
+        else:
+            p = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, timeout=a.timeout)
+            result = {"state": "done" if p.returncode == 0 else "failed", "rc": p.returncode,
+                      "stdout": p.stdout, "stderr": p.stderr, "action_class": cls, "autonomy": int(level)}
+
+    renv = deaddrop.cell_seal_result(a.device_x_pub, bytes.fromhex(k["cell_id_seed"]), env["rid"], result)
+    sys.stdout.write(json.dumps(renv))
+
+def cmd_sealseed(a):
+
+    if not os.path.exists(KEYS):
+        sys.exit("no cell keys yet; run keygen")
+    k = json.load(open(KEYS))
+    secret = (a.secret or sys.stdin.read()).strip()
+    if not secret:
+        sys.exit("sealseed: empty secret (pass base32 on stdin)")
+    payload = {"kind": "totp", "secret": secret, "digits": a.digits, "period": a.period, "algo": a.algo}
+    renv = deaddrop.cell_seal_result(a.device_x_pub, bytes.fromhex(k["cell_id_seed"]), a.rid, payload)
+    sys.stdout.write(json.dumps(renv))
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-cell-sealed-run")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("keygen").set_defaults(fn=cmd_keygen)
+    sub.add_parser("pubkeys").set_defaults(fn=cmd_pubkeys)
+    s = sub.add_parser("sealseed"); s.add_argument("--device-x-pub", required=True)
+    s.add_argument("--secret", default=None); s.add_argument("--rid", default="totp-seed-enroll")
+    s.add_argument("--digits", type=int, default=6); s.add_argument("--period", type=int, default=30)
+    s.add_argument("--algo", default="SHA1"); s.set_defaults(fn=cmd_sealseed)
+    r = sub.add_parser("run"); r.add_argument("--device-x-pub", required=True)
+    r.add_argument("--timeout", type=int, default=600)
+    r.add_argument("--autonomy", type=int, default=int(os.environ.get("PN_CELL_AUTONOMY", "1")),
+                   help="default session autonomy L0-L5 when the sealed payload omits it (fail-safe L1)")
+    r.set_defaults(fn=cmd_run)
+    a = ap.parse_args(); a.fn(a)
+
+if __name__ == "__main__":
+    main()

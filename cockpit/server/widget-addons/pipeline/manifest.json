@@ -1,0 +1,8 @@
+{
+  "id": "pipeline",
+  "title": "🔧 Datenpipeline",
+  "version": "1.0.0",
+  "description": "Wiederkehrende, governte Daten-Bahnen: jede Bahn wird als Filler-Job in die Queue eingereiht (sichtbar, abbrechbar, priorisierbar); pausierbar je Bahn und global. Die Bahn-Definitionen sind DATEN der Box (pipeline.json) — ohne eigene Definitionen bleibt das Widget leer. Klassisches persönliches Add-on: nicht Teil des ISO-Kerns.",
+  "widget": "widget.js",
+  "backend": "backend.py"
+}

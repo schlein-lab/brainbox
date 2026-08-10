@@ -1,0 +1,7 @@
+# Installed to /etc/sudoers.d/brainbox-mediashare (0440 root:root). Lets the portal (uid 1000)
+# provision per-session SMB accounts + reload smbd non-interactively via the ONE root-owned helper.
+# NOPASSWD is safe because /usr/local/sbin/pn-mediashare-provision is a root-owned FIXED-PATH copy
+# (never the user-writable repo file): it only ever touches accounts named bshare-* (shape-checked)
+# and reloads smbd — it can never be coaxed onto a real login account. Replace SERVICE_USER with the
+# box owner account (uid 1000).
+SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/pn-mediashare-provision

@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+
+import os, sys, json, time, base64, urllib.request, urllib.error
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from relaylib import deaddrop, registry, crypto
+from relaylib.keys import ApplianceKeys
+from pnlib import db, ipc, DB_PATH, LOG_DIR
+
+try:
+    sys.path.insert(0, os.path.expanduser("~/.local/bin"))
+    import pn_session_cells as _sesscells
+    _SESSREG = _sesscells.SessionCellRegistry(
+        os.environ.get("PN_SESSION_CELLS_DIR",
+                       os.path.expanduser("~/.local/share/brainbox-portal/session-cells")))
+except Exception:
+    _sesscells = _SESSREG = None
+
+INTERVAL = max(1, int(os.environ.get("PN_RELAY_POLL_INTERVAL", "15")))
+LETTERBOXES = [u.strip().rstrip("/") for u in
+               os.environ.get("LETTERBOX_URLS", os.environ.get("LETTERBOX_URL", "http://127.0.0.1:8090")).split(",")
+               if u.strip()]
+BOX_TOKEN = os.environ.get("LETTERBOX_BOX_TOKEN")
+BROKER_SOCK = os.environ.get("PND_BROKER_SOCK", "/run/portioneer/pnd-broker.sock")
+CELL_RUNNER = os.environ.get("CELL_RUNNER", "pn-cell-sealed-run")
+K = ApplianceKeys()
+INBOX_TOPIC = deaddrop.inbox_topic(K.sx_pub)
+
+def log(m): sys.stdout.write("[pn-deaddrop-poll/v2] %s\n" % m); sys.stdout.flush()
+
+def _http(base, method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if BOX_TOKEN:
+        req.add_header("Authorization", "Bearer " + BOX_TOKEN)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return {"_http_error": e.code}
+    except Exception as e:
+        return {"_error": str(e)}
+
+def accept(reg, cxr, env):
+
+    try:
+        header = deaddrop.box_verify(env)
+    except deaddrop.BadEnvelope:
+        return None
+    if header.get("task_type") != "cell.exec":
+        return None
+    did = crypto.did_for(bytes.fromhex(header["device_id_pub"]))
+    al = registry.get_alliance(reg, did)
+    if not al or al["revoked_at"] is not None:
+        return None
+
+    if db.is_lan_only_principal(cxr, al["principal"]):
+        return None
+    if "task_type:cell.exec" not in registry.caps_ceiling(reg, did):
+        return None
+    if not registry.next_submit_counter_ok(reg, did, header.get("counter", -1)):
+        return None
+    ok_rate, _ = registry.check_and_record_rate(reg, did)
+    if not ok_rate:
+        return None
+    ok_2fa, _ = registry.verify_stepup_2fa(reg, al["principal"], did, header.get("totp", ""),
+                                            ts=header.get("ts"), allow_step_reuse=True)
+    if not ok_2fa:
+        return None
+    dev_x = al["device_x_pubkey"]
+    if not dev_x:
+        return None
+
+    session = header.get("session")
+    return did, al["principal"], dev_x, header["rid"], session
+
+def route_to_cell(reg, env, did, dev_x_pub, principal=None, session=None):
+
+    blob = base64.b64encode(json.dumps(env).encode()).decode()
+    autonomy = None
+    cell_selector = did
+    if _SESSREG is not None and principal and session:
+        route = _SESSREG.route(principal, session)
+        if route is not None:
+            autonomy = route.get("autonomy")
+            cell_selector = route["cell"]
+    aut = (" --autonomy %d" % int(autonomy)) if autonomy is not None else ""
+    command = "echo %s | base64 -d | %s run --device-x-pub %s%s" % (blob, CELL_RUNNER, dev_x_pub, aut)
+    req = {"verb": "submit", "task_type": "cell.exec", "params": {"command": command},
+           "_method": "device-channel", "_selector": did, "via_device": did,
+           "_session": session, "_cell": cell_selector,
+           "source": "relay", "cwd": "/tmp"}
+    return ipc.send_request(req, timeout=30, path=BROKER_SOCK)
+
+def sealed_result(jid):
+
+    try:
+        out = open(os.path.join(LOG_DIR, "job-%d.out" % jid), errors="replace").read().strip()
+        return json.loads(out) if out else None
+    except OSError:
+        return None
+
+def main():
+    reg = registry.connect()
+    cxr = db.connect(DB_PATH)
+    inflight = {}
+    log("up (CELL-SEALED): letterboxes=%s topic=%s interval=%ds runner=%s" %
+        (",".join(LETTERBOXES), INBOX_TOPIC, INTERVAL, CELL_RUNNER))
+    while True:
+
+        drained = []
+        for base in LETTERBOXES:
+            res = _http(base, "GET", "/inbox?topic=%s" % INBOX_TOPIC)
+            for env in ((res.get("items") if isinstance(res, dict) else None) or []):
+                drained.append((base, env))
+
+        drained.sort(key=lambda be: (be[1].get("device_id_pub", ""), be[1].get("counter", 0)))
+        for base, env in drained:
+            rid = env.get("rid")
+            if not rid or rid in inflight:
+                continue
+            try:
+                acc = accept(reg, cxr, env)
+                if not acc:
+                    _http(base, "DELETE", "/inbox/%s?topic=%s" % (rid, INBOX_TOPIC))
+                    log("rejected rid=%s" % rid); continue
+                did, principal, dev_x, _rid, session = acc
+                resp = route_to_cell(reg, env, did, dev_x, principal=principal, session=session)
+                jid = resp.get("id")
+                if jid:
+                    inflight[rid] = (jid, base)
+                    log("routed rid=%s -> cell job %s (as %s, blind, via %s)" % (rid, jid, principal, base))
+                else:
+                    _http(base, "DELETE", "/inbox/%s?topic=%s" % (rid, INBOX_TOPIC))
+                    log("broker refused rid=%s: %s" % (rid, json.dumps(resp)[:160]))
+            except Exception as e:
+                log("route error rid=%s: %r" % (rid, e))
+        for rid, (jid, base) in list(inflight.items()):
+            try:
+                row = cxr.execute("SELECT state FROM jobs WHERE id=?", (jid,)).fetchone()
+                if not row or row["state"] not in ("done", "failed", "cancelled"):
+                    continue
+                renv = sealed_result(jid)
+                if renv is not None:
+                    _http(base, "PUT", "/outbox/%s" % rid, renv)
+                    _http(base, "DELETE", "/inbox/%s?topic=%s" % (rid, INBOX_TOPIC))
+                    log("forwarded SEALED result rid=%s job=%s" % (rid, jid))
+                    del inflight[rid]
+            except Exception as e:
+                log("result error rid=%s job=%s: %r" % (rid, jid, e))
+        time.sleep(INTERVAL)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

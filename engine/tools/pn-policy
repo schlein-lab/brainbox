@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""pn-policy — inspect and manage the T5 signed autonomy policy store (offline).
+
+Subcommands:
+  show          print the current (last-good) active policy JSON
+  history       list applied policy versions (version, hashes, effective_time)
+  verify FILE   verify a signed-policy JSON file against the pinned owner key (fail-closed)
+  propose FILE  record an UNSIGNED advisor proposal from a policy JSON file — RECORD ONLY, this
+                CANNOT activate anything (activation requires an owner-signed policy)
+  apply-signed FILE
+                verify + append a signed-policy JSON to the store (the ONLY activation path);
+                records the version to the ledger sink if one is wired
+
+The box only VERIFIES; the owner signs OFF-BOX. This tool never holds an owner private key. Point
+--db at a throwaway/opt-in sqlite file, NEVER queue.db. Pin the owner key via PN_OWNER_PUBKEY or the
+portal config (pnlib.rootkey).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from pnlib.policy.model import Policy
+from pnlib.policy.sign import SignedPolicy
+from pnlib.policy.verify import verify_signed_policy, PolicyVerifyError
+from pnlib.policy.store import PolicyStore, PolicyStoreError
+
+def _read_json(path: str):
+    with open(path) as f:
+        return json.load(f)
+
+def _store(args) -> PolicyStore:
+    return PolicyStore(args.db)
+
+def cmd_show(args) -> int:
+    st = _store(args)
+    sp = st.current()
+    if sp is None:
+        print("no active policy")
+        return 1
+    print(json.dumps(sp.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+def cmd_history(args) -> int:
+    st = _store(args)
+    hist = st.history()
+    if not hist:
+        print("(empty)")
+        return 0
+    for sp in hist:
+        p = sp.policy
+        print(f"v{p.version}\teffective={p.effective_time}\tprev={p.prev_version_hash}\t"
+              f"hash={sp.policy_hash()}\trules={len(p.rules)}")
+    return 0
+
+def cmd_verify(args) -> int:
+    signed = SignedPolicy.from_dict(_read_json(args.file))
+    try:
+        pol = verify_signed_policy(signed)
+    except PolicyVerifyError as e:
+        print(f"VERIFY-FAILED: {e}")
+        return 2
+    print(f"VERIFY-OK: version={pol.version} effective_time={pol.effective_time} "
+          f"rules={len(pol.rules)}")
+    return 0
+
+def cmd_propose(args) -> int:
+    st = _store(args)
+    policy = Policy.from_dict(_read_json(args.file))
+    prop = st.propose(policy, advisor=args.advisor, note=args.note or "")
+    print(f"PROPOSAL-RECORDED: id={prop.id} advisor={prop.advisor} "
+          f"(record-only; NOT active — an owner signature is required to activate)")
+    return 0
+
+def cmd_apply_signed(args) -> int:
+    st = _store(args)
+    signed = SignedPolicy.from_dict(_read_json(args.file))
+    try:
+        pol = st.apply_signed(signed)
+    except PolicyStoreError as e:
+        print(f"APPLY-REJECTED: {e}")
+        return 2
+    print(f"APPLIED: version={pol.version} effective_time={pol.effective_time}")
+    return 0
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="pn-policy", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", default=os.environ.get("PN_POLICY_DB", "policy.db"),
+                    help="policy store sqlite path (default: $PN_POLICY_DB or ./policy.db)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("show", help="print the current active policy").set_defaults(fn=cmd_show)
+    sub.add_parser("history", help="list applied versions").set_defaults(fn=cmd_history)
+
+    v = sub.add_parser("verify", help="verify a signed-policy JSON file")
+    v.add_argument("file")
+    v.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("propose", help="record an UNSIGNED advisor proposal (record-only)")
+    p.add_argument("file")
+    p.add_argument("--advisor", required=True)
+    p.add_argument("--note", default="")
+    p.set_defaults(fn=cmd_propose)
+
+    a = sub.add_parser("apply-signed", help="verify + append a signed policy (activation path)")
+    a.add_argument("file")
+    a.set_defaults(fn=cmd_apply_signed)
+
+    args = ap.parse_args(argv)
+    return args.fn(args)
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,13 @@
+[Unit]
+Description=portioneer egress bandwidth shaping (tc HTB + nft fwmark)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@REPO@/tools/pn-net apply
+ExecStop=@REPO@/tools/pn-net clear
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""phantom-serve — host a local site / expose a local app on the LAN, under phantom.
+
+  phantom-serve <dir> [--port N]            serve a directory to the LAN (bind 0.0.0.0)
+  phantom-serve --proxy <port> [--port N]   expose an existing 127.0.0.1:<port> app to the LAN
+  phantom-serve --ip                        print this host's LAN IP
+
+LAN hosting works on the phantom box (nothing firewalls 0.0.0.0 binds); the only gotcha
+is apps that bind to 127.0.0.1 (loopback = that machine only). This serves a directory —
+or reverse-proxies an existing loopback app — on 0.0.0.0 and prints the LAN URL, so a
+local website is reachable from any device on the home network. No third-party deps.
+"""
+import sys, os, socket, urllib.request, urllib.error
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer, BaseHTTPRequestHandler
+from functools import partial
+
+def lan_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+
+        s.connect(("8.8.8.8", 80)); return s.getsockname()[0]
+    except Exception:
+        return "0.0.0.0"
+    finally:
+        s.close()
+
+def serve_dir(directory, port):
+    handler = partial(SimpleHTTPRequestHandler, directory=directory)
+    srv = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    print(f"serving {directory}  ->  http://{lan_ip()}:{port}/   (Ctrl-C to stop)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+def make_proxy(target):
+    class P(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+        def _proxy(self, method):
+            url = f"http://127.0.0.1:{target}{self.path}"
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length else None
+            req = urllib.request.Request(url, data=body, method=method)
+            for k in self.headers:
+                if k.lower() not in ("host", "content-length", "connection"):
+                    req.add_header(k, self.headers[k])
+            try:
+                r = urllib.request.urlopen(req, timeout=120)
+                data, code, ct = r.read(), r.getcode(), r.headers.get("Content-Type", "application/octet-stream")
+            except urllib.error.HTTPError as e:
+                data, code, ct = e.read(), e.code, e.headers.get("Content-Type", "text/plain")
+            except Exception as e:
+                data, code, ct = str(e).encode(), 502, "text/plain"
+            self.send_response(code); self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        def do_GET(self):
+            self._proxy("GET")
+        def do_POST(self):
+            self._proxy("POST")
+    return P
+
+def serve_proxy(target, port):
+    srv = ThreadingHTTPServer(("0.0.0.0", port), make_proxy(target))
+    print(f"proxy 127.0.0.1:{target}  ->  http://{lan_ip()}:{port}/   (Ctrl-C to stop)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__); return
+    if a[0] == "--ip":
+        print(lan_ip()); return
+    port = int(a[a.index("--port") + 1]) if "--port" in a else 8080
+    if a[0] == "--proxy":
+        serve_proxy(int(a[1]), port); return
+    serve_dir(os.path.abspath(a[0]), port)
+
+if __name__ == "__main__":
+    main()

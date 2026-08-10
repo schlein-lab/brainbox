@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portal-contract/1/scene_frame_v1.layout",
+  "title": "SceneFrame v1 binary header layout (contract.md §4.2, SHIPPED, frozen)",
+  "description": "NOT a JSON message on the wire -- this is a machine-readable description of the frozen little-endian binary header of the R2 client-composite payload. Phase 0 pins the field offsets so a later phase's damage/delta evolution stays a PAYLOAD evolution (reserved fields), not a contract-version bump. The validator does a byte-level structural check of an example .bin against this layout.",
+  "type": "object",
+  "required": ["magic", "endian", "header_bytes", "header_fields", "per_surface_fields"],
+  "properties": {
+    "magic": { "const": "PSN1", "description": "SCENE_MAGIC = 0x50 0x53 0x4E 0x31" },
+    "endian": { "const": "little" },
+    "header_bytes": { "const": 28 },
+    "header_fields": {
+      "type": "array",
+      "description": "ordered; sum of sizes == header_bytes (28).",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "size"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["magic4", "u16", "u32"] },
+          "size": { "type": "integer" },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "per_surface_fields": {
+      "type": "array",
+      "description": "back-to-front, painted in array order (§4.2).",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["u32", "i16", "u16", "u8", "rect_array", "byte_blob"] },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$data": {
+    "magic": "PSN1",
+    "endian": "little",
+    "header_bytes": 28,
+    "header_fields": [
+      { "name": "magic", "type": "magic4", "size": 4 },
+      { "name": "version", "type": "u16", "size": 2, "note": "== 1" },
+      { "name": "flags", "type": "u16", "size": 2, "note": "bit0=keyframe" },
+      { "name": "seat_generation", "type": "u32", "size": 4 },
+      { "name": "frame_seq", "type": "u32", "size": 4 },
+      { "name": "screen_w", "type": "u16", "size": 2 },
+      { "name": "screen_h", "type": "u16", "size": 2 },
+      { "name": "surface_count", "type": "u16", "size": 2 },
+      { "name": "reserved", "type": "u16", "size": 2 },
+      { "name": "total_pixel_bytes", "type": "u32", "size": 4 }
+    ],
+    "per_surface_fields": [
+      { "name": "surface_id", "type": "u32" },
+      { "name": "x", "type": "i16" },
+      { "name": "y", "type": "i16" },
+      { "name": "w", "type": "u16" },
+      { "name": "h", "type": "u16" },
+      { "name": "stride_px", "type": "u16" },
+      { "name": "format", "type": "u8", "note": "0 = shm BGRA/BGRX LE, unconverted" },
+      { "name": "sflags", "type": "u8", "note": "bit0 = has_pixels" },
+      { "name": "damage_count", "type": "u16" },
+      { "name": "damage_rects", "type": "rect_array", "note": "damage_count x Rect{x,y,w,h u16}" },
+      { "name": "pixel_bytes_len", "type": "u32" },
+      { "name": "pixel_bytes", "type": "byte_blob" }
+    ]
+  }
+}

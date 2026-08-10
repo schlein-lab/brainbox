@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+import sys
+import json
+import argparse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+
+from pnlib import governor as G
+
+SOCK = os.environ.get("PN_GOV_SOCK", G.CTRL_SOCK)
+
+def _req(obj):
+    try:
+        return G.client_request(obj, path=SOCK)
+    except FileNotFoundError:
+        return {"ok": False, "error": f"governor socket not found at {SOCK} (is pn-governord up?)"}
+    except (ConnectionRefusedError, OSError) as e:
+        return {"ok": False, "error": f"cannot reach governor at {SOCK}: {e}"}
+
+def _emit(r):
+    print(json.dumps(r, indent=2))
+    sys.exit(0 if r.get("ok", False) else 1)
+
+def main():
+    p = argparse.ArgumentParser(prog="pn-gov")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("queue")
+    e = sub.add_parser("eta"); e.add_argument("id", type=int)
+    sub.add_parser("headroom")
+    sub.add_parser("plan")
+    sub.add_parser("health")
+    sub.add_parser("prog")
+    k = sub.add_parser("klavier")
+    k.add_argument("op", choices=["on", "off", "block", "unblock", "cap", "scale", "status", "list"])
+    k.add_argument("rest", nargs="*", help="<svc> [args...] (e.g. cap web mem=256M cpu=500 / scale web 3)")
+    a = p.parse_args()
+
+    if a.cmd == "queue":
+        _emit(_req({"verb": "queue.status"}))
+    elif a.cmd == "eta":
+        _emit(_req({"verb": "queue.eta", "id": a.id}))
+    elif a.cmd == "headroom":
+        _emit(_req({"verb": "fairshare.headroom"}))
+    elif a.cmd == "plan":
+        _emit(_req({"verb": "fairshare.plan"}))
+    elif a.cmd == "health":
+        _emit(_req({"verb": "fairshare.status"}))
+    elif a.cmd == "prog":
+        _emit(_req({"verb": "klavier", "argv": ["status"]}))
+    elif a.cmd == "klavier":
+        argv = [a.op] + a.rest
+        _emit(_req({"verb": "klavier", "argv": argv}))
+
+if __name__ == "__main__":
+    main()

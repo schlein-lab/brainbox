@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+<meta name="theme-color" content="#0b0f14">
+<title>BrainBox</title>
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root{ --bg:#0b0f14; --panel:#121926; --panel2:#0f1520; --line:#1e2a3a; --text:#e8eef6;
+         --muted:#8aa0b8; --accent:#41d1a7; --accent2:#2b8cff; --bad:#ff6b6b; --warn:#ffcf6b; }
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+       -webkit-font-smoothing:antialiased;display:flex;flex-direction:column;min-height:100dvh}
+  .wrap{max-width:520px;margin:0 auto;width:100%;padding:24px 18px calc(24px + env(safe-area-inset-bottom));flex:1;display:flex;flex-direction:column;gap:16px}
+  header{display:flex;align-items:center;gap:12px;margin-top:8px}
+  .logo{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;font-size:22px}
+  h1{font-size:20px;margin:0;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:1px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px}
+  .card h2{font-size:15px;margin:0 0 4px}
+  .card p{color:var(--muted);font-size:13px;margin:6px 0}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.6px}
+  input{width:100%;padding:13px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:11px;color:var(--text);font-size:16px;font-family:inherit}
+  input:focus{outline:none;border-color:var(--accent2)}
+  input.code{letter-spacing:3px;font-variant-numeric:tabular-nums}
+  button{width:100%;padding:14px;border:0;border-radius:11px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#031018;font-weight:700;font-size:15px;margin-top:16px;cursor:pointer}
+  button:disabled{opacity:.55;cursor:default}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--muted);font-weight:600;margin-top:10px}
+  .status{display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--muted);padding:11px 13px;background:var(--panel2);border:1px solid var(--line);border-radius:11px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+  .dot.ok{background:var(--accent);box-shadow:0 0 0 4px rgba(65,209,167,.15)}
+  .dot.bad{background:var(--bad)} .dot.work{background:var(--warn);animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+  .kv:last-child{border-bottom:0} .kv b{font-weight:600} .kv span{color:var(--muted);text-align:right;word-break:break-word}
+  .err{color:var(--bad);font-size:13px;margin-top:10px;min-height:1.2em}
+  .ok-badge{display:inline-flex;gap:6px;align-items:center;color:var(--accent);font-weight:600;font-size:13px}
+  .foot{color:var(--muted);font-size:11.5px;text-align:center;opacity:.75;padding:6px 0}
+  .hidden{display:none}
+  code{background:var(--panel2);padding:1px 6px;border-radius:6px;font-size:12.5px;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🧠</div>
+    <div><h1>BrainBox</h1><div class="sub" id="hostline">app.brainarbeit.com · Ende-zu-Ende</div></div>
+  </header>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Starte…</span></div>
+
+  <div class="card hidden" id="pairCard">
+    <h2>Dieses Gerät koppeln</h2>
+    <p>Einmalig: verbinde dieses Handy fest mit deiner Box. Danach meldest du dich hier ohne Code an — der Geräteschlüssel bleibt sicher auf dem Gerät.</p>
+    <label for="code">Kopplungs-Code</label>
+    <input id="code" class="code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="z. B. no8ffGaKMinC">
+    <label for="totp">2-Faktor-Code</label>
+    <input id="totp" class="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-stellig">
+    <button id="pairBtn">Koppeln &amp; verbinden</button>
+    <div class="err" id="pairErr"></div>
+  </div>
+
+  <div class="card hidden" id="connCard">
+    <h2><span class="ok-badge">✔ Verbunden mit deiner Box</span></h2>
+    <p>Diese Verbindung läuft Ende-zu-Ende verschlüsselt über den Relay — deine Box bleibt dunkel und hat dieses Gerät erkannt.</p>
+    <div style="margin-top:6px">
+      <div class="kv"><b>Angemeldet als</b><span id="cvPrincipal">—</span></div>
+      <div class="kv"><b>Box-Identität</b><span id="cvBox">geprüft ✓</span></div>
+      <div class="kv"><b>Rechte</b><span id="cvCaps">—</span></div>
+      <div class="kv"><b>Verbindung</b><span id="cvLink">live</span></div>
+    </div>
+    <button class="ghost" id="reconnBtn">Neu verbinden</button>
+    <button class="ghost" id="forgetBtn">Gerät abmelden (Kopplung löschen)</button>
+    <div class="err" id="connErr"></div>
+  </div>
+
+  <div class="foot" id="foot">BrainBox · Geräte-Kanal</div>
+</div>
+
+<script src="bbx-bundle.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var RELAY_URL = "wss://rz.brainarbeit.com/";
+  var BOX_ID_PUB = "fd4a012d6be6ff721d225a7d4c2d1decaf2e6b712020fd42a8c61fedbf4b65cc";
+  var BOX_SX_PUB = "a44fc373aad4a6fcf56406b438e90debd58ce6d12330032d40ae2c9ff5c8256a";
+  var DB="brainbox-device", STORE="kv", KEY="identity";
+
+  var $=function(id){return document.getElementById(id)};
+  function setStatus(txt, kind){ $("statusText").textContent=txt; var d=$("dot"); d.className="dot"+(kind?(" "+kind):""); }
+  function show(id){ $(id).classList.remove("hidden"); } function hide(id){ $(id).classList.add("hidden"); }
+
+  if(!window.BBX || !("indexedDB" in window) || !("WebSocket" in window)){
+    setStatus("Dieser Browser wird nicht unterstützt.", "bad"); return;
+  }
+  var BBX=window.BBX;
+
+  function idb(){return new Promise(function(res,rej){var r=indexedDB.open(DB,1);
+    r.onupgradeneeded=function(){r.result.createObjectStore(STORE)};r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)};});}
+  function kvGet(k){return idb().then(function(db){return new Promise(function(res,rej){
+    var t=db.transaction(STORE,"readonly").objectStore(STORE).get(k);t.onsuccess=function(){res(t.result||null)};t.onerror=function(){rej(t.error)};});});}
+  function kvSet(k,v){return idb().then(function(db){return new Promise(function(res,rej){
+    var tx=db.transaction(STORE,"readwrite");tx.objectStore(STORE).put(v,k);tx.oncomplete=function(){res()};tx.onerror=function(){rej(tx.error)};});});}
+  function kvDel(k){return idb().then(function(db){return new Promise(function(res,rej){
+    var tx=db.transaction(STORE,"readwrite");tx.objectStore(STORE).delete(k);tx.oncomplete=function(){res()};tx.onerror=function(){rej(tx.error)};});});}
+
+  function newChannel(keys){
+    return new BBX.DeviceChannel({
+      relayUrl:RELAY_URL, topic:BBX.rendezvousTopic(BBX.unhex(BOX_SX_PUB)),
+      boxIdPub:BOX_ID_PUB, boxSxPub:BOX_SX_PUB, keys:keys, WebSocketImpl:WebSocket
+
+    });
+  }
+
+  function showConnected(hello){
+    hide("pairCard"); show("connCard");
+    setStatus("Verbunden · "+ (hello.principal||"—"), "ok");
+    $("cvPrincipal").textContent = hello.principal||"—";
+    $("cvCaps").textContent = (hello.caps&&hello.caps.length)? hello.caps.join(", ") : "—";
+    $("cvLink").textContent = "live · Ende-zu-Ende";
+  }
+
+  function reconnect(rec){
+    setStatus("Verbinde mit deiner Box…", "work");
+    var dc=newChannel(rec.keys);
+    return dc.connect().then(function(){ return dc.hello(rec.token); }).then(function(hi){
+      if(hi.t!=="hello_ok"){ throw new Error(hi.error||("abgelehnt ("+hi.t+")")); }
+      showConnected(hi); try{dc.close();}catch(e){}
+    });
+  }
+
+  function doPair(){
+    var code=$("code").value.trim(), totp=$("totp").value.trim();
+    $("pairErr").textContent="";
+    if(!code){ $("pairErr").textContent="Bitte den Kopplungs-Code eingeben."; return; }
+    $("pairBtn").disabled=true; setStatus("Koppeln…","work");
+    var keys=BBX.generateKeys(), dc=newChannel(keys), token=null;
+    dc.connect().then(function(){
+      return dc.pair(code, totp, "Handy (app.brainarbeit.com)");
+    }).then(function(r){
+      if(r.t!=="pair_ok"){
+        if(r.need_2fa){ throw new Error("2-Faktor-Code fehlt oder ist falsch/abgelaufen — neuen Code eingeben."); }
+        throw new Error(r.error||"Kopplung fehlgeschlagen — Code prüfen.");
+      }
+      token=r.token;
+      try{dc.close();}catch(e){}
+      return kvSet(KEY, {keys:keys, token:token, boxIdPub:BOX_ID_PUB, boxSxPub:BOX_SX_PUB, principal:r.principal});
+    }).then(function(){
+
+      return reconnect({keys:keys, token:token});
+    }).catch(function(e){
+      $("pairBtn").disabled=false; setStatus("Kopplung fehlgeschlagen","bad");
+      $("pairErr").textContent = (e&&e.message)?e.message:String(e);
+      try{dc.close();}catch(x){}
+    });
+  }
+
+  function startPairing(){ hide("connCard"); show("pairCard"); setStatus("Noch nicht gekoppelt — Code eingeben","bad"); }
+
+  $("pairBtn").addEventListener("click", doPair);
+  $("totp").addEventListener("keydown", function(e){ if(e.key==="Enter") doPair(); });
+  $("reconnBtn").addEventListener("click", function(){
+    kvGet(KEY).then(function(rec){ if(rec&&rec.token) return reconnect(rec); startPairing(); })
+      .catch(function(e){ setStatus("Fehler beim Verbinden","bad"); $("connErr").textContent=e.message||String(e); });
+  });
+  $("forgetBtn").addEventListener("click", function(){
+    kvDel(KEY).then(function(){ startPairing(); $("code").value=""; $("totp").value=""; });
+  });
+
+  kvGet(KEY).then(function(rec){
+    if(rec && rec.token && rec.keys){
+      return reconnect(rec).catch(function(e){
+        setStatus("Verbindung fehlgeschlagen","bad");
+        show("connCard"); $("connErr").textContent=(e&&e.message?e.message:String(e))+" — „Neu verbinden“ versuchen.";
+      });
+    }
+    startPairing();
+  }).catch(function(e){ setStatus("Speicher-Fehler: "+(e.message||e),"bad"); startPairing(); });
+})();
+</script>
+</body>
+</html>

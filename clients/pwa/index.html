@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Brainarbeit Connect</title>
+  <meta name="theme-color" content="#0b0f14" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob: mediastream:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">Brainarbeit <span>Connect</span></div>
+    <div id="status" class="status">offline</div>
+  </header>
+
+  
+  <section id="pair-card" class="card hidden">
+    <h2>Set up this device — once</h2>
+    <p class="muted">Enter the one-time code from your box plus a 2-factor code. After that you
+      connect with one button, forever.</p>
+    <label>Box address <input id="pair-base" placeholder="https://your-box.local:8800" /></label>
+    <label>Pairing code <input id="pair-code" placeholder="from pn-pair" /></label>
+    <label>2FA code <input id="pair-totp" inputmode="numeric" placeholder="6 digits (REQUIRED)" /></label>
+    <label>Device label <input id="pair-label" placeholder="e.g. Chris phone" /></label>
+    <button id="pair-btn" class="primary">Pair this device</button>
+    <div id="pair-msg" class="msg"></div>
+  </section>
+
+  
+  <main id="app" class="hidden">
+    <nav class="tabs">
+      <button data-view="inbox" class="active">Approvals</button>
+      <button data-view="compose">New task</button>
+      <button data-view="watch">Watch</button>
+    </nav>
+
+    
+    <section id="view-inbox" class="view">
+      <h2>Approvals <span id="inbox-count" class="pill">0</span></h2>
+      <div id="inbox" class="inbox"></div>
+      <p id="inbox-empty" class="muted">Nothing waiting. Your box will surface anything that needs
+        your yes here — live, on every device.</p>
+    </section>
+
+    
+    <section id="view-compose" class="view hidden">
+      <h2>Hand it a task</h2>
+      <textarea id="compose-text" placeholder="Type, or tap the mic to speak…"></textarea>
+      <div class="intake-row">
+        <button id="btn-send" class="primary">Send</button>
+        <button id="btn-mic" title="Voice message">🎤 Voice msg</button>
+        <button id="btn-call" title="Live two-way call">📞 Call</button>
+        <button id="btn-video" title="Video call">🎥 Video</button>
+        <button id="btn-screen" title="Share your screen with the box">🖥️ Share screen</button>
+        <button id="btn-photo" title="Snap a photo">📷 Photo</button>
+        <label class="filebtn">📎 File<input id="file-input" type="file" multiple hidden /></label>
+      </div>
+      <label class="muted">Reference a path on the box
+        <input id="compose-path" placeholder="/srv/share/report.pdf" /></label>
+      <div id="compose-msg" class="msg"></div>
+    </section>
+
+    
+    <section id="view-watch" class="view hidden">
+      <h2>Watch &amp; talk</h2>
+      <p class="muted">See the box work and talk to it both ways.</p>
+      <video id="remote-video" autoplay playsinline></video>
+      <img id="watch-img" class="watch" alt="live screen" />
+      <div class="intake-row">
+        <button id="btn-watch-mjpeg">Watch (screen stream)</button>
+        <button id="btn-hangup" class="danger hidden">Hang up</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

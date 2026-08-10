@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+
+import os, sys, json, argparse, getpass, subprocess
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+
+from pnlib import ipc
+
+LLM_SOCK = os.environ.get("PN_LLM_SOCK") or os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pn-llmd.sock")
+
+def _call(req, timeout=30):
+    try:
+        return ipc.send_request(req, timeout=timeout, path=LLM_SOCK)
+    except (FileNotFoundError, ConnectionRefusedError):
+        sys.stderr.write("pn-byobrain: pn-llmd not running (no socket)\n"); sys.exit(3)
+
+def _setcred(value, kind):
+
+    resp = _call({"verb": "setcred", "value": value, "brain_kind": kind})
+
+    value = "\0" * len(value); del value
+    if not resp.get("ok"):
+        sys.stderr.write(f"pn-byobrain: setcred failed: {resp.get('error')}\n"); sys.exit(1)
+    print(json.dumps({"set": True, "kind": resp.get("kind"),
+                      "sealed_with": resp.get("sealed_with"), "binding": resp.get("binding"),
+                      "fingerprint": resp.get("fingerprint")}, indent=2))
+
+def cmd_max_token(a):
+
+    if a.value == "-":
+        tok = sys.stdin.readline().strip()
+    elif a.value:
+        tok = a.value
+    else:
+        sys.stderr.write("Running `claude setup-token` — open the URL it prints, approve,\n"
+                         "then it will emit the long-lived token (captured, never echoed).\n")
+        try:
+            out = subprocess.run(["claude", "setup-token"], capture_output=True, text=True,
+                                 timeout=600)
+        except FileNotFoundError:
+            sys.stderr.write("pn-byobrain: `claude` CLI not found\n"); sys.exit(3)
+
+        lines = [l.strip() for l in out.stdout.splitlines() if l.strip()]
+        tok = next((l for l in reversed(lines) if l.startswith("sk-")), lines[-1] if lines else "")
+        if not tok:
+            sys.stderr.write("pn-byobrain: did not capture a token from `claude setup-token`\n")
+            sys.exit(1)
+    _setcred(tok, "max-token")
+
+def cmd_api_key(a):
+    val = (sys.stdin.readline().strip() if a.value == "-"
+           else a.value or getpass.getpass("Anthropic API key (masked): "))
+    if not val:
+        sys.stderr.write("pn-byobrain: empty API key\n"); sys.exit(1)
+    _setcred(val, "api-key")
+
+def cmd_codex(a):
+    val = (sys.stdin.readline().strip() if a.value == "-"
+           else a.value or getpass.getpass("Codex token (masked): "))
+    if not val:
+        sys.stderr.write("pn-byobrain: empty token\n"); sys.exit(1)
+    _setcred(val, "codex")
+
+def cmd_status(a):
+    resp = _call({"verb": "status"})
+    print(json.dumps({"credential": resp.get("credential"), "backend": resp.get("backend"),
+                      "degraded": resp.get("degraded"),
+                      "degraded_reason": resp.get("degraded_reason")}, indent=2))
+
+def main():
+    p = argparse.ArgumentParser(prog="pn-byobrain")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name in ("max-token", "api-key", "codex"):
+        sp = sub.add_parser(name)
+        sp.add_argument("--value", help="value, or '-' to read one line from stdin")
+    sub.add_parser("status")
+    a = p.parse_args()
+    {"max-token": cmd_max_token, "api-key": cmd_api_key, "codex": cmd_codex,
+     "status": cmd_status}[a.cmd](a)
+
+if __name__ == "__main__":
+    main()

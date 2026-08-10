@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import net
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args and not args[0].startswith("-") else "status"
+    conf = args[args.index("--conf") + 1] if "--conf" in args else net.CONF
+    cfg = net.load_conf(conf)
+    if not cfg.get("IFACE"):
+        sys.stderr.write(f"pn-net: no egress interface (set IFACE in {conf})\n"); sys.exit(2)
+    if os.geteuid() != 0 and cmd in ("apply", "clear"):
+        sys.stderr.write("pn-net: apply/clear require root\n"); sys.exit(2)
+
+    if cmd == "apply":
+        if str(cfg.get("ENABLE", "1")).lower() not in ("1", "yes", "true", "on"):
+            print("pn-net: ENABLE is off -> clearing any existing shaping")
+            for l in net.clear(cfg):
+                print(l)
+            return
+        ok, log = net.apply(cfg)
+        for l in log:
+            print(l)
+        sys.exit(0 if ok else 1)
+    elif cmd == "clear":
+        for l in net.clear(cfg):
+            print(l)
+    elif cmd == "status":
+        print(net.status(cfg))
+    else:
+        sys.stderr.write("usage: pn-net apply|clear|status [--conf PATH]\n"); sys.exit(2)
+
+if __name__ == "__main__":
+    main()

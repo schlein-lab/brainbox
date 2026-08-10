@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+SNAP_ROOT=/snap
+SNAP_IMG_DIR=/var/lib/snapd/snaps
+ENV_FILE="${SNAP_RUN_ENV_FILE:-$HOME/.env}"
+ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+case "$ARCH" in
+  amd64)   TRIPLET=x86_64-linux-gnu ;;
+  arm64)   TRIPLET=aarch64-linux-gnu ;;
+  armhf)   TRIPLET=arm-linux-gnueabihf ;;
+  ppc64el) TRIPLET=powerpc64le-linux-gnu ;;
+  *)       TRIPLET=x86_64-linux-gnu ;;
+esac
+
+log()  { printf '[snap-run] %s\n' "$*" >&2; }
+die()  { printf '[snap-run] ERROR: %s\n' "$*" >&2; exit 1; }
+
+root_sh() {
+  local script="$1"
+  if [ "$(id -u)" = 0 ]; then
+    bash -c "$script"
+  else
+    ( set -a; . "$ENV_FILE" 2>/dev/null; set +a
+      [ -n "${SUDO_PASSWORD:-}" ] || { echo "no SUDO_PASSWORD in $ENV_FILE" >&2; exit 90; }
+      printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' bash -c "$script"
+    ) 2> >(grep -v 'Hostname .* nicht auf\|Hostname .* resolve\|sudo: unable to resolve host\|Passwort für' >&2)
+  fi
+}
+
+resolve_rev() {
+  local name="$1" rev
+  rev="$(readlink "$SNAP_ROOT/$name/current" 2>/dev/null)"
+  if [ -z "$rev" ]; then
+    rev="$(root_sh "ls -1 '$SNAP_ROOT/$name' 2>/dev/null | grep -E '^[0-9]+\$' | sort -n | tail -1")"
+  fi
+  [ -n "$rev" ] || return 1
+  printf '%s' "$rev"
+}
+
+img_for() {
+  local name="$1" rev="$2" p="$SNAP_IMG_DIR/${1}_${2}.snap"
+  if root_sh "test -f '$p'"; then printf '%s' "$p"; return 0; fi
+  root_sh "ls -1 '$SNAP_IMG_DIR/${name}_'*.snap 2>/dev/null | sort -V | tail -1"
+}
+
+SNAPNAME=""; APPNAME=""; DRYRUN=0; DO_UMOUNT=0
+declare -a APP_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --app)      APPNAME="$2"; shift 2 ;;
+    --dry-run)  DRYRUN=1; shift ;;
+    --umount|--unmount) DO_UMOUNT=1; shift ;;
+    --env-file) ENV_FILE="$2"; shift 2 ;;
+    -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
+    --)         shift; APP_ARGS=("$@"); break ;;
+    -*)         die "unknown option: $1" ;;
+    *)          if [ -z "$SNAPNAME" ]; then SNAPNAME="$1"; shift
+                else APP_ARGS+=("$1"); shift; fi ;;
+  esac
+done
+[ -n "$SNAPNAME" ] || die "usage: snap-run <snapname> [--app <app>] [-- args...]"
+
+if [ "$DO_UMOUNT" = 1 ]; then
+  REV="$(resolve_rev "$SNAPNAME")" || die "cannot resolve revision for $SNAPNAME"
+  DEST="$SNAP_ROOT/$SNAPNAME/$REV"
+  KEY="$(printf '%s' "$DEST" | tr '/' '_')"
+  SCRATCH="/run/snap-run/$KEY"
+  log "tearing down $SNAPNAME ($REV)"
+  root_sh "
+    for m in \$(mount | awk '{print \$3}' | grep -F '$DEST/' | sort -r); do
+      umount -l \"\$m\" 2>/dev/null && echo '  umount '\"\$m\" >&2
+    done
+    umount -l '$DEST' 2>/dev/null && echo '  umount $DEST' >&2 || true
+    mountpoint -q '$SCRATCH/lower' && umount -l '$SCRATCH/lower' 2>/dev/null
+    mountpoint -q '$SCRATCH'       && umount -l '$SCRATCH' 2>/dev/null
+    rmdir '$SCRATCH/lower' '$SCRATCH/upper' '$SCRATCH/work' '$SCRATCH' 2>/dev/null || true
+  "
+  log "teardown complete for $SNAPNAME"
+  exit 0
+fi
+
+REV="$(resolve_rev "$SNAPNAME")" || die "snap '$SNAPNAME' not found under $SNAP_ROOT"
+IMG="$(img_for "$SNAPNAME" "$REV")"
+[ -n "$IMG" ] || die "no squashfs image for $SNAPNAME rev $REV in $SNAP_IMG_DIR"
+SNAP="$SNAP_ROOT/$SNAPNAME/$REV"
+log "resolved $SNAPNAME rev $REV  img=$(basename "$IMG")"
+
+KEY="$(printf '%s' "$SNAP" | tr '/' '_')"
+SCRATCH="/run/snap-run/$KEY"
+root_sh "
+  set -e
+  if mountpoint -q '$SNAP' && [ -n \"\$(ls -A '$SNAP' 2>/dev/null)\" ]; then
+    exit 0   # already mounted, idempotent
+  fi
+  mkdir -p '$SNAP' '$SCRATCH'
+  mountpoint -q '$SCRATCH' || mount -t tmpfs -o mode=0755 snap-run-scratch '$SCRATCH'
+  mkdir -p '$SCRATCH/lower' '$SCRATCH/upper' '$SCRATCH/work'
+  mountpoint -q '$SCRATCH/lower' || mount -t squashfs -o ro,loop '$IMG' '$SCRATCH/lower'
+  mount -t overlay overlay -o lowerdir='$SCRATCH/lower',upperdir='$SCRATCH/upper',workdir='$SCRATCH/work' '$SNAP'
+" || die "overlay mount failed for $SNAPNAME"
+log "app mounted (rw overlay over ro squashfs) at $SNAP"
+
+BASE="$(root_sh "awk -F': *' '/^base:/{gsub(/[ \r\n]/,\"\",\$2);print \$2;exit}' '$SNAP/meta/snap.yaml'")"
+[ -n "$BASE" ] && log "base snap: $BASE"
+
+APP_META="$(root_sh "awk -v want='$APPNAME' -v snapname='$SNAPNAME' '
+  BEGIN{inapps=0;cur=\"\";incc=0}
+  /^apps:/{inapps=1;next}
+  inapps && /^[a-zA-Z]/{inapps=0}
+  inapps && /^  [a-zA-Z0-9_.-]+:/{cur=\$1;sub(/:.*/,\"\",cur);sub(/^ +/,\"\",cur);order[++n]=cur;incc=0;next}
+  inapps && cur!=\"\"{
+    if (\$0 ~ /^    command:/){v=\$0;sub(/^    command: */,\"\",v);cmd[cur]=v}
+    if (\$0 ~ /^    command-chain:/){incc=1;next}
+    if (incc){ if (\$0 ~ /^    - /){e=\$0;sub(/^    - */,\"\",e);cc[cur]=cc[cur] e \"\\n\"} else if (\$0 !~ /^     /){incc=0} }
+  }
+  END{
+    app=want
+    if (app==\"\"){ if (snapname in cmd) app=snapname; else app=order[1] }
+    print \"APP=\" app
+    print \"COMMAND=\" cmd[app]
+    printf \"CHAIN_BEGIN\\n%sCHAIN_END\\n\", cc[app]
+  }' '$SNAP/meta/snap.yaml'")"
+
+APP="$(printf '%s' "$APP_META" | sed -n 's/^APP=//p' | head -1)"
+COMMAND="$(printf '%s' "$APP_META" | sed -n 's/^COMMAND=//p' | head -1)"
+CHAIN="$(printf '%s' "$APP_META" | awk '/^CHAIN_BEGIN$/{f=1;next}/^CHAIN_END$/{f=0}f{print}')"
+[ -n "$APP" ] || APP="$SNAPNAME"
+[ -n "$COMMAND" ] || die "no command for app '$APP' in $SNAP/meta/snap.yaml"
+COMMAND="$(printf '%s' "$COMMAND" | sed "s/^['\"]//;s/['\"]$//;s/^ *//;s/ *$//")"
+log "app=$APP  command=$COMMAND"
+
+CONTENT_TARGETS="$(root_sh "grep -oE 'target: \\\$SNAP/[^ ]+' '$SNAP/meta/snap.yaml' | sed 's|target: \\\$SNAP/||' | sort -u")"
+want_target() { printf '%s\n' "$CONTENT_TARGETS" | grep -qx "$1"; }
+GNOME_SNAP=""
+for g in gnome-46-2404 gnome-42-2204; do
+  if root_sh "grep -q 'default-provider: $g' '$SNAP/meta/snap.yaml'"; then GNOME_SNAP="$g"; break; fi
+done
+
+PLAN=""
+add_ro() {
+  PLAN+="
+    if ! ( mountpoint -q '$2' && [ -n \"\$(ls -A '$2' 2>/dev/null)\" ] ); then
+      mkdir -p '$2'; mount -t squashfs -o ro,loop '$1' '$2' && echo '[mnt] ro $1 -> $2' >&2
+    fi"
+}
+add_bind() {
+  PLAN+="
+    if ! mountpoint -q '$2'; then
+      mkdir -p '$2'; mount --bind '$1' '$2' && mount -o remount,ro,bind '$2' 2>/dev/null; echo '[bind] $1 -> $2' >&2
+    fi"
+}
+
+if [ -n "$BASE" ] && [ "$BASE" != bare ] && [ "$BASE" != core ]; then
+  BREV="$(resolve_rev "$BASE" || true)"
+  if [ -n "$BREV" ]; then
+    BIMG="$(img_for "$BASE" "$BREV")"
+    [ -n "$BIMG" ] && add_ro "$BIMG" "$SNAP_ROOT/$BASE/$BREV"
+  fi
+fi
+
+if [ -n "$GNOME_SNAP" ] && want_target gnome-platform; then
+  GREV="$(resolve_rev "$GNOME_SNAP")"; GIMG="$(img_for "$GNOME_SNAP" "$GREV")"
+  add_ro "$GIMG" "$SNAP_ROOT/$GNOME_SNAP/$GREV"
+  add_bind "$SNAP_ROOT/$GNOME_SNAP/$GREV" "$SNAP/gnome-platform"
+fi
+
+if want_target gpu-2404; then
+  MREV="$(resolve_rev mesa-2404)"; MIMG="$(img_for mesa-2404 "$MREV")"
+  if [ -n "$MREV" ] && [ -n "$MIMG" ]; then
+    add_ro "$MIMG" "$SNAP_ROOT/mesa-2404/$MREV"
+    add_bind "$SNAP_ROOT/mesa-2404/$MREV" "$SNAP/gpu-2404"
+  fi
+fi
+
+if want_target data-dir/themes || want_target data-dir/icons || want_target data-dir/sounds; then
+  TREV="$(resolve_rev gtk-common-themes)"; TIMG="$(img_for gtk-common-themes "$TREV")"
+  if [ -n "$TREV" ] && [ -n "$TIMG" ]; then
+    TDIR="$SNAP_ROOT/gtk-common-themes/$TREV"
+    add_ro "$TIMG" "$TDIR"
+    want_target data-dir/themes && add_bind "$TDIR/share/themes" "$SNAP/data-dir/themes"
+    want_target data-dir/icons  && add_bind "$TDIR/share/icons"  "$SNAP/data-dir/icons"
+    want_target data-dir/sounds && add_bind "$TDIR/share/sounds" "$SNAP/data-dir/sounds"
+  fi
+fi
+
+if [ -n "$PLAN" ]; then
+  root_sh "set -e; $PLAN" || die "content mount plan failed"
+fi
+
+export SNAP="$SNAP"
+export SNAP_NAME="$SNAPNAME"
+export SNAP_INSTANCE_NAME="$SNAPNAME"
+export SNAP_REVISION="$REV"
+export SNAP_ARCH="$ARCH"
+export SNAP_LIBRARY_PATH="/var/lib/snapd/lib/gl:/var/lib/snapd/lib/gl32:/var/lib/snapd/void"
+export SNAP_DATA="/var/snap/$SNAPNAME/$REV"
+export SNAP_COMMON="/var/snap/$SNAPNAME/common"
+export SNAP_USER_DATA="$HOME/snap/$SNAPNAME/$REV"
+export SNAP_USER_COMMON="$HOME/snap/$SNAPNAME/common"
+export SNAP_REAL_HOME="$HOME"
+export SNAP_UID="$(id -u)"
+: "${XDG_RUNTIME_DIR:=/run/user/$SNAP_UID}"
+export XDG_RUNTIME_DIR
+
+mkdir -p "$SNAP_USER_DATA" "$SNAP_USER_COMMON" \
+         "$SNAP_USER_COMMON/.cache" "$SNAP_USER_DATA/.config" 2>/dev/null || true
+root_sh "mkdir -p '$SNAP_DATA' '$SNAP_COMMON' 2>/dev/null" || true
+
+export SNAP_DESKTOP_RUNTIME="$SNAP/gnome-platform"
+XDG_DATA_DIRS_NEW="$SNAP/usr/share:$SNAP/share:$SNAP/data-dir"
+[ -n "$GNOME_SNAP" ] && XDG_DATA_DIRS_NEW="$XDG_DATA_DIRS_NEW:$SNAP/gnome-platform/usr/share"
+export XDG_DATA_DIRS="$XDG_DATA_DIRS_NEW:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+LDP="$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$TRIPLET:$SNAP/usr/lib/$TRIPLET"
+if [ -n "$GNOME_SNAP" ]; then
+  LDP="$LDP:$SNAP/gnome-platform/lib/$TRIPLET:$SNAP/gnome-platform/usr/lib/$TRIPLET:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/lib"
+fi
+export LD_LIBRARY_PATH="$LDP${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GTK_PATH="$SNAP/gnome-platform/usr/lib/$TRIPLET/gtk-3.0"
+export GDK_PIXBUF_MODULE_FILE="$SNAP/gnome-platform/usr/lib/$TRIPLET/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+export FONTCONFIG_PATH="$SNAP/gnome-platform/etc/fonts"
+export FONTCONFIG_FILE="$SNAP/gnome-platform/etc/fonts/fonts.conf"
+
+SHIM_DIR="$SCRATCH/shim"
+CONNECTED_PLUGS="gnome-46-2404 gnome-42-2204 gpu-2404 gtk-3-themes icon-themes sound-themes desktop desktop-launch wayland x11 opengl"
+root_sh "
+  mkdir -p '$SHIM_DIR'
+  cat > '$SHIM_DIR/snapctl' <<'SHIM_EOF'
+#!/bin/sh
+# snap-run snapctl shim (no snapd on this box)
+case \"\$1\" in
+  is-connected)
+    plug=\"\$2\"
+    for p in $CONNECTED_PLUGS; do [ \"\$p\" = \"\$plug\" ] && exit 0; done
+    exit 1 ;;
+  *) exit 0 ;;
+esac
+SHIM_EOF
+  chmod +x '$SHIM_DIR/snapctl'
+  chmod 0755 '$SHIM_DIR'
+"
+export PATH="$SHIM_DIR:$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
+
+declare -a EXEC=()
+while IFS= read -r c; do [ -n "$c" ] && EXEC+=("$SNAP/$c"); done <<< "$CHAIN"
+CMD_PARTS=($COMMAND)
+CMD_PARTS[0]="$SNAP/${CMD_PARTS[0]}"
+EXEC+=("${CMD_PARTS[@]}")
+[ ${#APP_ARGS[@]} -gt 0 ] && EXEC+=("${APP_ARGS[@]}")
+
+log "SNAP=$SNAP"
+log "exec: ${EXEC[*]}"
+
+if [ "$DRYRUN" = 1 ]; then
+  log "dry-run: not executing."
+  { echo "SNAP=$SNAP"; echo "SNAP_DESKTOP_RUNTIME=$SNAP_DESKTOP_RUNTIME";
+    echo "XDG_DATA_DIRS=$XDG_DATA_DIRS"; echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH";
+    echo "PATH=$PATH"; } >&2
+  exit 0
+fi
+
+exec "${EXEC[@]}"

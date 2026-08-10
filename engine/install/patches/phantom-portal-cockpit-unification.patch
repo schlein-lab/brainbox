@@ -1,0 +1,388 @@
+# Cockpit-unification patch for phantom-portal (the LAN cockpit adapter, lives outside this repo).
+#
+# WHY (architecture §9 the one contract + the one event bus, §12 multi-tenant event path):
+# the deployed phantom-portal keeps its OWN second queue (~/.local/share/phantom-portal/jobs.db
+# + an in-process worker loop) for "commissions", separate from pnd's governed queue. That means
+# two queues, two records, two truths — and the portal's live views (/ws/feed room tail, /api/jobs
+# poll) are NOT the typed event bus, so they can desync and carry no per-principal scoping. P2b
+# closes this on the ENGINE side (typed `job_events` bus with per-principal topics + reconnect
+# replay, a `subscribe` stream on the pnd socket, a single Canonical View Model, and the
+# steer/approve/deny verbs). This patch lands the PORTAL side of the unification:
+#
+#   1. jobs.db is RETIRED. A commission becomes a pnd `task_type:commission.build` job (seeded in
+#      pnlib/db.seed_v3): same single queue, same admission gating, same enforced Record, same
+#      typed bus as every other job. POST /api/queue + /api/jobs submit commission.build with the
+#      goal as a VETTED param (no shell concat); the new `_commission_goal` entrypoint runs the
+#      build->review protocol INSIDE pnd's per-job workspace. The legacy jobs.db worker is not
+#      started; delete jobs.db after applying:  rm ~/.local/share/phantom-portal/jobs.db
+#   2. The portal points at the ONE event bus: a new /ws/events endpoint bridges the browser to
+#      pnd's streaming `subscribe` verb (per-principal authorized SERVER-SIDE), and the queue tab
+#      subscribes to it for realtime updates + reconnect replay (?after=<last_event_id>) instead
+#      of pure polling. The Canonical View Model is surfaced on /api/queue/<id>.
+#   3. The confirmation gate + steer reach the portal: /api/queue/approve (idempotent approve/deny
+#      of a staged commission) and /api/queue/<id>/steer (live feedback into a running job).
+#
+# Because commission.build is needs_confirmation, a commission parks `staged` with a single-use
+# nonce; the portal auto-approves on submit unless {"hold":true} is passed (then the operator
+# confirms via /api/queue/approve). per-principal: the portal resolves a default topic
+# (user/<principal>); pnd RE-RESOLVES the principal from peercred/broker and authorizes topics
+# there, so the portal can never widen access. Full per-user web_users login is a later strand.
+#
+# This is a PORTAL-side + deploy-time change, delivered as an apply-during-maintenance-window
+# patch (NOT applied live by this PR — no live deploy, no service restart). ORDER: apply
+# phantom-portal-rce-removal.patch FIRST (or note the raw-cmd branch is already removed there;
+# this patch's /api/queue POST also drops the raw path), then this one. Apply with:
+#   cd ~/.local/bin && patch -p0 < /path/to/phantom-portal-cockpit-unification.patch
+#   (the diff targets the bare file `phantom-portal`, so run it from ~/.local/bin)
+# THEN: rm ~/.local/share/phantom-portal/jobs.db ; restart phantom-portal (under uid 4003 per S2).
+--- phantom-portal
++++ phantom-portal
+@@ -590,6 +590,46 @@
+         except Exception:
+             break
+ 
++def ws_events(conn, topics, after_id=None):
++    """COCKPIT UNIFICATION (architecture §9/§12): bridge the browser to pnd's ONE typed event
++    bus. We open a streaming `subscribe` on the pnd socket (per-principal authorized SERVER-SIDE
++    from the portal's peercred/broker identity — the portal never gets a topic it isn't entitled
++    to) and forward each newline-JSON event frame to the browser as a WS text frame. The browser
++    passes ?topics=user/<me>&topics=job/<id> and, on reconnect, &after=<last_event_id> so it gets
++    exactly the delta it missed (reconnect replay -> no permanent desync)."""
++    req = {"verb": "subscribe", "topics": topics}
++    if after_id is not None:
++        req["after_id"] = after_id
++    try:
++        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        s.settimeout(None)
++        s.connect(PN_SOCK)
++        s.sendall((json.dumps(req) + "\n").encode())
++    except Exception as e:
++        try:
++            ws_send(conn, json.dumps({"type": "error", "error": f"pnd: {e}"}))
++        except Exception:
++            pass
++        return
++    buf = b""
++    try:
++        while True:
++            ch = s.recv(65536)
++            if not ch:
++                break
++            buf += ch
++            while b"\n" in buf:
++                line, buf = buf.split(b"\n", 1)
++                if line.strip():
++                    ws_send(conn, line.decode("utf-8", "replace"))
++    except Exception:
++        pass
++    finally:
++        try:
++            s.close()
++        except Exception:
++            pass
++
+ def list_rooms():
+     base = os.path.join(HOME, ".local", "state", "phantom-rooms")
+     out = []
+@@ -647,6 +687,11 @@
+         c.commit(); c.close()
+ 
+ def job_log(jid, line):
++    # cockpit unification: a unified (pnd-run) commission has no jobs.db row (jid is None) — its
++    # live log IS the pnd job's stdout/log + the typed bus. Mirror the line to stdout and skip the
++    # jobs.db write so the legacy + unified runners share wait_seal/room_phase unchanged.
++    if jid is None:
++        print(line); return
+     with _DBLOCK:
+         c = db(); c.execute("UPDATE jobs SET log=COALESCE(log,'')||? WHERE id=?", (line + "\n", jid)); c.commit(); c.close()
+ 
+@@ -834,6 +879,48 @@
+     run_commission(jid)
+ 
+ 
++def run_commission_unified(goal):
++    """COCKPIT UNIFICATION: the commission protocol run as a pnd `commission.build` job. There is
++    NO portal jobs.db row — pnd's job + its enforced Record (work/ artifacts/ provenance) IS the
++    bookkeeping. Invoked by pnd via the commission.build cmd_template with the vetted {goal}.
++    Runs INSIDE pnd's per-job workspace ($PN_WORKSPACE) and reports progress on the typed bus via
++    `pn progress`/`pn checkpoint` (so the portal's /ws/events feed shows it live, like any job)."""
++    goal = (goal or "").strip()
++    if not goal:
++        print("commission: leeres Ziel"); return 2
++    ws = os.environ.get("PN_WORKSPACE") or os.getcwd()
++    jid = os.environ.get("PN_JOB_ID", "0")
++    cwd = os.path.join(ws, "work")
++    os.makedirs(os.path.join(ws, "artifacts"), exist_ok=True)
++    os.makedirs(os.path.join(cwd, "inbox"), exist_ok=True)
++    open(os.path.join(cwd, "goal.txt"), "w").write(goal)
++    room = f"auftrag-{jid}"
++    _pnprog(1, 3, f"build · {room}")
++    subprocess.run([PR, "new", room, "--agents", "2", "--cwd", cwd, "--force", "--cap", "16"], capture_output=True)
++    # phase 1: build (2 builders, 2 self-iterations) — artifacts land in ws/artifacts.
++    wait_seal(room, None, since_off=0, timeout=150, quiet=True)
++    off = feed_size(room); pr_send(room,
++        "ZIEL (steht 1:1 in goal.txt): " + goal + " — Anhaenge liegen in work/inbox/. Baut das Artefakt. "
++        "Iteriert GENAU ZWEIMAL: bauen, kritisch gegen das ZIEL pruefen, verbessern. Endergebnis nach ../artifacts/ "
++        "(Dateiname mit Zeitstempel). Notiert in BUILD.md. Nach den 2 Iterationen mit dem DONE-Token beenden.")
++    wait_seal(room, None, since_off=off, timeout=1800, min_elapsed=20)
++    _pnprog(2, 3, "review")
++    subprocess.run([PR, "delete", room], capture_output=True)
++    rroom = f"{room}-rev"
++    subprocess.run([PR, "new", rroom, "--agents", "2", "--cwd", cwd, "--force", "--cap", "16"], capture_output=True)
++    wait_seal(rroom, None, since_off=0, timeout=150, quiet=True)
++    off = feed_size(rroom); pr_send(rroom,
++        "ZIEL (goal.txt): " + goal + " — Das Artefakt liegt in ../artifacts/. FRISCHE Reviewer OHNE Bau-Kontext. "
++        "Prueft STRENG, bugfixt + optimiert direkt. Schreibt VERDICT.md. Dann mit dem DONE-Token beenden.")
++    wait_seal(rroom, None, since_off=off, timeout=1800, min_elapsed=20)
++    adir = os.path.join(ws, "artifacts")
++    arts = sorted(os.listdir(adir)) if os.path.isdir(adir) else []
++    _pnprog(3, 3, f"done · {len(arts)} Artefakt(e)")
++    subprocess.run([PR, "stop", rroom], capture_output=True)
++    print(f"commission done: {len(arts)} Artefakt(e) in {adir}")
++    return 0
++
++
+ WORKER_STARTED = {"v": False}
+ def start_worker():
+     if WORKER_STARTED["v"]:
+@@ -1290,16 +1377,35 @@
+   var ta=document.getElementById('qprompt'),p=ta.value.trim();
+   var type=document.getElementById('qtype').value, room=document.getElementById('qroom').value.trim();
+   if(!p){toast('Aufgabe fehlt');return;}
+-  var body=(type==='commission')?{type:'commission',prompt:p}:{type:'task',cmd:p};
++  var body=(type==='commission')?{type:'commission',prompt:p}:{type:'task',task_type:p};
+   if(room) body.room=room;
+   try{var d=await (await fetch('api/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+-    if(d.ok||d.id||d.portal_job){toast('in die Queue gelegt'); ta.value=''; qRefresh();} else toast('Fehler: '+(d.error||'?'));
++    if(d.ok||d.id||d.job){toast('in die Queue gelegt'); ta.value=''; qRefresh();} else toast('Fehler: '+(d.error||'?'));
+   }catch(e){toast('Fehler: '+e.message);}
+ }
++// COCKPIT UNIFICATION: subscribe to the ONE typed event bus so the queue updates in REALTIME on
++// every state/progress/notify event (per-principal authorized server-side). On reconnect we pass
++// the last_event_id we saw (?after=) so we replay exactly the delta we missed -> no desync. The
++// 2s poll is kept only as a fallback if the socket is unavailable.
++var qEvtCursor=null, qEvtWs=null;
++function qEventsConnect(){
++  try{var proto=location.protocol==='https:'?'wss':'ws';
++    var url=proto+'://'+location.host+'/ws/events';
++    if(qEvtCursor!=null) url+='?after='+qEvtCursor;
++    qEvtWs=new WebSocket(url);
++    qEvtWs.onmessage=function(e){ try{var m=JSON.parse(e.data);
++      if(m.type==='subscribed'){qEvtCursor=m.cursor;}
++      else if(m.type==='event'){ qEvtCursor=m.event.id;
++        if(document.querySelector('#queue.active')) qRefresh(); }
++    }catch(_){} };
++    qEvtWs.onclose=function(){ setTimeout(qEventsConnect, 2000); };  // reconnect + replay
++  }catch(e){ setTimeout(qEventsConnect, 2000); }
++}
+ (function initQueue(){
+   if(!document.getElementById('qsubmit'))return;
+   document.getElementById('qsubmit').onclick=qSubmit;
+-  qRefresh(); setInterval(function(){if(document.querySelector('#queue.active'))qRefresh();},2000);
++  qRefresh(); qEventsConnect();
++  setInterval(function(){if(document.querySelector('#queue.active')&&(!qEvtWs||qEvtWs.readyState!==1))qRefresh();},2000);
+ })();
+ """
+ 
+@@ -1333,6 +1439,15 @@
+         tok = cookie["pp_session"].value if "pp_session" in cookie else ""
+         return tok in SESSIONS
+ 
++    def principal(self):
++        """The human behind this PIN-session. Today the portal is single-PIN = the operator, so
++        this is `admin` (uid 1000, holds view:all). The default per-session topic is user/<this>.
++        NOTE: pnd is the source of truth — it re-resolves the principal SERVER-SIDE from the
++        portal's peercred (or, once the portal runs as the adapter uid, the broker on-behalf-of
++        path) and authorizes topics there. This value only picks the DEFAULT topic to subscribe;
++        it can never widen access. Per-user web_users login is a later strand (design.md)."""
++        return "admin"
++
+     def send_html(self, body, code=200, extra=None):
+         b = body.encode("utf-8") if isinstance(body, str) else body
+         self.send_response(code)
+@@ -1353,6 +1468,14 @@
+             if not self.cfg.get("caps", {}).get("cockpit"):
+                 return self.send_html("no cockpit", 404)
+             return self._ws_upgrade(ws_terminal)
++        if path == "/ws/events":          # the ONE typed event bus (cockpit unification §9/§12)
++            if not self.authed():
++                return self.send_html("unauthorized", 403)
++            qs = urllib.parse.parse_qs(u.query)
++            topics = qs.get("topics") or [f"user/{self.principal()}"]
++            after = qs.get("after", [None])[0]
++            after_id = int(after) if after and after.isdigit() else None
++            return self._ws_upgrade(lambda c: ws_events(c, topics, after_id))
+         if path == "/ws/feed":
+             if not self.authed():
+                 return self.send_html("unauthorized", 403)
+@@ -1375,7 +1498,16 @@
+             return self.send_html(json.dumps(list_attachments()), 200,
+                                   [("Content-Type", "application/json")])
+         if path == "/api/jobs":
+-            return self.send_html(json.dumps(job_list()), 200, [("Content-Type", "application/json")])
++            # COCKPIT UNIFICATION: the commission list is now just the pnd queue filtered to
++            # commission jobs (one queue) — no jobs.db. Shape kept close to the old list.
++            lst = pn_req({"verb": "list", "limit": 100})
++            jobs = [{"id": j.get("id"), "created": j.get("submitted_at"),
++                     "status": j.get("state"), "room": j.get("room"),
++                     "mode": j.get("task_type") or "commission",
++                     "prompt": (j.get("client_tag") or "")}
++                    for j in lst.get("jobs", [])
++                    if (j.get("task_type") == "commission.build" or j.get("room"))]
++            return self.send_html(json.dumps(jobs), 200, [("Content-Type", "application/json")])
+         if path == "/api/rooms":
+             return self.send_html(json.dumps(list_rooms()), 200, [("Content-Type", "application/json")])
+         if path == "/api/queue":          # unified portioneer queue + live headroom
+@@ -1401,7 +1533,9 @@
+                                       200, [("Content-Type", "application/json")])
+             j = pn_req({"verb": "job", "id": jid})
+             ev = pn_req({"verb": "events", "id": jid})
++            cvm = pn_req({"verb": "cvm", "id": jid})    # the Canonical View Model (one serializer)
+             out = dict(j); out["events"] = ev.get("events", [])
++            out["cvm"] = cvm.get("cvm")
+             return self.send_html(json.dumps(out), 200, [("Content-Type", "application/json")])
+         if path.startswith("/api/jobs/"):
+             rest = path[len("/api/jobs/"):]
+@@ -1518,41 +1652,85 @@
+             reply = voice_ask(text)
+             return self.send_html(json.dumps({"reply": reply}), 200, [("Content-Type", "application/json")])
+         if u.path == "/api/jobs":
++            # COCKPIT UNIFICATION: the legacy intake -> jobs.db is replaced by a pnd
++            # commission.build submit (one queue). Returns the pnd job id; auto-approves the
++            # confirmation gate unless `hold` is set.
+             n = int(self.headers.get("Content-Length", 0) or 0)
+             body = json.loads(self.rfile.read(n) or b"{}")
+             prompt = (body.get("prompt") or "").strip()
+             if not prompt:
+                 return self.send_html(json.dumps({"error": "prompt fehlt"}), 200, [("Content-Type", "application/json")])
+-            jid = job_create(prompt, body.get("email"), body.get("attachments"), body.get("mode", "commission"))
+-            return self.send_html(json.dumps({"id": jid, "link": job_link(jid)}), 200, [("Content-Type", "application/json")])
++            r = pn_req({"verb": "submit", "task_type": "commission.build",
++                        "params": {"goal": prompt}, "class": "commission",
++                        "reply_to": body.get("email"), "tag": "commission", "source": "portal"})
++            if r.get("ok") and r.get("nonce") and not body.get("hold"):
++                pn_req({"verb": "approve", "nonce": r["nonce"]})
++            return self.send_html(json.dumps({"id": r.get("id"), "ok": r.get("ok"),
++                "nonce": r.get("nonce"), "error": r.get("error")}), 200,
++                [("Content-Type", "application/json")])
+         if u.path == "/api/clarify":
+             n = int(self.headers.get("Content-Length", 0) or 0)
+             body = json.loads(self.rfile.read(n) or b"{}")
+             return self.send_html(json.dumps(clarify_turn(body.get("history") or [])), 200,
+                                   [("Content-Type", "application/json")])
+-        if u.path == "/api/queue":        # add a task to the unified governed queue
++        if u.path == "/api/queue":        # add a task to the unified governed queue (pnd is the ONE queue)
+             n = int(self.headers.get("Content-Length", 0) or 0)
+             body = json.loads(self.rfile.read(n) or b"{}")
+             typ = body.get("type", "commission")
+             if typ == "commission":
++                # COCKPIT UNIFICATION (architecture §9): a commission is NO LONGER a separate
++                # jobs.db row. It is a pnd `task_type:commission.build` job — same queue, same
++                # admission gating, same Record, same typed bus as everything else. The goal is a
++                # VETTED param (no shell concat); pnd builds the argv from the template. Because
++                # commission.build is needs_confirmation, pnd parks it `staged` + returns a nonce;
++                # the operator confirms via /api/queue/approve (the confirm-before-run gate).
+                 prompt = (body.get("prompt") or "").strip()
+                 if not prompt:
+                     return self.send_html('{"ok":false,"error":"prompt fehlt"}', 200, [("Content-Type", "application/json")])
+-                jid = job_create(prompt, body.get("email"), body.get("attachments"), "commission")
+-                return self.send_html(json.dumps({"ok": True, "portal_job": jid,
+-                    "room": f"auftrag-{jid[:6]}", "link": job_link(jid)}), 200,
+-                    [("Content-Type", "application/json")])
+-            # generic governed task (PIN-authed admin): run a command/shell line under portioneer
+-            cmd = body.get("cmd")
+-            if isinstance(cmd, str):
+-                cmd = ["/bin/bash", "-lc", cmd]
+-            if not cmd:
+-                return self.send_html('{"ok":false,"error":"cmd fehlt"}', 200, [("Content-Type", "application/json")])
+-            r = pn_req({"verb": "submit", "cmd": cmd, "class": body.get("class"),
+-                        "mem": body.get("mem"), "room": body.get("room"),
+-                        "tag": body.get("tag") or "portal-task", "source": "portal",
+-                        "cwd": os.path.expanduser("~"), "env": {"PATH": os.environ.get("PATH", "")}})
++                r = pn_req({"verb": "submit", "task_type": "commission.build",
++                            "params": {"goal": prompt}, "class": "commission",
++                            "room": body.get("room"), "tag": body.get("tag") or "commission",
++                            "reply_to": body.get("email"), "source": "portal"})
++                if not r.get("ok"):
++                    return self.send_html(json.dumps(r), 200, [("Content-Type", "application/json")])
++                jid = r.get("id")
++                # auto-approve unless the caller asked to hold for explicit confirmation.
++                if r.get("nonce") and not body.get("hold"):
++                    pn_req({"verb": "approve", "nonce": r["nonce"]})
++                return self.send_html(json.dumps({"ok": True, "job": jid,
++                    "nonce": r.get("nonce"), "staged": bool(r.get("nonce") and body.get("hold")),
++                    "room": (body.get("room") or f"auftrag-{jid}"),
++                    "topic": f"job/{jid}"}), 200, [("Content-Type", "application/json")])
++            # RCE REMOVED (S2 patch territory): the raw-`cmd` -> ["/bin/bash","-lc",cmd] path is
++            # gone. The only non-commission submit is a VETTED task_type routed through pnd's P0
++            # templated path; pnd resolves the principal server-side + refuses any task_type the
++            # portal's principal may not run. (This patch assumes phantom-portal-rce-removal.patch
++            # is applied first; both land at the same maintenance window.)
++            tt = body.get("task_type")
++            if not tt:
++                return self.send_html('{"ok":false,"error":"raw cmd not allowed; use task_type"}',
++                                      400, [("Content-Type", "application/json")])
++            r = pn_req({"verb": "submit", "task_type": tt, "params": body.get("params") or {},
++                        "class": body.get("class"), "mem": body.get("mem"),
++                        "room": body.get("room"), "tag": body.get("tag") or "portal-task",
++                        "source": "portal"})
+             return self.send_html(json.dumps(r), 200, [("Content-Type", "application/json")])
++        if u.path == "/api/queue/approve":   # confirm-before-run gate (idempotent at pnd)
++            n = int(self.headers.get("Content-Length", 0) or 0)
++            body = json.loads(self.rfile.read(n) or b"{}")
++            verb = "deny" if body.get("deny") else "approve"
++            return self.send_html(json.dumps(pn_req({"verb": verb, "nonce": body.get("nonce")})),
++                                  200, [("Content-Type", "application/json")])
++        if u.path.startswith("/api/queue/") and u.path.endswith("/steer"):
++            try:
++                jid = int(u.path[len("/api/queue/"):-len("/steer")])
++            except ValueError:
++                return self.send_html('{"ok":false,"error":"bad id"}', 200, [("Content-Type", "application/json")])
++            n = int(self.headers.get("Content-Length", 0) or 0)
++            body = json.loads(self.rfile.read(n) or b"{}")
++            return self.send_html(json.dumps(pn_req({"verb": "steer", "id": jid,
++                                  "input": body.get("input")})), 200,
++                                  [("Content-Type", "application/json")])
+         if u.path.startswith("/api/queue/") and u.path.endswith("/cancel"):
+             try:
+                 jid = int(u.path[len("/api/queue/"):-len("/cancel")])
+@@ -1599,8 +1777,11 @@
+         start_voiced()
+         print("voiced (Whisper+Piper) gestartet")
+     os.makedirs(JOBS_DIR, exist_ok=True)
+-    start_worker()
+-    print("job-worker bereit (Auftragsarbeit-Queue)")
++    # COCKPIT UNIFICATION (architecture §9): the portal no longer runs its OWN jobs.db queue +
++    # worker loop. Commissions are pnd `task_type:commission.build` jobs drained by pnd's single
++    # admission-gated queue (one queue, one Record, one typed bus). The legacy jobs.db worker is
++    # NOT started; jobs.db can be deleted (rm ~/.local/share/phantom-portal/jobs.db).
++    print("commission queue: unified into pnd (task_type commission.build) — kein eigener Worker")
+     bind = cfg.get("bind", "0.0.0.0"); port = cfg.get("port", 8076)
+     srv = ThreadingHTTPServer((bind, port), Handler)
+     srv.daemon_threads = True
+@@ -1639,8 +1820,7 @@
+     elif cmd == "install-voice":
+         cmd_install_voice(a[1:])
+     elif cmd == "_commission":
+-        # governed worker entrypoint, invoked by `pn run`. Load cfg for email/links, run one
+-        # commission, and mark it errored on failure so the worker won't double-run it.
++        # LEGACY governed worker entrypoint (jobs.db jid), kept for back-compat during cutover.
+         Handler.cfg = load_cfg() or {}
+         os.makedirs(JOBS_DIR, exist_ok=True)
+         jid = a[1]
+@@ -1652,6 +1832,15 @@
+             except Exception:
+                 pass
+             sys.exit(1)
++    elif cmd == "_commission_goal":
++        # COCKPIT-UNIFIED entrypoint: invoked by pnd via the commission.build task_type template
++        # with the vetted {goal} as argv. Runs the commission protocol inside pnd's per-job
++        # workspace + Record; no jobs.db. This is the cmd_template target in db.seed_v3.
++        Handler.cfg = load_cfg() or {}
++        try:
++            sys.exit(run_commission_unified(a[1] if len(a) > 1 else ""))
++        except Exception as e:
++            print("FEHLER: " + str(e)); sys.exit(1)
+     else:
+         print(__doc__)
+ 

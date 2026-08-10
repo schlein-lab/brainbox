@@ -1,0 +1,23 @@
+# portioneer — governed batch slice. ALL queued work runs here, one pn-job-<id>.scope each.
+# Rendered defaults for a ~9.7 GiB / 4 GiB-swap host; install.sh recomputes from capacity.
+#   MemoryHigh  = soft throttle/reclaim point (the "warning band" the scheduler stays under)
+#   MemoryMax   = hard wall; when hit, the kernel OOM-kills a process INSIDE THIS SLICE ONLY,
+#                 never an interactive service. This is the load-bearing guarantee.
+#   MemorySwapMax not 0: on a swap-heavy host, 0 would force batch to OOM far sooner.
+[Unit]
+Description=portioneer governed batch work
+
+[Slice]
+MemoryAccounting=yes
+MemoryHigh=4608M
+MemoryMax=5632M
+MemorySwapMax=2048M
+CPUAccounting=yes
+CPUWeight=50
+IOAccounting=yes
+IOWeight=50
+TasksAccounting=yes
+TasksMax=4096
+# Best-effort systemd-oomd assist (kernel memory.max is the real backstop):
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=80%

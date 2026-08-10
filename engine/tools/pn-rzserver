@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+
+import argparse, os, signal, ssl, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-rzserver")
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=443)
+    ap.add_argument("--tls-cert", default=os.environ.get("RZ_TLS_CERT"))
+    ap.add_argument("--tls-key", default=os.environ.get("RZ_TLS_KEY"))
+    ap.add_argument("--origin", action="append", default=None,
+                    help="an allowed browser Origin (repeatable); non-browser dials send none")
+    ap.add_argument("--max-conns", type=int, default=1024,
+                    help="global concurrent connection cap (DoS backstop)")
+    ap.add_argument("--max-size", type=int, default=1 << 20)
+    ap.add_argument("--idle-timeout", type=float, default=300.0,
+                    help="idle seconds before a MATCHED peer is dropped")
+    ap.add_argument("--unmatched-timeout", type=float, default=5.0,
+                    help="seconds an UNMATCHED *dialer* is held before eviction (anti-squat)")
+    ap.add_argument("--register-park-timeout", type=float, default=600.0,
+                    help="seconds a parked *registrant* (box) may wait for a dialer (DEFECT 1: the "
+                         "box is always parked waiting for devices, so this must be long — minutes)")
+
+    ap.add_argument("--max-conns-per-ip", type=int, default=16,
+                    help="max concurrent connections from one source IP")
+    ap.add_argument("--conn-rate-per-ip", type=float, default=8.0,
+                    help="sustained new DIAL connections/sec allowed from one source IP (token bucket)")
+    ap.add_argument("--conn-burst-per-ip", type=int, default=16,
+                    help="token-bucket burst capacity (dials) per source IP")
+    ap.add_argument("--reg-rate-per-ip", type=float, default=4.0,
+                    help="sustained new REGISTER connections/sec per source IP (SEPARATE bucket so the "
+                         "box's re-registration is not starved by dial churn — DEFECT 3)")
+    ap.add_argument("--reg-burst-per-ip", type=int, default=8,
+                    help="token-bucket burst capacity (registers) per source IP")
+    ap.add_argument("--max-topics-per-ip", type=int, default=8,
+                    help="max distinct parked topics one source IP may hold at once")
+    ap.add_argument("--insecure", action="store_true",
+                    help="run plaintext WS (PRIVATE LOCAL TEST ONLY; refuses a public bind)")
+    args = ap.parse_args()
+
+    try:
+        from relaylib.wss import RendezvousServer
+    except Exception as e:
+        sys.stderr.write(f"pn-rzserver: the `websockets` dependency is required: {e}\n")
+        sys.exit(2)
+
+    ssl_ctx = None
+    if args.tls_cert and args.tls_key:
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(args.tls_cert, args.tls_key)
+
+        ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    elif args.insecure:
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            sys.stderr.write("pn-rzserver: --insecure refuses to bind a non-loopback host "
+                             "(plaintext WS is for a PRIVATE LOCAL test only). Provide --tls-cert/"
+                             "--tls-key for any reachable deployment.\n")
+            sys.exit(2)
+    else:
+        sys.stderr.write("pn-rzserver: TLS is MANDATORY in production. Provide --tls-cert and "
+                         "--tls-key (or --insecure for a loopback-only local test).\n")
+        sys.exit(2)
+
+    srv = RendezvousServer(
+        host=args.host, port=args.port, ssl_context=ssl_ctx, allow_insecure=args.insecure,
+        allowed_origins=args.origin, max_size=args.max_size, idle_timeout=args.idle_timeout,
+        unmatched_timeout=args.unmatched_timeout, register_park_timeout=args.register_park_timeout,
+        max_conns=args.max_conns,
+        max_conns_per_ip=args.max_conns_per_ip, conn_rate_per_ip=args.conn_rate_per_ip,
+        conn_burst_per_ip=args.conn_burst_per_ip, reg_rate_per_ip=args.reg_rate_per_ip,
+        reg_burst_per_ip=args.reg_burst_per_ip, max_topics_per_ip=args.max_topics_per_ip).start()
+    scheme = "wss" if ssl_ctx else "ws"
+    sys.stderr.write(f"pn-rzserver: zero-knowledge rendezvous up on {scheme}://{args.host}:"
+                     f"{srv._port} (holds NO keys; ferries opaque frames only)\n")
+    sys.stderr.flush()
+    stop = {"v": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(v=True))
+    signal.signal(signal.SIGINT, lambda *_: stop.update(v=True))
+    try:
+        while not stop["v"]:
+            time.sleep(0.5)
+    finally:
+        srv.stop()
+
+if __name__ == "__main__":
+    main()

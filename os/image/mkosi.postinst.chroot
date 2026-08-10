@@ -1,0 +1,122 @@
+#!/bin/sh
+# mkosi.postinst.chroot — runs INSIDE the image chroot after packages + extra/skeleton trees
+# are installed. (mkosi runs the single .chroot postinstall file; engine SOURCE staging is in
+# mkosi.build instead, because $SRCDIR is only available there.)
+#
+# Three jobs: (1) belt-and-suspenders GNOME strip, (2) bake the minimal-userland a11y env,
+# (3) no-systemd service wiring (pn-init is the service manager — NO units are enabled; the
+#     systemd daemon family is force-purged) + sshd-sacred hardening. There is no systemd
+#     "recovery path": recovery is pn-init's own pn.recovery mode (see the GRUB snippet in
+#     mkosi.skeleton/etc/grub.d/40_brainarbeit_recovery).
+set -eu
+log(){ echo "[postinst] $*"; }
+
+# ===========================================================================
+# (1) GNOME strip (display.md §9.3 "STRIP entirely"). RemovePackages in 30-packages.conf is
+#     primary; this purges residue + the non-package phantGNOME artifacts.
+# ===========================================================================
+log "stripping GNOME residue"
+for pkg in gnome-shell mutter gnome-session gnome-session-bin gdm3 gjs \
+           tracker tracker-miner-fs evolution evolution-data-server \
+           gnome-online-accounts gvfs gvfs-daemons gnome-remote-desktop \
+           gnome-shell-extension-ding; do
+    if dpkg -s "$pkg" >/dev/null 2>&1; then
+        log "  - purging $pkg"
+        DEBIAN_FRONTEND=noninteractive apt-get -y purge "$pkg" || true
+    fi
+done
+DEBIAN_FRONTEND=noninteractive apt-get -y autoremove --purge || true
+# Non-package GNOME-automation artifacts (display.md §5.1).
+rm -rf \
+    /usr/share/gnome-shell/extensions/phantom-ui@phantgnome \
+    /usr/share/dbus-1/services/org.gnome.Phantom.service \
+    /usr/local/bin/ph_snap.py 2>/dev/null || true
+
+# ===========================================================================
+# (2) Bake the minimal-userland session + a11y env (display.md §3, §9.3 "Bake a11y env").
+#     No GNOME session manager exists; phantomd is the seat owner, so these defaults make
+#     portals/GTK/AT-SPI find it, and force software GL (no host GPU).
+# ===========================================================================
+log "baking minimal-userland + a11y env"
+install -d /etc/environment.d
+cat > /etc/environment.d/50-brainarbeit-display.conf <<'ENV'
+# Brainarbeit display defaults (baked into the immutable root — display.md §3/§9.3).
+XDG_SESSION_TYPE=wayland
+XDG_CURRENT_DESKTOP=brainarbeit
+GTK_A11Y=on
+QT_ACCESSIBILITY=1
+ACCESSIBILITY_ENABLED=1
+GTK_MODULES=gail:atk-bridge
+LIBGL_ALWAYS_SOFTWARE=1
+GALLIUM_DRIVER=llvmpipe
+ENV
+install -d /etc/dconf/db/local.d
+cat > /etc/dconf/db/local.d/00-a11y <<'DCONF'
+[org/gnome/desktop/interface]
+toolkit-accessibility=true
+DCONF
+if command -v dconf >/dev/null 2>&1; then dconf update || true; fi
+if command -v fc-cache >/dev/null 2>&1; then fc-cache -f || true; fi
+
+# ===========================================================================
+# (3) NO-SYSTEMD service wiring + sshd-sacred hardening. ALL service supervision is pn-init's
+#     job via /etc/pn-init.conf (default boot) — there is NO systemctl / systemd here, so we do
+#     NOT enable units. Instead we make the image's daemons pn-init-ready and assert no systemd.
+# ===========================================================================
+log "no-systemd service wiring (pn-init is the service manager)"
+
+# mkosi's Debian bootstrap installs the `systemd` daemon package as part of the base BEFORE this
+# postinst runs (and RemovePackages cannot always drop it because Debian's essential `init` pulls
+# it in). So we FORCE-purge the whole systemd daemon family HERE, having first ensured sysvinit-core
+# provides /sbin/init (so removing systemd-sysv does not break the essential init dependency).
+log "force-removing the systemd daemon family (sysvinit-core provides /sbin/init)"
+export DEBIAN_FRONTEND=noninteractive
+# Satisfy the alternate deps that would otherwise PIN the systemd daemon in place, with non-daemon
+# providers, so the daemon can actually be removed:
+#   - openssh-server Depends: systemd | systemd-standalone-sysusers | systemd-sysusers
+#   - an init provider that isn't systemd: sysvinit-core
+apt-get -y install --no-install-recommends sysvinit-core systemd-standalone-sysusers 2>/dev/null || true
+# purge the systemd DAEMON family. --allow-remove-essential because `init`/systemd-sysv are flagged
+# essential; sysvinit-core satisfies `init` and systemd-standalone-sysusers satisfies sshd's sysusers
+# dep, so the system stays bootable + sshd stays installed after the daemon is gone.
+apt-get -y purge --allow-remove-essential \
+    systemd systemd-sysv systemd-boot systemd-resolved systemd-timesyncd \
+    libnss-systemd libpam-systemd udev 2>/dev/null || true
+# do NOT autoremove (it could try to satisfy deps by reinstalling systemd); rely on the explicit purge.
+
+# eudev/mdev device manager: pn-init starts the device manager directly (F2). On the appliance the
+# default is busybox mdev (pn.devmgr=mdev) — no daemon to enable here.
+
+# sshd host keys: generated on first boot by firstboot.sh (an appliance never ships baked keys),
+# but ensure the privsep + runtime dirs exist in the image so pn-init's sshd starts clean.
+install -d -m0755 /run/sshd
+
+# Belt-and-suspenders: after the force-purge, the systemd DAEMON must be gone. FAIL THE BUILD loudly
+# otherwise (the image must be systemd-free). libsystemd0 (a shared library, not a daemon) is OK.
+# Diagnostic: if systemd is still here, log WHAT depends on it before deciding.
+if [ -x /lib/systemd/systemd ] || [ -x /usr/lib/systemd/systemd ]; then
+    echo "[postinst] systemd daemon STILL present after purge — investigating reverse-deps:" >&2
+    apt-cache rdepends --installed systemd 2>/dev/null | sed 's/^/[postinst]   rdep: /' >&2 || true
+    dpkg -l | grep -E '^ii .*systemd' | sed 's/^/[postinst]   pkg: /' >&2 || true
+    if [ "${PN_ALLOW_SYSTEMD_DIAG:-0}" != "1" ]; then
+        echo "[postinst] FATAL: systemd daemon present — no-systemd posture violated" >&2
+        exit 1
+    fi
+    echo "[postinst] (PN_ALLOW_SYSTEMD_DIAG=1 -> continuing despite systemd, for diagnosis only)" >&2
+fi
+# init must resolve to sysvinit (not systemd)
+log "verified: no systemd daemon binary; /sbin/init -> $(readlink -f /sbin/init 2>/dev/null || echo '?')"
+
+# Strip any orphaned systemd unit dirs (cosmetic — nothing reads them without systemd).
+rm -rf /etc/systemd /usr/lib/systemd/system /lib/systemd/system 2>/dev/null || true
+
+install -d /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/10-brainarbeit.conf <<'SSHD'
+# Brainarbeit sacred sshd (product.md §5 auth). Key-only; reachable for recovery. Keys are
+# provisioned by the factory / first-boot wizard — an appliance never ships a baked-in key.
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+KbdInteractiveAuthentication no
+SSHD
+
+log "postinst complete"

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Node / JS
+node_modules/
+*.tsbuildinfo
+.pnpm-store/
+
+# Tauri / native build outputs (CI/per-OS runner only)
+
+# Capacitor generated native projects (created by `cap add` on the build host)
+
+# local keystore / scratch
+*.local.json

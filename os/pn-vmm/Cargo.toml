@@ -1,0 +1,25 @@
+[package]
+name = "pn-vmm"
+version = "0.0.3"
+edition = "2021"
+description = "Brainarbeit per-tenant microVM monitor (rust-vmm)."
+authors = ["schlein-lab"]
+
+[[bin]]
+name = "pn-vmm"
+path = "src/main.rs"
+
+[dependencies]
+kvm-ioctls = "0.16"
+kvm-bindings = "0.7"
+libc = "0.2"
+vm-memory = { version = "0.14", features = ["backend-mmap"] }
+linux-loader = { version = "0.11", features = ["elf", "bzimage", "pe"] }
+vm-superio = "0.7"
+vmm-sys-util = "0.12"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+vm-fdt = "0.3"
+
+[profile.release]
+opt-level = 2

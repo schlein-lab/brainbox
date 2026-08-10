@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "bbx")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+CA_PATH = os.path.join(CONFIG_DIR, "brainbox-ca.crt")
+
+def _load_cfg():
+    try:
+        return json.load(open(CONFIG_PATH))
+    except Exception:
+        return {}
+
+def _save_cfg(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(cfg, indent=1).encode())
+    finally:
+        os.close(fd)
+
+def _resolve(args):
+    cfg = _load_cfg()
+    host = getattr(args, "host", None) or os.environ.get("BRAINBOX_HOST") or cfg.get("host") or "brainbox.local"
+    key = os.environ.get("BRAINBOX_API_KEY") or cfg.get("key") or ""
+    ca = os.environ.get("BRAINBOX_CA") or cfg.get("ca") or (CA_PATH if os.path.exists(CA_PATH) else "")
+    if "://" not in host:
+        host = "https://" + host
+
+    authority = host.split("://", 1)[1]
+    if ":" not in authority:
+        bare = authority
+        is_ip = all(p.isdigit() for p in bare.split(".")) and bare.count(".") == 3
+        is_lan = bare.endswith(".local") or "." not in bare or is_ip
+        if is_lan:
+            host = host + ":8077"
+    return host.rstrip("/"), key, ca
+
+def _ctx(ca, insecure=False):
+    if insecure:
+        c = ssl.create_default_context()
+        c.check_hostname = False
+        c.verify_mode = ssl.CERT_NONE
+        return c
+    if ca and os.path.exists(ca):
+        return ssl.create_default_context(cafile=ca)
+    return ssl.create_default_context()
+
+def _die(msg, code):
+    sys.stderr.write("bbx: " + msg + "\n")
+    sys.exit(code)
+
+def request(method, path, host, key, ca, body=None, insecure=False, extra_headers=None, raw=False):
+    url = host + path
+    data = None
+    if body is not None:
+        data = body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    if key:
+        req.add_header("Authorization", "Bearer " + key)
+    if body is not None and not raw:
+        req.add_header("Content-Type", "application/json")
+    for k, v in (extra_headers or {}).items():
+        req.add_header(k, v)
+    try:
+        r = urllib.request.urlopen(req, context=_ctx(ca, insecure), timeout=60)
+        payload = r.read().decode()
+        return r.status, payload
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+    except urllib.error.URLError as e:
+        _die("cannot reach %s (%s). Try `bbx trust` first, or --insecure on a fresh box." % (host, e.reason), 5)
+
+def _json_or_die(status, payload):
+    try:
+        obj = json.loads(payload)
+    except Exception:
+        obj = {"raw": payload}
+    if status == 401:
+        _die("unauthorized — set a key: bbx auth login --with-token", 4)
+    if status == 403:
+        _die("forbidden — this key is not scoped for that operation", 4)
+    return status, obj
+
+def cmd_trust(args):
+    host, _key, _ca = _resolve(args)
+    status, payload = request("GET", "/brainbox-ca.crt", host, "", "", insecure=True)
+    if status != 200 or "BEGIN CERTIFICATE" not in payload:
+        _die("could not fetch the box CA from %s/brainbox-ca.crt (status %s)" % (host, status), 5)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    open(CA_PATH, "w").write(payload)
+    cfg = _load_cfg()
+    cfg["ca"] = CA_PATH
+    if getattr(args, "host", None):
+        cfg["host"] = args.host
+    _save_cfg(cfg)
+    print("pinned box CA to %s — HTTPS is now verified." % CA_PATH)
+
+def cmd_auth_login(args):
+    cfg = _load_cfg()
+    if args.host:
+        cfg["host"] = args.host
+    if args.with_token:
+        key = sys.stdin.readline().strip() if not sys.stdin.isatty() else input("Paste API key: ").strip()
+        if not key:
+            _die("no key provided", 2)
+        cfg["key"] = key
+    _save_cfg(cfg)
+
+    host, key, ca = _resolve(args)
+    status, payload = request("GET", "/api/v1/capabilities", host, key, ca, insecure=args.insecure)
+    _status, obj = _json_or_die(status, payload)
+    if status == 200:
+        print("logged in to %s as principal '%s' (scopes: %s)" %
+              (host, obj.get("principal"), ", ".join(obj.get("scopes") or [])))
+    else:
+        _die("key stored but verification failed (status %s)" % status, 4)
+
+def cmd_auth_status(args):
+    host, key, ca = _resolve(args)
+    if not key:
+        print("not logged in (no key). Run: bbx auth login --with-token")
+        return
+    status, payload = request("GET", "/api/v1/capabilities", host, key, ca, insecure=args.insecure)
+    _s, obj = _json_or_die(status, payload)
+    print("host: %s\nprincipal: %s\nscopes: %s\nadmin: %s" %
+          (host, obj.get("principal"), ", ".join(obj.get("scopes") or []), obj.get("is_admin")))
+
+def cmd_auth_token(args):
+    _host, key, _ca = _resolve(args)
+    if not key:
+        _die("no key stored", 4)
+    print(key)
+
+def cmd_auth_logout(args):
+    cfg = _load_cfg()
+    cfg.pop("key", None)
+    _save_cfg(cfg)
+    print("logged out (key removed from config).")
+
+def _submit(args, prompt):
+    host, key, ca = _resolve(args)
+    body = {"prompt": prompt}
+    headers = {}
+    if getattr(args, "idempotency_key", None):
+        headers["Idempotency-Key"] = args.idempotency_key
+    status, payload = request("POST", "/api/v1/jobs", host, key, ca, body=body,
+                              insecure=args.insecure, extra_headers=headers)
+    _s, obj = _json_or_die(status, payload)
+    if status not in (200, 202):
+        _die("submit failed (%s): %s" % (status, obj.get("detail") or obj.get("title") or payload), 2)
+    return host, key, ca, obj
+
+def cmd_job_submit(args):
+    prompt = _read_prompt(args)
+    host, key, ca, obj = _submit(args, prompt)
+    if args.json:
+        print(json.dumps(obj, indent=1))
+    else:
+        print(obj.get("id"))
+
+def cmd_run(args):
+    prompt = _read_prompt(args)
+    host, key, ca, obj = _submit(args, prompt)
+    jid = obj.get("id")
+    sys.stderr.write("submitted %s — waiting…\n" % jid)
+    final = _wait(host, key, ca, jid, args.insecure, args.timeout)
+    state = (final.get("status") or final).get("state") if isinstance(final.get("status"), dict) else final.get("state")
+
+    st, payload = request("GET", "/api/v1/jobs/%s/logs" % _bare(jid), host, key, ca, insecure=args.insecure)
+    sys.stdout.write(payload)
+    if not payload.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stderr.write("job %s: %s\n" % (jid, state))
+    sys.exit(3 if state == "failed" else 0)
+
+def cmd_job_status(args):
+    host, key, ca = _resolve(args)
+    if args.watch:
+        final = _wait(host, key, ca, args.id, args.insecure, args.timeout, echo=True)
+        sys.exit(3 if _state(final) == "failed" else 0)
+    st, payload = request("GET", "/api/v1/jobs/%s" % _bare(args.id), host, key, ca, insecure=args.insecure)
+    _s, obj = _json_or_die(st, payload)
+    if st != 200:
+        _die("no such job", 2)
+    print(json.dumps(obj, indent=1) if args.json else _state(obj))
+
+def cmd_job_logs(args):
+    host, key, ca = _resolve(args)
+    seen = 0
+    while True:
+        st, payload = request("GET", "/api/v1/jobs/%s/logs" % _bare(args.id), host, key, ca, insecure=args.insecure)
+        if st != 200:
+            _die("no such job", 2)
+        sys.stdout.write(payload[seen:])
+        seen = len(payload)
+        if not args.follow:
+            break
+        stt, sp = request("GET", "/api/v1/jobs/%s" % _bare(args.id), host, key, ca, insecure=args.insecure)
+        _s, o = _json_or_die(stt, sp)
+        if _state(o) in ("succeeded", "failed", "canceled"):
+            break
+        time.sleep(2)
+    if not payload.endswith("\n"):
+        sys.stdout.write("\n")
+
+def cmd_job_result(args):
+    host, key, ca = _resolve(args)
+    st, payload = request("GET", "/api/v1/jobs/%s/result" % _bare(args.id), host, key, ca, insecure=args.insecure)
+    _s, obj = _json_or_die(st, payload)
+    if st != 200:
+        _die("no such job", 2)
+    out = json.dumps(obj, indent=1)
+    if args.output:
+        open(args.output, "w").write(out)
+        print("wrote %s" % args.output)
+    else:
+        print(out)
+
+def cmd_job_cancel(args):
+    host, key, ca = _resolve(args)
+    st, payload = request("POST", "/api/v1/jobs/%s/cancel" % _bare(args.id), host, key, ca, insecure=args.insecure)
+    _s, obj = _json_or_die(st, payload)
+    if st == 200:
+        print("canceled %s" % args.id)
+    else:
+        _die(obj.get("detail") or obj.get("title") or "cancel failed (%s)" % st, 2)
+
+def cmd_job_list(args):
+    host, key, ca = _resolve(args)
+    st, payload = request("GET", "/api/v1/jobs?limit=%d" % args.limit, host, key, ca, insecure=args.insecure)
+    _s, obj = _json_or_die(st, payload)
+    if args.json:
+        print(json.dumps(obj, indent=1))
+        return
+    for d in obj.get("data", []):
+        print("%-22s %-10s %s" % (d.get("id"), d.get("state"), (d.get("summary") or "").replace("\n", " ")))
+
+def cmd_api(args):
+    host, key, ca = _resolve(args)
+    body = None
+    if args.input:
+        body = open(args.input, "rb").read()
+    elif not sys.stdin.isatty() and args.method in ("POST", "PUT", "PATCH"):
+        body = sys.stdin.buffer.read()
+    st, payload = request(args.method, args.path, host, key, ca, body=body, insecure=args.insecure, raw=bool(body))
+    sys.stderr.write("HTTP %s\n" % st)
+    sys.stdout.write(payload)
+    if not payload.endswith("\n"):
+        sys.stdout.write("\n")
+
+def cmd_mcp(args):
+
+    host, key, ca = _resolve(args)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        st, payload = request("POST", "/mcp", host, key, ca, body=line.encode(),
+                              insecure=args.insecure, raw=True)
+        if payload.strip():
+            sys.stdout.write(payload if payload.endswith("\n") else payload + "\n")
+            sys.stdout.flush()
+
+def _bare(jid):
+    return jid[4:] if str(jid).startswith("job_") else jid
+
+def _state(obj):
+    s = obj.get("status")
+    if isinstance(s, dict):
+        return s.get("state")
+    return obj.get("state")
+
+def _read_prompt(args):
+    if getattr(args, "file", None):
+        return open(args.file).read()
+    if args.prompt:
+        return " ".join(args.prompt)
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    _die("no prompt — pass text, -f FILE, or pipe stdin", 2)
+
+def _wait(host, key, ca, jid, insecure, timeout, echo=False):
+    deadline = time.time() + (timeout or 3600)
+    since = -1
+    obj = {}
+    while time.time() < deadline:
+        st, payload = request("GET", "/api/v1/jobs/%s/events?since=%d" % (_bare(jid), since),
+                              host, key, ca, insecure=insecure)
+        _s, ev = _json_or_die(st, payload)
+        if st != 200:
+            _die("no such job", 2)
+        since = ev.get("seq", since)
+        if echo:
+            sys.stderr.write("  %s (seq %s)\n" % (ev.get("state"), ev.get("seq")))
+        if ev.get("finished"):
+            return ev
+        obj = ev
+    return obj
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="bbx", description="Brainbox command-line client")
+    p.add_argument("--host", help="Brainbox host (default: config/env/brainbox.local)")
+    p.add_argument("--insecure", action="store_true", help="skip TLS verify (fresh box before `bbx trust`)")
+    p.add_argument("--json", action="store_true", help="raw JSON output where applicable")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("auth", help="authenticate").add_subparsers(dest="sub", required=True)
+    al = a.add_parser("login"); al.add_argument("--with-token", action="store_true"); al.set_defaults(func=cmd_auth_login)
+    a.add_parser("status").set_defaults(func=cmd_auth_status)
+    a.add_parser("token").set_defaults(func=cmd_auth_token)
+    a.add_parser("logout").set_defaults(func=cmd_auth_logout)
+
+    sub.add_parser("trust", help="fetch + pin the box CA").set_defaults(func=cmd_trust)
+
+    j = sub.add_parser("job", help="jobs").add_subparsers(dest="sub", required=True)
+    js = j.add_parser("submit"); js.add_argument("prompt", nargs="*"); js.add_argument("-f", "--file")
+    js.add_argument("--idempotency-key"); js.set_defaults(func=cmd_job_submit)
+    jst = j.add_parser("status"); jst.add_argument("id"); jst.add_argument("--watch", action="store_true")
+    jst.add_argument("--timeout", type=int, default=3600); jst.set_defaults(func=cmd_job_status)
+    jl = j.add_parser("logs"); jl.add_argument("id"); jl.add_argument("-f", "--follow", action="store_true")
+    jl.set_defaults(func=cmd_job_logs)
+    jr = j.add_parser("result"); jr.add_argument("id"); jr.add_argument("-o", "--output"); jr.set_defaults(func=cmd_job_result)
+    jc = j.add_parser("cancel"); jc.add_argument("id"); jc.set_defaults(func=cmd_job_cancel)
+    jls = j.add_parser("list"); jls.add_argument("--limit", type=int, default=20); jls.set_defaults(func=cmd_job_list)
+
+    r = sub.add_parser("run", help="submit + wait + print result (the 90%% path)")
+    r.add_argument("prompt", nargs="*"); r.add_argument("-f", "--file")
+    r.add_argument("--idempotency-key"); r.add_argument("--timeout", type=int, default=3600)
+    r.set_defaults(func=cmd_run)
+
+    ap = sub.add_parser("api", help="authenticated raw API call")
+    ap.add_argument("method"); ap.add_argument("path"); ap.add_argument("--input"); ap.set_defaults(func=cmd_api)
+
+    sub.add_parser("mcp", help="stdio MCP shim -> the box /mcp").set_defaults(func=cmd_mcp)
+    return p
+
+def main():
+    args = build_parser().parse_args()
+    args.func(args)
+
+if __name__ == "__main__":
+    main()

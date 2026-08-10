@@ -1,0 +1,19 @@
+[package]
+name = "phantom-preload"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/schlein-lab/phantom"
+description = "phantom userland tier — an LD_PRELOAD shared library that announces a process to the phantom bus on load. no_std, no libc, raw syscalls only. fail-open above all else."
+
+[lib]
+name = "phantom_preload"
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

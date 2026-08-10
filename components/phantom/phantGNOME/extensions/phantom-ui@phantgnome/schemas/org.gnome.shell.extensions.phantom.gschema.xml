@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.phantom"
+          path="/org/gnome/shell/extensions/phantom/">
+    <key name="stage" type="s">
+      <default>"B"</default>
+      <summary>Daily intervention stage</summary>
+      <description>
+        The 3-stage intervention slider mirror: "A" (full-auto), "B"
+        (onsite + semi-auto), or "C" (onsite-manual). The authoritative copy
+        lives on the org.gnome.Phantom D-Bus service; this key mirrors it for
+        the UI. Written by exactly one writer (PhantomService.writeStageMirror,
+        driven from ModeController.applyProfile). See
+        docs/PHANTGNOME-ARCHITECTURE.md section 2 and docs/MODES.md.
+      </description>
+    </key>
+    <key name="default-stage" type="s">
+      <default>"C"</default>
+      <summary>Boot default intervention stage</summary>
+      <description>
+        The stage applied at session start before the human picks one from the
+        non-grabbing boot chooser. Per MODES.md the chooser must never block
+        inject, so an unattended/headless boot falls to this configured default.
+        One of "A", "B", "C".
+
+        DEFAULT CHANGED "B" -> "C" (Owner 2026-08-07). The documentation sells
+        "cold-by-default; opt-in act/sense" and stage B as "ask-first" — but
+        modeController.js defines B as gate 'on', full access, proactive, with
+        confirmAffordance false. An unattended boot therefore came up WARM with
+        full access and no confirmation, which is the opposite of the promise.
+        "C" (onsite-manual) is the cold one. If a warm default is ever wanted
+        again it must be a deliberate, documented choice — not the shipping
+        state that quietly contradicts the sales copy.
+      </description>
+    </key>
+    <key name="llm-window-match" type="s">
+      <default>"phantom-llm"</default>
+      <summary>LLM focal-window match (Mode A)</summary>
+      <description>
+        Case-insensitive substring matched against a window's wm_class /
+        wm_class_instance / title to identify the ON-SCREEN LLM surface — the
+        focal tile of full-auto ("Voll-Auto = nur LLM-Fenster sonst nichts").
+        In Mode A the ModeController KEEPS this window visible (opacity 255,
+        centered + raised) while demoting every other app to opacity 0, so the
+        seat shows only the LLM window plus the HUD. The default matches the
+        phantom autostart terminal launched with --app-id=phantom-llm (foot) or
+        whose title is set to phantom-llm. Empty string disables the focal carve-
+        out (Mode A then blanks ALL apps, the prior behavior). Changing this key
+        live re-sorts the desktop immediately if Mode A is active.
+      </description>
+    </key>
+    <key name="summon-llm" type="as">
+      <default><![CDATA[['<Super>c']]]></default>
+      <summary>Bring the LLM (claude) window to the front</summary>
+      <description>Global shortcut summoning the phantom LLM (claude) window to the foreground from any mode.</description>
+    </key>
+  </schema>
+</schemalist>

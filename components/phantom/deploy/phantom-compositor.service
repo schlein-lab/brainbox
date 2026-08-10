@@ -1,0 +1,21 @@
+[Unit]
+Description=phantom — the session compositor (owns screen + input, hosts apps)
+Documentation=https://github.com/schlein-lab/phantom
+Conflicts=getty@tty2.service
+After=systemd-user-sessions.service systemd-logind.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/phantom/target/release/phantom --compositor phantom-0
+Environment=PHANTOM_DRM_CARD=/dev/dri/card1
+RuntimeDirectory=phantom
+Environment=XDG_RUNTIME_DIR=/run/phantom
+Environment=PHANTOM_SHOT=/run/phantom/screen.png
+Restart=always
+RestartSec=2
+WatchdogSec=20
+OOMScoreAdjust=-600
+
+[Install]
+WantedBy=graphical.target

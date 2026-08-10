@@ -1,0 +1,53 @@
+# RCE removal patch for phantom-portal (the LAN intake adapter, lives outside this repo).
+#
+# WHY: the deployed phantom-portal's `POST /api/queue` has a raw-`cmd` branch that wraps any
+# string into ["/bin/bash","-lc",cmd] and submits it to pnd. Because the portal runs as uid
+# 1000 = admin, ANY shared-PIN holder on the LAN gets remote code execution as the human
+# operator. product.md §12/§18 make deleting this the FIRST-ordered item: every multi-tenant
+# guarantee is void while it exists.
+#
+# This repo (portioneer, the engine) closes the hole DURABLY at the engine: the channel
+# daemons must run as the de-privileged `adapter` principal (uid 4003), which holds neither
+# `task.raw` nor `task_type:*`; pnd's broker submit path intersects caps so an adapter can
+# never land a raw-bash job. But the literal endpoint must ALSO be removed from the portal and
+# the portal must be moved off uid 1000. That is a portal-side + deploy-time change; it is
+# delivered here as an apply-during-maintenance-window patch (NOT applied live by this PR — no
+# live deploy, no service restart). Apply with:  patch -p0 < phantom-portal-rce-removal.patch
+# (path: ~/.local/bin/phantom-portal). THEN run the portal under uid 4003 (see runbook).
+#
+# After applying, /api/queue accepts only `type=commission` (the existing intake) and a
+# vetted `task_type`+`params` submit routed through the P0 templated path — never a raw cmd.
+--- a/phantom-portal
++++ b/phantom-portal
+@@ /api/queue do_POST handler @@
+             if not prompt:
+                 return self.send_html('{"ok":false,"error":"prompt fehlt"}', 200, [("Content-Type", "application/json")])
+             jid = job_create(prompt, body.get("email"), body.get("attachments"), "commission")
+             return self.send_html(json.dumps({"ok": True, "portal_job": jid,
+                 "room": f"auftrag-{jid[:6]}", "link": job_link(jid)}), 200,
+                 [("Content-Type", "application/json")])
+-            # generic governed task (PIN-authed admin): run a command/shell line under portioneer
+-            cmd = body.get("cmd")
+-            if isinstance(cmd, str):
+-                cmd = ["/bin/bash", "-lc", cmd]
+-            if not cmd:
+-                return self.send_html('{"ok":false,"error":"cmd fehlt"}', 200, [("Content-Type", "application/json")])
+-            r = pn_req({"verb": "submit", "cmd": cmd, "class": body.get("class"),
+-                        "mem": body.get("mem"), "room": body.get("room"),
+-                        "tag": body.get("tag") or "portal-task", "source": "portal",
+-                        "cwd": os.path.expanduser("~"), "env": {"PATH": os.environ.get("PATH", "")}})
+-            return self.send_html(json.dumps(r), 200, [("Content-Type", "application/json")])
++            # RCE REMOVED: the raw-`cmd` -> ["/bin/bash","-lc",cmd] path is deleted. The only
++            # non-commission submit allowed is a VETTED task_type routed through pnd's P0
++            # templated path; the principal is resolved server-side from peercred/broker, never
++            # from the body. pnd refuses task_type the portal's adapter principal may not relay.
++            tt = body.get("task_type")
++            if not tt:
++                return self.send_html('{"ok":false,"error":"raw cmd not allowed; use task_type"}',
++                                      400, [("Content-Type", "application/json")])
++            r = pn_req({"verb": "submit", "task_type": tt, "params": body.get("params") or {},
++                        "class": body.get("class"), "mem": body.get("mem"),
++                        "room": body.get("room"), "tag": body.get("tag") or "portal-task",
++                        "source": "portal"})
++            return self.send_html(json.dumps(r), 200, [("Content-Type", "application/json")])
+         if u.path.startswith("/api/queue/") and u.path.endswith("/cancel"):

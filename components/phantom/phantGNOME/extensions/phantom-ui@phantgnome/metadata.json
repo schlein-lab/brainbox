@@ -1,0 +1,9 @@
+{
+    "uuid": "phantom-ui@phantgnome",
+    "name": "phantom UI (Spine)",
+    "description": "phantGNOME Spine: bare phantom session mode HUD plus the org.gnome.Phantom D-Bus service (Snapshot + ActivateWindow). Proves the cut/mount/front-back/sense spine with zero Mutter recompile. See docs/PHANTGNOME-ARCHITECTURE.md sections 6 and 7.",
+    "shell-version": ["46"],
+    "session-modes": ["ubuntu", "phantom", "user"],
+    "settings-schema": "org.gnome.shell.extensions.phantom",
+    "url": "https://github.com/schlein-lab/phantGNOME"
+}

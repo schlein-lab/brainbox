@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Einrichtung — Brainarbeit</title>
+<style>
+  :root{
+    --bg:#0e0e18; --panel:#181826; --panel2:#1f1f31; --line:#2a2a44; --line2:#34345a;
+    --ink:#ececff; --muted:#9a9ac0; --accent:#6b7cff; --accent-ink:#0b0b14;
+    --ok:#3ecf8e; --warn:#e6a742; --bad:#ff6b6b; --radius:14px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f3f3f8; --panel:#ffffff; --panel2:#f6f6fb; --line:#e2e2ee; --line2:#d3d3e6;
+           --ink:#191926; --muted:#5c5c78; --accent:#5461e6; --accent-ink:#ffffff; }
+  }
+  :root[data-theme="dark"]{ --bg:#0e0e18; --panel:#181826; --panel2:#1f1f31; --line:#2a2a44;
+           --line2:#34345a; --ink:#ececff; --muted:#9a9ac0; --accent:#6b7cff; --accent-ink:#0b0b14; }
+  :root[data-theme="light"]{ --bg:#f3f3f8; --panel:#ffffff; --panel2:#f6f6fb; --line:#e2e2ee;
+           --line2:#d3d3e6; --ink:#191926; --muted:#5c5c78; --accent:#5461e6; --accent-ink:#ffffff; }
+  *{ box-sizing:border-box }
+  body{ margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased }
+  .wrap{ max-width:760px; margin:0 auto; padding:26px 18px 80px }
+  header.top{ display:flex; align-items:center; gap:12px; margin:6px 0 8px }
+  header.top h1{ font-size:1.45rem; font-weight:680; margin:0; letter-spacing:-.01em }
+  .home{ margin-left:auto; color:var(--muted); text-decoration:none; font-size:.9rem;
+    border:1px solid var(--line); padding:7px 12px; border-radius:10px }
+  .home:hover{ border-color:var(--line2); color:var(--ink) }
+  .lead{ color:var(--muted); font-size:.92rem; margin:0 0 22px }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px; margin:0 0 18px }
+  .card.gesperrt{ opacity:.62 }
+  .kopf{ display:flex; align-items:flex-start; gap:12px }
+  .kopf .grow{ flex:1; min-width:0 }
+  .kopf h2{ font-size:1.05rem; font-weight:640; margin:0 }
+  .kopf .sub{ color:var(--muted); font-size:.85rem }
+  .warum{ color:var(--muted); font-size:.9rem; margin:10px 0 0 }
+  .pill{ display:inline-block; font-size:.72rem; font-weight:640; padding:3px 9px; border-radius:999px;
+    border:1px solid var(--line2); color:var(--muted); white-space:nowrap }
+  .pill.on{ color:var(--ok); border-color:color-mix(in srgb,var(--ok) 45%,transparent) }
+  .pill.zu{ color:var(--warn); border-color:color-mix(in srgb,var(--warn) 45%,transparent) }
+  .schritt{ margin:16px 0 0; padding:14px 0 0; border-top:1px solid var(--line) }
+  .schritt.aus{ display:none }
+  .schritt .nr{ font-size:.72rem; text-transform:uppercase; letter-spacing:.09em;
+    color:var(--muted); font-weight:640; margin:0 0 8px }
+  button{ font:inherit; border-radius:10px; padding:10px 16px; cursor:pointer;
+    border:1px solid var(--line2); background:var(--panel2); color:var(--ink) }
+  button:hover:not(:disabled){ border-color:var(--accent) }
+  button:disabled{ opacity:.5; cursor:default }
+  button.haupt{ background:var(--accent); color:var(--accent-ink); border-color:transparent; font-weight:620 }
+  .fund{ display:block; width:100%; text-align:left; margin:0 0 8px; padding:12px 14px }
+  .fund .n{ font-weight:600 }
+  .fund .m{ color:var(--muted); font-size:.83rem }
+  .feld{ margin:0 0 12px }
+  label{ display:block; font-size:.85rem; color:var(--muted); margin:0 0 6px }
+  input,select{ font:inherit; width:100%; padding:11px 12px; border-radius:10px;
+    border:1px solid var(--line2); background:var(--panel2); color:var(--ink) }
+  input:read-only{ color:var(--muted) }
+  .hinweis{ color:var(--muted); font-size:.82rem; margin:6px 0 0 }
+  .anleitung{ background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    padding:12px 14px; margin:0 0 12px; font-size:.88rem; color:var(--muted) }
+  .anleitung b{ color:var(--ink); font-weight:600 }
+  .anleitung a{ color:var(--accent) }
+  .melde{ margin:12px 0 0; padding:11px 14px; border-radius:10px; font-size:.9rem; display:none }
+  .melde.zeig{ display:block }
+  .melde.gut{ color:var(--ok); border:1px solid color-mix(in srgb,var(--ok) 40%,transparent) }
+  .melde.schlecht{ color:var(--bad); border:1px solid color-mix(in srgb,var(--bad) 40%,transparent) }
+  .melde.grau{ color:var(--muted); border:1px solid var(--line) }
+  .knopfzeile{ display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap }
+  .laeuft{ color:var(--muted); font-size:.86rem }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Einrichtung</h1>
+    <a class="home" href="/settings">Einstellungen</a>
+  </header>
+  <p class="lead">Die Box sucht selbst, was in deinem Netzwerk erreichbar ist. Du bestätigst nur —
+    und gibst das ein, was niemand erraten kann.</p>
+  <div id="bereiche"></div>
+</div>
+
+<script>
+"use strict";
+const $ = (s, w) => (w || document).querySelector(s);
+const $$ = (s, w) => Array.from((w || document).querySelectorAll(s));
+const hole = async (pfad, leib) => {
+  const a = await fetch(pfad, leib ? {method:"POST", headers:{"Content-Type":"application/json"},
+                                     body:JSON.stringify(leib)} : {});
+  return a.json();
+};
+const text = (s) => { const d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; };
+
+function feldHtml(f){
+  const id = "f-" + text(f.k);
+  const hinweis = f.hinweis ? `<div class="hinweis">${text(f.hinweis)}</div>` : "";
+  if (f.art === "auswahl")
+    return `<div class="feld"><label for="${id}">${text(f.label)}</label>
+      <select id="${id}" data-k="${text(f.k)}" data-art="auswahl"></select>${hinweis}</div>`;
+  if (f.art === "geheim")
+    return `<div class="feld"><label for="${id}">${text(f.label)}</label>
+      <input id="${id}" data-k="${text(f.k)}" data-art="geheim" type="password" autocomplete="off"
+             spellcheck="false" placeholder="${f.gesetzt ? "gespeichert — leer lassen, um es zu behalten" : "hier einfügen"}">
+      ${hinweis}</div>`;
+  const nurlesen = (f.art === "gefunden") ? " readonly" : "";
+  return `<div class="feld"><label for="${id}">${text(f.label)}</label>
+    <input id="${id}" data-k="${text(f.k)}" data-art="${text(f.art)}" type="text" autocomplete="off"
+           spellcheck="false" value="${text(f.wert || "")}"${nurlesen}>${hinweis}</div>`;
+}
+
+function karte(b){
+  const el = document.createElement("div");
+  el.className = "card" + (b.aktiv ? "" : " gesperrt");
+  const geheime = b.felder.filter(f => f.art === "geheim");
+  const auswahlen = b.felder.filter(f => f.art === "auswahl");
+  const eingaben = b.felder.filter(f => f.art !== "auswahl");
+  const zustand = b.aktiv ? (b.fertig ? "on" : "") : "zu";
+  const standtext = !b.aktiv ? "Nicht verfügbar" : (b.fertig ? "Eingerichtet" : "Noch offen");
+
+  el.innerHTML = `
+    <div class="kopf">
+      <div class="grow">
+        <h2>${text(b.titel)}</h2>
+        <div class="sub">${text(b.untertitel)}</div>
+      </div>
+      <span class="pill ${zustand}" data-rolle="stand">${standtext}</span>
+    </div>
+    <p class="warum">${text(b.warum)}</p>
+    ${b.aktiv ? "" : `<div class="melde zeig grau">${text(b.gesperrt_weil)}</div>`}
+
+    <div class="schritt ${(b.aktiv && b.suchbar) ? "" : "aus"}" data-schritt="1">
+      <div class="nr">Schritt 1 — Gerät finden</div>
+      <div class="knopfzeile">
+        <button class="haupt" data-tat="suchen">Im Netzwerk suchen</button>
+        <span class="laeuft" data-rolle="suchlage"></span>
+      </div>
+      <div data-rolle="funde" style="margin-top:12px"></div>
+    </div>
+
+    <div class="schritt ${(b.aktiv && !b.suchbar) ? "" : "aus"}" data-schritt="2">
+      <div class="nr">Schritt 2 — Angaben</div>
+      ${geheime.filter(f => f.anleitung).map(f => `<div class="anleitung">
+        <b>Wo finde ich „${text(f.label)}“?</b><br>${text(f.anleitung)}
+        ${(f.hilfe_url && f.hilfe_url.indexOf("http") === 0) ?
+          ` <a href="${text(f.hilfe_url)}" target="_blank" rel="noopener">öffnen</a>` : ""}</div>`).join("")}
+      ${eingaben.map(feldHtml).join("")}
+      <div class="knopfzeile">
+        <button class="haupt" data-tat="pruefen">Verbinden und prüfen</button>
+        <span class="laeuft" data-rolle="prueflage"></span>
+      </div>
+      <div class="melde" data-rolle="melde"></div>
+    </div>
+
+    <div class="schritt aus" data-schritt="3">
+      <div class="nr">Schritt 3 — Auswählen</div>
+      ${auswahlen.map(feldHtml).join("")}
+      <div class="knopfzeile">
+        <button class="haupt" data-tat="sichern">Fertig — Einrichtung sichern</button>
+        <span class="laeuft" data-rolle="sicherlage"></span>
+      </div>
+    </div>`;
+
+  const zeig = (n, an) => $(`[data-schritt="${n}"]`, el).classList.toggle("aus", !an);
+  const melde = (t, art) => {
+    const m = $('[data-rolle="melde"]', el);
+    m.textContent = t; m.className = "melde zeig " + (art || "schlecht");
+  };
+
+  const werte = () => {
+    const w = {};
+    $$("[data-k]", el).forEach(x => { w[x.dataset.k] = x.value; });
+    return w;
+  };
+  const auswahlFuellen = (r) => {
+    auswahlen.forEach(f => {
+      const sel = $(`[data-k="${f.k}"]`, el);
+      if (!sel) return;
+      const liste = ((r.auswahl || {})[f.k]) || [];
+      sel.innerHTML = liste.map(x =>
+        `<option value="${text(x.id)}"${x.id === f.wert ? " selected" : ""}>${text(x.name)}${
+          x.art ? " — " + text(x.art) : ""}</option>`).join("")
+        || `<option value="">nichts gefunden</option>`;
+    });
+  };
+
+  const suchen = $('[data-tat="suchen"]', el);
+  if (suchen) suchen.onclick = async (e) => {
+    const lage = $('[data-rolle="suchlage"]', el);
+    e.target.disabled = true; lage.textContent = "sucht im Netzwerk …";
+    let a;
+    try { a = await hole("/api/einrichtung/suchen", {bereich: b.id}); }
+    finally { e.target.disabled = false; }
+    lage.textContent = "";
+    const box = $('[data-rolle="funde"]', el);
+    const g = (a && a.gefunden) || [];
+    if (!g.length){
+      box.innerHTML = `<div class="melde zeig schlecht">Nichts gefunden. Läuft das Gerät, und
+        hängt es im selben Netzwerk wie die Box?</div>`;
+      return;
+    }
+    box.innerHTML = g.map((f,i) =>
+      `<button class="fund" data-i="${i}"><div class="n">${text(f.name)}</div>
+       <div class="m">${text(f.url)}${f.zusatz ? " · " + text(f.zusatz) : ""}</div></button>`).join("");
+    $$(".fund", box).forEach(kn => kn.onclick = () => {
+      const ziel = $('[data-art="gefunden"]', el);
+      if (ziel) ziel.value = g[kn.dataset.i].url;
+      $$(".fund", box).forEach(x => x.style.borderColor = "");
+      kn.style.borderColor = "var(--accent)";
+      zeig(2, true);
+      const erstes = $('[data-art="eingabe"], [data-art="geheim"]', el);
+      if (erstes) erstes.focus();
+    });
+    if (g.length === 1) $(".fund", box).click();
+  };
+
+  $('[data-tat="pruefen"]', el).onclick = async (e) => {
+    const lage = $('[data-rolle="prueflage"]', el);
+    e.target.disabled = true; lage.textContent = "verbindet …";
+    let a;
+    try { a = await hole("/api/einrichtung/pruefen", {bereich: b.id, werte: werte()}); }
+    finally { e.target.disabled = false; lage.textContent = ""; }
+    const r = (a && a.ergebnis) || {ok:false, grund: (a && a.error) || "Keine Antwort von der Box."};
+    melde(r.grund, r.ok ? (r.nochmal ? "grau" : "gut") : "schlecht");
+    if (!r.ok) return;
+    auswahlFuellen(r);
+
+    if (!r.nochmal) zeig(3, true);
+  };
+
+  $('[data-tat="sichern"]', el).onclick = async (e) => {
+    const lage = $('[data-rolle="sicherlage"]', el);
+    e.target.disabled = true; lage.textContent = "sichert …";
+    let a;
+    try { a = await hole("/api/einrichtung/speichern", {bereich: b.id, werte: werte()}); }
+    finally { e.target.disabled = false; lage.textContent = ""; }
+    if (a && a.ok){
+      const p = $('[data-rolle="stand"]', el);
+      p.textContent = "Eingerichtet"; p.classList.add("on");
+      melde("Gesichert.", "gut");
+      zeig(1, false); zeig(2, false); zeig(3, false);
+    } else {
+      melde((a && a.error) || "Sichern fehlgeschlagen.", "schlecht");
+    }
+  };
+
+  if (!b.aktiv) $$("button, input, select", el).forEach(x => x.disabled = true);
+  return el;
+}
+
+(async () => {
+  const a = await hole("/api/einrichtung");
+  const ziel = $("#bereiche");
+  if (!a || !a.ok){
+    ziel.innerHTML = `<div class="card">${text((a && a.error) || "Die Einrichtung ist nur für Verwalter.")}</div>`;
+    return;
+  }
+  a.bereiche.forEach(b => ziel.appendChild(karte(b)));
+})();
+</script>
+</body>
+</html>

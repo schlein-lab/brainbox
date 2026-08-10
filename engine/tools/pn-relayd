@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+
+import os, sys, json, time, socket, signal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+import relaylib
+from relaylib import registry, crypto, audit, ID_METHOD
+from relaylib.box import NonceCache, InFlightCounter
+from relaylib.keys import ApplianceKeys
+from relaylib.transport import Channel
+from relaylib.serve import serve_session
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import ipc as pn_ipc
+
+def pnd_sock_path():
+
+    p = (os.environ.get("RELAY_PND_SOCK", "").strip()
+         or os.environ.get("PND_BROKER_SOCK", "").strip())
+    return p or pn_ipc.sock_path()
+
+def pnd_submit(req: dict) -> dict:
+
+    try:
+        return pn_ipc.send_request(req, timeout=20, path=pnd_sock_path())
+    except FileNotFoundError:
+        return {"ok": False, "error": "pnd not running (no socket)"}
+    except Exception as e:
+        return {"ok": False, "error": f"cannot reach pnd: {type(e).__name__}: {e}"}
+
+def pnd_inflight_count(did: str) -> int:
+
+    from relaylib import ID_METHOD
+    try:
+        r = pn_ipc.send_request(
+            {"verb": "via-inflight", "_method": ID_METHOD, "_selector": did, "via_device": did},
+            timeout=20, path=pnd_sock_path())
+        return int(r.get("in_flight", 0)) if isinstance(r, dict) and r.get("ok") else 0
+    except Exception:
+        return 0
+
+def make_identity_binder():
+
+    from pnlib import db, DB_PATH
+    import sqlite3, sys as _sys
+
+    cx = None
+    for _uri in ("file:%s?mode=ro" % DB_PATH, "file:%s?immutable=1" % DB_PATH):
+        try:
+            cx = sqlite3.connect(_uri, uri=True, timeout=10, check_same_thread=False)
+            cx.row_factory = sqlite3.Row
+            cx.execute("SELECT 1 FROM identities LIMIT 1")
+            break
+        except sqlite3.OperationalError:
+            cx = None
+    if cx is None:
+        cx = db.connect(DB_PATH)
+    def _bind(method, selector, principal, verified):
+        try:
+            db.bind_identity(cx, method, selector, principal, verified=verified)
+        except sqlite3.OperationalError:
+
+            _sys.stderr.write("[pn-relayd] identity re-bind skipped (read-only de-priv store; "
+                              "binding written at enrollment): %s:%s -> %s\n" % (method, selector, principal))
+    return _bind
+
+def cmd_identity():
+    k = ApplianceKeys()
+    print(json.dumps({
+        "appliance_id_pubkey": k.id_pub.hex(),
+        "appliance_x_pubkey": k.sx_pub.hex(),
+        "rendezvous_topic": crypto.rendezvous_topic(k.sx_pub),
+        "relay_url": os.environ.get("RELAY_URL", "(unset)"),
+    }, indent=2))
+
+def cmd_status():
+    reasons = []
+    ready = relaylib.is_production_ready(reasons)
+    print(f"relay master gate (RELAY_ENABLED): {'ON' if relaylib.enabled() else 'OFF (default)'}")
+    print(f"production-enable ready: {ready}")
+    print(f"production WSS transport available: {relaylib.wss_transport_available()} "
+          f"(`websockets` dependency)")
+    if reasons:
+        print("blocked by:")
+        for r in reasons:
+            print(f"  - {r}")
+    print(f"broker uid: {relaylib.relay_broker_uid()} (must be in pnd PND_BROKER_UIDS + hold act-as)")
+    bsock = pnd_sock_path()
+    print(f"pnd socket: {bsock}")
+    print(f"  reachable as this uid ({os.getuid()}): "
+          f"{os.access(bsock, os.W_OK) if os.path.exists(bsock) else 'socket not present yet'}")
+    print("  (de-privileged broker uid 4003 reaches the GROUP-ACCESSIBLE PND_BROKER_SOCK, NOT the "
+          "uid-only /run/user/1000/pnd.sock; it must be a member of pnd's PND_BROKER_GROUP)")
+    print(f"registry: {relaylib.RELAY_DB}  (separate store; queue.db untouched)")
+    print("NOTE: pairing additionally REQUIRES an armed 2FA factor per principal "
+          "(pn-pair --arm-2fa). 2FA is the minimum bar.")
+
+def cmd_audit(verify: bool):
+    reg = registry.connect()
+    if verify:
+        ok, broken, why = audit.verify_chain(reg)
+        print(json.dumps({"chain_intact": ok, "broken_seq": broken, "reason": why}, indent=2))
+        sys.exit(0 if ok else 1)
+    for r in audit.tail(reg, limit=200):
+        print(f"{int(r['ts'])}  {r['event']:<18} did={r['device_did'] or '-':<40} "
+              f"principal={r['principal'] or '-':<12} {json.dumps(r['detail'])}")
+
+def drop_privileges_and_assert():
+
+    target = relaylib.relay_broker_uid()
+
+    try:
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and target and target != 0:
+            try:
+                if hasattr(os, "setgroups"):
+                    os.setgroups([])
+            except Exception:
+                pass
+            try:
+                os.setresgid(target, target, target)
+            except Exception:
+                pass
+            os.setresuid(target, target, target)
+            sys.stderr.write(f"pn-relayd: dropped privileges to broker uid {target}\n")
+    except Exception as e:
+        sys.stderr.write(f"pn-relayd: could not drop privileges to broker uid {target}: {e}; "
+                         "refusing to broker as a privileged uid.\n")
+        sys.exit(2)
+
+    if os.environ.get("RELAY_REQUIRE_DEPRIVILEGED_BROKER", "1").strip().lower() in ("1", "true", "yes", "on"):
+        reasons = []
+        if not relaylib.broker_is_deprivileged(target, reasons=reasons):
+            sys.stderr.write("pn-relayd: REFUSING to run — the relay broker is not de-privileged:\n")
+            for r in reasons:
+                sys.stderr.write(f"  - {r}\n")
+            sys.stderr.write("  (the de-privileged broker is the HPC-SSH blast-radius bound; see "
+                             "docs/relay-security.md §3. Set RELAY_BROKER_UID to the seeded adapter "
+                             "(4003) or grant it `act-as` WITHOUT task.raw/task_type:*/view:all. To "
+                             "bypass this check ONLY in a known-safe test set "
+                             "RELAY_REQUIRE_DEPRIVILEGED_BROKER=0.)\n")
+            sys.exit(2)
+
+def sd_notify(msg: str):
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.sendto(msg.encode(), addr); s.close()
+    except Exception:
+        pass
+
+def portal_fn(req):
+
+    import json as _json, ssl as _ssl, urllib.request as _u
+    url = os.environ.get("RELAY_PORTAL_URL", "https://127.0.0.1:8077/api/companion/onbehalf")
+    secpath = os.path.expanduser("~/.local/share/portioneer/relay/bridge.secret")
+    try:
+        sec = open(secpath).read().strip()
+    except Exception:
+        return {"ok": False, "error": "relay bridge secret missing"}
+    if not sec:
+        return {"ok": False, "error": "relay bridge secret empty"}
+    body = _json.dumps({"did": req.get("did") or req.get("_selector"),
+                        "op": req.get("op"), "args": req.get("args") or {}}).encode()
+    r = _u.Request(url, data=body, method="POST",
+                   headers={"Content-Type": "application/json", "X-Relay-Bridge": sec})
+    ctx = _ssl._create_unverified_context()
+    try:
+        with _u.urlopen(r, timeout=30, context=ctx) as resp:
+            return _json.loads(resp.read().decode("utf-8", "replace"))
+    except _u.HTTPError as e:
+        try:
+            return _json.loads(e.read().decode("utf-8", "replace"))
+        except Exception:
+            return {"ok": False, "error": "portal http %s" % e.code}
+    except Exception as e:
+        return {"ok": False, "error": "portal unreachable: %s" % type(e).__name__}
+
+def run():
+    if not relaylib.enabled():
+        sys.stderr.write(
+            "pn-relayd: DISABLED (RELAY_ENABLED is not set). The appliance is not reachable "
+            "off-LAN. This is the default. See `pn-relayd --status`.\n")
+        sys.exit(0)
+    url = os.environ.get("RELAY_URL", "")
+    if not url:
+        sys.stderr.write("pn-relayd: RELAY_ENABLED set but RELAY_URL unset. Refusing.\n")
+        sys.exit(2)
+
+    if url.startswith("wss://"):
+        reasons = []
+        if not relaylib.is_production_ready(reasons):
+            sys.stderr.write("pn-relayd: refusing to dial a production wss:// rendezvous; "
+                             "pending: " + "; ".join(reasons) + "\n")
+            sys.exit(2)
+    elif not url.startswith("mock://"):
+        sys.stderr.write(f"pn-relayd: unsupported RELAY_URL scheme {url!r} "
+                         "(use wss:// in prod or mock:// for tests).\n")
+        sys.exit(2)
+
+    drop_privileges_and_assert()
+
+    keys = ApplianceKeys()
+    reg = registry.connect()
+    binder = make_identity_binder()
+    rz = crypto.rendezvous_topic(keys.sx_pub)
+    origin = os.environ.get("RELAY_ORIGIN") or None
+    dial_kw = {"origin": origin} if origin else {}
+
+    seen = NonceCache(per_device_maxlen=int(os.environ.get("RELAY_NONCE_MAXLEN", "4096")))
+    registry.on_revoke(seen.drop_device)
+
+    inflight = InFlightCounter()
+    registry.on_revoke(inflight.drop_device)
+    stop = {"v": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(v=True))
+    signal.signal(signal.SIGINT, lambda *_: stop.update(v=True))
+    sys.stderr.write(f"pn-relayd {relaylib.VERSION} up: dialing OUT to {url} topic={rz} "
+                     f"broker_uid={relaylib.relay_broker_uid()}\n")
+    sys.stderr.flush()
+    audit_safe(reg, "daemon.up", detail={"url_scheme": url.split(':', 1)[0], "topic": rz})
+    sd_notify("READY=1")
+
+    backoff = float(os.environ.get("RELAY_RECONNECT_BACKOFF_S", "1.0"))
+    backoff_max = float(os.environ.get("RELAY_RECONNECT_BACKOFF_MAX_S", "30.0"))
+    min_healthy_s = float(os.environ.get("RELAY_MIN_HEALTHY_SESSION_S", "1.0"))
+    cur_backoff = 0.0
+
+    while not stop["v"]:
+        if cur_backoff > 0:
+
+            slept = 0.0
+            while slept < cur_backoff and not stop["v"]:
+                time.sleep(min(0.25, cur_backoff - slept)); slept += 0.25
+            if stop["v"]:
+                break
+        try:
+            ch = Channel.register(url, rz, timeout=10, **dial_kw)
+        except Exception as e:
+            sys.stderr.write(f"pn-relayd: dial-out failed: {e}; backing off {cur_backoff or 2:.1f}s\n")
+            cur_backoff = min(max(cur_backoff * 2, backoff), backoff_max)
+            time.sleep(2)
+            continue
+        t0 = time.monotonic()
+        bs = None
+        try:
+
+            bs = serve_session(ch, keys, reg, pnd_submit, bind_identity_fn=binder, seen_nonces=seen,
+                               inflight=inflight, control_fn=pnd_submit,
+                               inflight_count_fn=pnd_inflight_count,
+                               portal_fn=portal_fn)
+        except Exception as e:
+            sys.stderr.write(f"pn-relayd: session error: {type(e).__name__}: {e}\n")
+        finally:
+            try:
+                ch.close()
+            except Exception:
+                pass
+
+        completed_handshake = bs is not None
+        if completed_handshake or (time.monotonic() - t0 >= min_healthy_s):
+            cur_backoff = 0.0
+        else:
+            cur_backoff = min(max(cur_backoff * 2, backoff), backoff_max)
+            audit_safe(reg, "daemon.backoff", detail={"backoff_s": round(cur_backoff, 2)})
+    audit_safe(reg, "daemon.down")
+    sd_notify("STOPPING=1")
+
+def audit_safe(reg, event, **kw):
+    try:
+        audit.record(reg, event, **kw)
+    except Exception:
+        pass
+
+def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--identity":
+            return cmd_identity()
+        if sys.argv[1] == "--status":
+            return cmd_status()
+        if sys.argv[1] == "--audit":
+            return cmd_audit("--verify" in sys.argv[2:])
+        sys.stderr.write(f"pn-relayd: unknown arg {sys.argv[1]}\n"); sys.exit(2)
+    run()
+
+if __name__ == "__main__":
+    main()

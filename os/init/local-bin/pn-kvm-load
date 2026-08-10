@@ -1,0 +1,4 @@
+#!/bin/sh
+for m in /sbin/modprobe /usr/sbin/modprobe; do [ -x "$m" ] && { "$m" kvm_intel 2>/dev/null; break; }; done
+[ -e /dev/kvm ] && chgrp kvm /dev/kvm 2>/dev/null && chmod 660 /dev/kvm 2>/dev/null
+exit 0

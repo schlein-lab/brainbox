@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+
+import os, sys, json, socket, struct, argparse, secrets, time, subprocess
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import egress, egresscfg, ipc, DATA_DIR
+
+ALLOW_DB = os.environ.get("PN_EGRESS_DB", os.path.join(DATA_DIR, "egress", "allow.db"))
+PROXY_SOCK = os.environ.get("PN_EGRESS_SOCK", os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "pn-egress.sock"))
+
+def emit_egress_approval(host, port, principal, task_type, job_id, nonce):
+
+    payload = {"job_id": job_id, "nonce": nonce, "gate": "egress",
+               "task_type": task_type, "principal": principal,
+               "summary": f"NEW egress destination {host}:{port} requested by "
+                          f"{principal} ({task_type}) — approve to add an allowlist entry",
+               "egress": {"host": host, "port": port, "principal": principal,
+                          "task_type": task_type},
+               "action": {"side_effecting": True, "kind": "egress-allow"},
+               "revise": {"count": 0, "max": 0}}
+    try:
+        ipc.send_request({"verb": "checkpoint", "id": job_id, "kind": "approval-request",
+                          "data": payload})
+    except Exception as e:
+        sys.stderr.write(f"pn-egress: could not emit approval-request to pnd ({e}); "
+                         f"proposal recorded locally (nonce {nonce})\n")
+
+def cred_for(host, port, principal, task_type):
+
+    return os.environ.get(f"PN_EGRESS_CRED_{host.replace('.', '_').upper()}")
+
+def policy_only_upstream(host, port, cred):
+
+    raise RuntimeError(f"real upstream disabled (would connect {host}:{port}); "
+                       f"policy-only (set egress config proxy.real_upstream=true to enable)")
+
+def build_broker(cx, cfg=None):
+
+    cfg = cfg if cfg is not None else egresscfg.load()
+    timeout = float((cfg.get("proxy") or {}).get("connect_timeout_s", 15))
+    if (cfg.get("proxy") or {}).get("real_upstream"):
+        upstream = lambda h, p, c: egress.tcp_upstream(h, p, c, timeout=timeout)
+    else:
+        upstream = policy_only_upstream
+    return egress.EgressBroker(cx, upstream_fn=upstream, cred_for=cred_for,
+                               propose_fn=emit_egress_approval,
+                               nonce_fn=lambda: secrets.token_urlsafe(18))
+
+def serve_proxy():
+
+    import threading
+    cx = egress.connect(ALLOW_DB)
+    cfg = egresscfg.load()
+    seeded = egresscfg.apply_seed(egress, cx, cfg)
+    if seeded:
+        sys.stderr.write(f"pn-egress: applied {seeded} config-seed allowlist entries\n")
+    broker = build_broker(cx, cfg)
+    real_upstream = bool((cfg.get("proxy") or {}).get("real_upstream"))
+    if os.path.exists(PROXY_SOCK):
+        try:
+            os.unlink(PROXY_SOCK)
+        except OSError:
+            pass
+    os.makedirs(os.path.dirname(PROXY_SOCK), exist_ok=True)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(PROXY_SOCK)
+    os.chmod(PROXY_SOCK, 0o660)
+    s.listen(128)
+    sys.stderr.write(f"pn-egress proxy up on {PROXY_SOCK} (default-DENY allowlist {ALLOW_DB})\n")
+
+    def handle(conn):
+        try:
+            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, peer_uid, _gid = struct.unpack("3i", creds)
+        except OSError:
+            peer_uid = None
+        try:
+            buf = b""
+            while b"\n" not in buf:
+                ch = conn.recv(65536)
+                if not ch:
+                    return
+                buf += ch
+            req = json.loads(buf.split(b"\n", 1)[0].decode())
+            principal = principal_for_uid(peer_uid)
+            res = broker.connect(req.get("host"), int(req.get("port", 0)), principal,
+                                 req.get("task_type") or "(raw)", job_id=req.get("job_id"))
+            up = res.pop("conn", None)
+            if real_upstream and res.get("ok") and up is not None:
+
+                try:
+                    conn.sendall((json.dumps({"ok": True, "decision": "allow",
+                                              "tunnel": True}) + "\n").encode())
+                    sent, recv = egress.splice(conn, up)
+                    sys.stderr.write(f"pn-egress: tunnel {req.get('host')}:{req.get('port')} "
+                                     f"closed ({sent}B up / {recv}B down)\n")
+                finally:
+                    try:
+                        up.close()
+                    except Exception:
+                        pass
+                return
+
+            conn.sendall((json.dumps(res) + "\n").encode())
+        except Exception as e:
+            try:
+                conn.sendall((json.dumps({"ok": False, "error": str(e)}) + "\n").encode())
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    while True:
+        c, _ = s.accept()
+        threading.Thread(target=handle, args=(c,), daemon=True).start()
+
+def principal_for_uid(uid):
+
+    try:
+        from pnlib import db, DB_PATH
+        cx = db.connect(DB_PATH)
+        p = db.principal_for_uid(cx, uid)
+        cx.close()
+        return p or (f"uid:{uid}" if uid is not None else "unknown")
+    except Exception:
+        return f"uid:{uid}" if uid is not None else "unknown"
+
+def setup_netns(tier, apply=False):
+    plan = egress.plan_netns(tier, proxy_sock=PROXY_SOCK)
+    print(f"# egress netns plan for tier '{tier}'")
+    print(f"# {plan['summary']}")
+    print("# --- setup (PRIVILEGED, root; rootless --user CANNOT create a netns) ---")
+    for argv in plan["setup"]:
+        print("  " + " ".join(argv))
+    print("# --- nft default-DENY inside the netns ---")
+    print("\n".join("  " + l for l in plan["nft"].splitlines()))
+    print("# --- bind-mount the proxy socket (the SOLE authorized egress path) ---")
+    print("  " + " ".join(plan["mount"]))
+    print("# --- teardown ---")
+    for argv in plan["teardown"]:
+        print("  " + " ".join(argv))
+    if not apply:
+        print("# (plan only — pass --apply as root to execute; NOT done by default)")
+        return 0
+    if os.geteuid() != 0:
+        sys.stderr.write("pn-egress: --apply requires root (netns/veth/nft need CAP_NET_ADMIN)\n")
+        return 2
+    for argv in plan["setup"]:
+        subprocess.run(argv, check=False)
+    subprocess.run(["ip", "netns", "exec", plan["netns"], "nft", "-f", "-"],
+                   input=plan["nft"], text=True, check=False)
+    print(f"# applied netns {plan['netns']}")
+    return 0
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-egress")
+    sub = ap.add_subparsers(dest="cmd")
+
+    ap.add_argument("--proxy", action="store_true", help="run the CONNECT proxy server")
+    ap.add_argument("--setup-netns", metavar="TIER", help="print/apply the netns default-deny plan")
+    ap.add_argument("--plan-netns", metavar="TIER", help="print the netns plan only (no apply)")
+    ap.add_argument("--apply", action="store_true", help="actually apply the netns plan (root)")
+
+    p_allow = sub.add_parser("allow", help="add an allowlist entry (admin)")
+    p_allow.add_argument("host"); p_allow.add_argument("port", type=int)
+    p_allow.add_argument("--principal", default="*"); p_allow.add_argument("--task-type", default="*")
+    p_allow.add_argument("--note")
+
+    p_prop = sub.add_parser("propose", help="record a new-destination proposal (emits approval-request)")
+    p_prop.add_argument("host"); p_prop.add_argument("port", type=int)
+    p_prop.add_argument("--principal", required=True); p_prop.add_argument("--task-type", required=True)
+    p_prop.add_argument("--job-id", type=int)
+
+    for verb in ("approve", "deny"):
+        pp = sub.add_parser(verb, help=f"{verb} a pending egress proposal (HUMAN only)")
+        pp.add_argument("nonce")
+        pp.add_argument("--by", default=os.environ.get("USER", "admin"))
+
+    sub.add_parser("list", help="list allowlist entries + pending proposals")
+    p_chk = sub.add_parser("check", help="check a tuple against the allowlist (default-deny)")
+    p_chk.add_argument("host"); p_chk.add_argument("port", type=int)
+    p_chk.add_argument("--principal", required=True); p_chk.add_argument("--task-type", required=True)
+
+    args = ap.parse_args()
+
+    if args.proxy:
+        return serve_proxy()
+    if args.setup_netns:
+        return setup_netns(args.setup_netns, apply=args.apply)
+    if args.plan_netns:
+        return setup_netns(args.plan_netns, apply=False)
+
+    cx = egress.connect(ALLOW_DB)
+    if args.cmd == "allow":
+        aid = egress.add_allow(cx, args.host, args.port, args.principal, args.task_type,
+                               note=args.note, approved_by="admin-cli")
+        print(json.dumps({"ok": True, "allow_id": aid}))
+    elif args.cmd == "propose":
+        nonce = secrets.token_urlsafe(18)
+        nonce, created = egress.propose(cx, args.host, args.port, args.principal, args.task_type,
+                                        args.job_id, nonce)
+        if created:
+            emit_egress_approval(args.host, args.port, args.principal, args.task_type,
+                                 args.job_id, nonce)
+        print(json.dumps({"ok": True, "nonce": nonce, "new": created}))
+    elif args.cmd in ("approve", "deny"):
+        res = egress.resolve_proposal(cx, args.nonce, args.cmd, approved_by=args.by)
+        print(json.dumps(res))
+    elif args.cmd == "list":
+        allow = [dict(r) for r in cx.execute("SELECT * FROM egress_allow ORDER BY id").fetchall()]
+        pend = [dict(r) for r in cx.execute(
+            "SELECT * FROM egress_pending WHERE state='pending' ORDER BY created_at").fetchall()]
+        print(json.dumps({"allow": allow, "pending": pend}, indent=2))
+    elif args.cmd == "check":
+        ok = egress.is_allowed(cx, args.host, args.port, args.principal, args.task_type)
+        print(json.dumps({"host": args.host, "port": args.port, "principal": args.principal,
+                          "task_type": args.task_type, "allowed": ok,
+                          "decision": "allow" if ok else "deny (would propose)"}))
+    else:
+        ap.print_help()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

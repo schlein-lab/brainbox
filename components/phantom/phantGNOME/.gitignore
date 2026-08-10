@@ -1,0 +1,7 @@
+gschemas.compiled
+*.compiled
+__pycache__/
+*.pyc
+*.bak
+*.m*.bak
+ph_snap.py

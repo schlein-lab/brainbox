@@ -1,0 +1,39 @@
+[Unit]
+Description=phantom — system-wide syscall chokepoint (exec/open/connect tap → /run/phantom/events.sock)
+Documentation=https://github.com/schlein-lab/phantom
+DefaultDependencies=no
+After=local-fs.target
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/phantom/target/release/phantom-kerneld --files --connect --ring --socket /run/phantom/events.sock --group phantom
+Restart=always
+RestartSec=2
+
+WatchdogSec=30
+
+RuntimeDirectory=phantom
+RuntimeDirectoryMode=0750
+Group=phantom
+
+User=root
+AmbientCapabilities=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/sys/kernel/tracing /run/phantom
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

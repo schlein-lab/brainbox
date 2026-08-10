@@ -1,0 +1,19 @@
+#!/bin/sh
+PREREQ=""
+prereqs(){ echo "$PREREQ"; }
+case "${1:-}" in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /usr/bin/xz /usr/bin
+[ -x /bin/dd ] && copy_exec /bin/dd /bin
+[ -x /usr/bin/growpart ] && copy_exec /usr/bin/growpart /usr/bin
+[ -x /sbin/sgdisk ] && copy_exec /sbin/sgdisk /sbin
+for bl in /sbin/blkid /usr/sbin/blkid; do [ -x "$bl" ] && { copy_exec "$bl" /sbin; break; }; done
+for sf in /sbin/sfdisk /usr/sbin/sfdisk; do [ -x "$sf" ] && { copy_exec "$sf" /sbin; break; }; done
+[ -x /sbin/partx ] && copy_exec /sbin/partx /sbin
+[ -x /usr/sbin/partx ] && copy_exec /usr/sbin/partx /sbin
+
+for m in isofs sr_mod cdrom sd_mod virtio_blk virtio_scsi virtio_pci virtio_ring \
+         ahci libahci ata_piix ata_generic nvme nvme_core sym53c8xx mptspi; do
+    manual_add_modules "$m" 2>/dev/null || true
+done

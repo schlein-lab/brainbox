@@ -1,0 +1,285 @@
+# /scripts/brainbox -- Brainbox appliance installer (initramfs-tools, selected via boot=brainbox).
+# The init loads modules (MODULES=most) + runs udev coldplug, then calls mountroot() below. Instead
+# of mounting a root fs we write the appliance disk image onto the VM's disk and reboot into it.
+# Never returns: success -> reboot; failure -> panic() drops to the initramfs recovery shell.
+
+PREREQ=""
+prereqs(){ echo "$PREREQ"; }
+case "${1:-}" in prereqs) prereqs; exit 0;; esac
+
+# Uncompressed size of brainbox.raw in BYTES -- substituted by build-appliance-iso.sh at ISO build
+# time (from `xz --robot -l` on the payload). 0 = unknown -> runtime fallback via xz -l, else the
+# progress line shows plain GB written without a percent figure.
+RAW_BYTES=0
+
+# 9437184000 -> "9,4"  (decimal GB, one decimal, German comma; pure ash integer math)
+fmt_gb() {
+    _t=$(( ($1 + 50000000) / 100000000 ))
+    echo "$(( _t / 10 )),$(( _t % 10 ))"
+}
+
+mountroot() {
+    # Print the banner FIRST -- before the modprobe loop + udevadm settle below, which
+    # take several seconds. Under the old order the screen stayed a silent blinking
+    # cursor until after settle; now the user sees the installer is alive the instant
+    # the initramfs reaches mountroot.
+    # Kernel-Meldungen leiser stellen. Waehrend der Installation schoben sie sich sonst
+    # mitten in die Fortschrittszeile ("Installiere ... 22% [ 98.7] workqueue: ... hogged
+    # CPU"), und der einzige Text, an dem der Nutzer erkennt, dass gearbeitet wird, war
+    # zerhackt. Echte Fehler (KERN_ERR und schlimmer) kommen weiterhin durch.
+    echo 3 > /proc/sys/kernel/printk 2>/dev/null || true
+
+    # Banner ZUERST -- vor der modprobe-Schleife und udevadm settle unten, die einige
+    # Sekunden brauchen. In der alten Reihenfolge blieb der Bildschirm bis nach settle ein
+    # stiller blinkender Cursor.
+    #
+    # Reines ASCII, wie im GRUB-Menue und im Banner der laufenden Box: die Konsolenschrift
+    # im Installer kennt weder Umlaute noch Gedankenstriche und malt sie als '?'.
+    echo ""
+    echo "======================================================================"
+    echo "  BRAINBOX  -  Installation"
+    echo "======================================================================"
+    echo "  Vier Schritte. Keiner davon braucht eine Eingabe."
+    echo "  Four steps. None of them needs any input."
+    echo ""
+    echo "  Schritt 1 von 4: Geraete werden erkannt ... (einen Moment)"
+
+    # belt-and-suspenders: make sure CD + common disk drivers are up (also in MODULES/hook)
+    for m in isofs sr_mod cdrom sd_mod virtio_blk virtio_scsi virtio_pci ahci libahci ata_piix nvme; do
+        modprobe "$m" 2>/dev/null || true
+    done
+    udevadm settle 2>/dev/null || sleep 2
+
+    # 1) find the install medium (this ISO) by its payload file
+    mkdir -p /bbxcd
+    SRC=""
+    for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        for d in /dev/sr0 /dev/sr1 /dev/sr2 /dev/scd0 /dev/scd1 /dev/vdb /dev/vdc /dev/sdb /dev/sdc; do
+            [ -b "$d" ] || continue
+            mount -t iso9660 -o ro "$d" /bbxcd 2>/dev/null || continue
+            if [ -f /bbxcd/live/brainbox.raw.xz ]; then SRC="$d"; break; fi
+            umount /bbxcd 2>/dev/null || true
+        done
+        [ -n "$SRC" ] && break
+        sleep 1
+    done
+    if [ -z "$SRC" ]; then
+        echo ""
+        echo "  FEHLER: Das Installations-Medium wurde nicht gefunden."
+        echo "  ERROR: install medium not found."
+        echo ""
+        echo "  Die Maschine sieht kein CD-/DVD-Laufwerk mit dem Brainbox-ISO."
+        echo "  Bitte pruefen, ob das ISO in der VM wirklich als CD eingehaengt ist."
+        panic "brainbox: no install medium (ISO not attached as CD/DVD?)"
+        return
+    fi
+    echo "  Installations-Medium : $SRC"
+
+    # 2) pick the target disk: first FIXED, writable, >=6GiB block disk that is NOT the CD
+    TGT=""
+    for d in vda sda nvme0n1 vdb sdb nvme1n1; do
+        dev="/dev/$d"
+        [ -b "$dev" ] || continue
+        [ "$dev" = "$SRC" ] && continue
+        ro=$(cat "/sys/block/$d/ro" 2>/dev/null || echo 0); [ "$ro" = "1" ] && continue
+        sz=$(cat "/sys/block/$d/size" 2>/dev/null || echo 0)     # 512-byte sectors
+        [ "$sz" -ge 25165824 ] || continue                        # >= 12 GiB (Nutzlast ist 12000 MiB)
+        TGT="$dev"; break
+    done
+    if [ -z "$TGT" ]; then
+        echo ""
+        echo "  FEHLER: keine geeignete Festplatte gefunden (mindestens 12 GB noetig)."
+        echo "  ERROR: no suitable disk found (at least 12 GB required)."
+        echo ""
+        echo "  Die VM braucht eine leere virtuelle Festplatte von mindestens 12 GB."
+        echo "  Empfohlen sind 40 GB oder mehr."
+        panic "brainbox: no suitable target disk"
+        return
+    fi
+    TGTB=$(basename "$TGT")
+    TSZ=$(( $(cat /sys/block/$TGTB/size) / 2097152 ))
+    echo "  Ziel-Festplatte      : $TGT  (~${TSZ} GiB)  -  wird VOLLSTAENDIG ueberschrieben"
+
+    # payload size: baked in at build time; fallback = ask xz itself (robot list, tab-separated,
+    # row "totals", column 5 = uncompressed bytes). 0 stays 0 -> progress without percent.
+    case "$RAW_BYTES" in ''|*[!0-9]*) RAW_BYTES=0;; esac
+    if [ "$RAW_BYTES" -eq 0 ] && xz --robot -l /bbxcd/live/brainbox.raw.xz >/tmp/xzl 2>/dev/null; then
+        while read -r _c1 _c2 _c3 _c4 _c5 _rest; do
+            [ "$_c1" = "totals" ] && RAW_BYTES="$_c5"
+        done < /tmp/xzl
+        case "$RAW_BYTES" in ''|*[!0-9]*) RAW_BYTES=0;; esac
+    fi
+
+    # -- SCHUTZ VOR DEM ZWEITEN LAUF ----------------------------------------------------------
+    # Traegt die Zielplatte bereits eine Brainbox (ext4-Label BBXROOT, gesetzt beim Bau), dann
+    # ist dies KEINE Erstinstallation, sondern ein vergessenes ISO im Laufwerk. Ohne diese
+    # Pruefung loescht der naechste Neustart eine seit Wochen laufende Box samt Daten -- der
+    # Nutzer hat nichts falsch gemacht ausser die CD steckenzulassen.
+    # Ueberschreiben ist weiter moeglich, aber nur ausdruecklich: Kernel-Parameter
+    # brainbox.force-install (oder die Platte vorher leeren).
+    BBX_VORHANDEN=0
+    if command -v blkid >/dev/null 2>&1; then
+        blkid "$TGT"* 2>/dev/null | grep -q 'LABEL="BBXROOT"' && BBX_VORHANDEN=1
+    fi
+    if [ "$BBX_VORHANDEN" = 0 ] && command -v dd >/dev/null 2>&1; then
+        # Ohne blkid: nach dem Label im ext4-Superblock der ersten Partition suchen (Offset 0x478).
+        dd if="${TGT}1" bs=1 skip=1144 count=16 2>/dev/null | grep -q BBXROOT && BBX_VORHANDEN=1
+    fi
+    case " $(cat /proc/cmdline 2>/dev/null) " in *" brainbox.force-install "*) BBX_VORHANDEN=0 ;; esac
+
+    if [ "$BBX_VORHANDEN" = 1 ]; then
+        echo ""
+        echo "======================================================================"
+        echo "  ABBRUCH -- auf $TGT ist bereits eine Brainbox installiert."
+        echo ""
+        echo "  Es wurde NICHTS geloescht. Vermutlich steckt das Installations-ISO"
+        echo "  noch im Laufwerk / in der VM."
+        echo ""
+        echo "  So geht es weiter:"
+        echo "    1. Diese VM ausschalten."
+        echo "    2. Das ISO / CD-Laufwerk entfernen."
+        echo "    3. Neu starten -- die Box startet dann von ihrer Festplatte."
+        echo ""
+        echo "  Schnellster Weg ohne Hypervisor: neu starten und im Startmenue den"
+        echo "  zweiten Eintrag waehlen -- Von der Festplatte starten."
+        echo ""
+        echo "  Wirklich neu installieren und ALLE DATEN VERLIEREN? Dann die Box mit"
+        echo "  dem Kernel-Parameter  brainbox.force-install  starten."
+        echo "======================================================================"
+        echo "INSTALLATION UEBERSPRUNGEN (bestehende Brainbox geschuetzt)"
+        # Nicht neu starten: ein Reboot liefe wieder ins ISO und der Nutzer saesse in einer
+        # Schleife, ohne je zu lesen, was hier steht.
+        while true; do sleep 3600; done
+    fi
+
+    echo ""
+    echo "  Schritt 2 von 4: Brainbox wird auf $TGT geschrieben."
+    if [ "$RAW_BYTES" -gt 0 ]; then
+        echo "  $(fmt_gb "$RAW_BYTES") GB, ueblicherweise 5 bis 15 Minuten."
+    else
+        echo "  Das dauert ueblicherweise 5 bis 15 Minuten."
+    fi
+    echo "  Die Prozentzahl unten laeuft hoch. Solange sie sich bewegt, arbeitet die Box."
+    echo "  The percentage below keeps rising. While it moves, the box is working."
+    echo "  NICHT ausschalten / do NOT power off."
+    echo ""
+
+    # 3) stream the compressed appliance image straight onto the disk -- WITH live progress.
+    #    No dd: the initramfs dd is klibc dd (rejects status=..., and SIGUSR1 kills it -- kernel
+    #    default action), and this busybox build has no dd applet at all. xz writes the target
+    #    directly, so its exit code is the honest verdict (the old pipeline hid xz failures).
+    #    Progress: the subshell's fd 1 and xz's fd 1 share one open file description, so
+    #    /proc/<subshell>/fdinfo/1 "pos:" is the exact number of bytes written so far.
+    rm -f /tmp/xz.rc
+    ( xz -dc /bbxcd/live/brainbox.raw.xz; echo $? >/tmp/xz.rc ) >"$TGT" 2>/tmp/xz.err &
+    WPID=$!
+    POS=0
+    SEK=0
+    while [ ! -s /tmp/xz.rc ]; do
+        kill -0 "$WPID" 2>/dev/null || break
+        _pl=""
+        read -r _pl < "/proc/$WPID/fdinfo/1" 2>/dev/null
+        set -- $_pl
+        case "${2:-}" in *[!0-9]*|'') ;; *) POS=$2;; esac
+        SEK=$(( SEK + 1 ))
+        if [ "$RAW_BYTES" -gt 0 ]; then
+            PCT=$(( POS * 100 / RAW_BYTES )); [ "$PCT" -gt 100 ] && PCT=100
+            # Restzeit aus dem bisher erreichten Durchsatz. Eine Zahl, die kleiner wird, ist
+            # die ehrlichste Antwort auf "haengt der oder arbeitet der": ein Prozentwert, der
+            # bei 22 % eine Minute lang stehenbleibt, sieht aus wie ein Absturz.
+            REST=""
+            if [ "$POS" -gt 104857600 ] && [ "$SEK" -gt 5 ]; then
+                _r=$(( (RAW_BYTES - POS) * SEK / POS ))
+                if [ "$_r" -gt 90 ]; then REST="  noch ca. $(( (_r + 59) / 60 )) Min"
+                else REST="  gleich fertig"; fi
+            fi
+            printf '\r  Installiere ... %3d%%  (%s von %s GB)%s   ' \
+                   "$PCT" "$(fmt_gb "$POS")" "$(fmt_gb "$RAW_BYTES")" "$REST"
+        else
+            printf '\r  Installiere ... %s GB geschrieben - nicht ausschalten ' "$(fmt_gb "$POS")"
+        fi
+        sleep 1
+    done
+    wait "$WPID" 2>/dev/null
+    RC="$(cat /tmp/xz.rc 2>/dev/null)"
+    case "$RC" in ''|*[!0-9]*) RC=255;; esac
+
+    if [ "$RC" -ne 0 ]; then
+        printf '\r%78s\r' ""
+        echo ""
+        echo "  FEHLER: Die Installation ist fehlgeschlagen (Code $RC)."
+        echo "  ERROR: installation failed (code $RC)."
+        ERR="$(cat /tmp/xz.err 2>/dev/null)"
+        [ -n "$ERR" ] && echo "  Meldung: $ERR"
+        case "$ERR" in
+            *orrupt*|*nexpected\ end*|*ormat*|*agic*)
+                echo "  Das Installations-Medium scheint beschaedigt oder unvollstaendig zu sein."
+                echo "  Bitte das ISO neu herunterladen bzw. neu beschreiben und erneut starten.";;
+            *rite\ error*|*o\ space*|*nput/output*)
+                echo "  Die Ziel-Festplatte $TGT meldet einen Schreibfehler.";;
+        esac
+        panic "brainbox: writing image to $TGT failed (xz rc=$RC)"
+        return
+    fi
+
+    if [ "$RAW_BYTES" -gt 0 ]; then
+        printf '\r  Installiere ... 100%%  (%s von %s GB)  fertig geschrieben.            \n' \
+               "$(fmt_gb "$RAW_BYTES")" "$(fmt_gb "$RAW_BYTES")"
+    else
+        printf '\r  Installiere ... fertig geschrieben.                                 \n'
+    fi
+    echo ""
+    echo "  Schritt 3 von 4: Puffer werden auf die Platte geschrieben."
+    # sync kann auf langsamen Medien (USB-Stick, SD-Karte, ueberlastetes NAS) Minuten dauern
+    # und gibt dabei KEIN Lebenszeichen -- genau der Moment, in dem jemand die Maschine
+    # ausschaltet und die frische Installation zerstoert. Also im Hintergrund laufen lassen
+    # und daneben sichtbar mitzaehlen.
+    rm -f /tmp/sync.done
+    ( sync; sync; : > /tmp/sync.done ) &
+    SPID=$!; SS=0
+    while [ ! -f /tmp/sync.done ]; do
+        kill -0 "$SPID" 2>/dev/null || break
+        SS=$(( SS + 1 ))
+        printf '\r  ... laeuft (%d s) - jetzt auf keinen Fall ausschalten   ' "$SS"
+        sleep 1
+    done
+    wait "$SPID" 2>/dev/null
+    printf '\r  ... alles sicher auf der Platte.                            \n' 
+
+    # 4) grow the root partition to fill the disk (image is 9G; disk may be larger). Best-effort in
+    #    the tiny initramfs; the installed system also grows partition+filesystem on first boot
+    #    (brainbox-firstboot.sh) where the full util-linux/e2fsprogs toolset is present -- that is the
+    #    authoritative grow, so a miss here is harmless.
+    if command -v growpart >/dev/null 2>&1; then growpart "$TGT" 1 >/dev/null 2>&1 || true
+    elif command -v sfdisk >/dev/null 2>&1; then echo ", +" | sfdisk --no-reread -N 1 "$TGT" >/dev/null 2>&1 || true; fi
+    umount /bbxcd 2>/dev/null || true
+
+    echo ""
+    echo "======================================================================"
+    echo "  Schritt 4 von 4: FERTIG - die Brainbox ist installiert."
+    echo "  DONE - Brainbox is installed."
+    echo ""
+    echo "  Und jetzt? / What now?"
+    echo ""
+    echo "  1. Das ISO / CD-Laufwerk JETZT aus der VM entfernen."
+    echo "     Remove the ISO / CD drive from the VM now."
+    echo "  2. Die Box startet gleich von selbst neu. Der erste Start dauert ein"
+    echo "     bis drei Minuten; auf dem Bildschirm laeuft dabei eine Anzeige mit,"
+    echo "     an der man sieht, dass sie arbeitet."
+    echo "     It reboots by itself; first boot takes 1-3 minutes with a progress"
+    echo "     display on this screen."
+    echo "  3. Danach steht HIER die Adresse fuer die Einrichtung, mit QR-Code."
+    echo "     Meist:   http://brainbox.local/"
+    echo "     Then this screen shows the setup address and a QR code."
+    echo ""
+    echo "  Es ist nichts weiter zu tun. Kein Befehl, keine Kommandozeile."
+    echo "  Nothing else to do. No commands, no command line."
+    echo ""
+    echo "  Automatischer Neustart in 15 Sekunden ..."
+    echo "======================================================================"
+    # machine-readable success marker (the runtest harness + any CI watches for this exact line)
+    echo "INSTALLATION ABGESCHLOSSEN"
+    sleep 15
+    reboot -f
+    while true; do sleep 5; done
+}

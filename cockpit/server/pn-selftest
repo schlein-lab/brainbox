@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import time
+import stat
+import socket
+import ssl
+import subprocess
+
+sys.path.insert(0, os.environ.get("PNLIB_HOME") or os.path.expanduser("~/portioneer"))
+try:
+    from pnlib import site as _site
+except Exception:
+    _site = None
+
+def cfg(k, d=None):
+    if _site is not None:
+        return _site.get(k, d)
+    return os.environ.get(k, d)
+
+OUT = "/run/brainbox/selftest.json"
+PNCTL = os.path.expanduser("~/.local/bin/pnctl")
+PORTAL_PORT = int(cfg("PORTAL_PORT", "8077") or "8077")
+BROKER_SOCK = cfg("BROKER_SOCK", "/run/portioneer/pnd-broker.sock")
+
+NAS_DATA_MNT = cfg("NAS_DATA_MNT") or cfg("CLOUDDATA_MNT", "/data/clouddata")
+HA = str(cfg("HA_ENABLED", "0")).lower() in ("1", "true", "yes", "on")
+VIP = cfg("VIP")
+
+def _run(cmd, timeout=8):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+def pnctl_states():
+    r = _run([PNCTL, "list"], timeout=10)
+    st = {}
+    if r and r.stdout:
+        for ln in r.stdout.splitlines():
+            p = ln.split()
+            if len(p) >= 2 and not ln.startswith(" "):
+                st[p[0]] = p[1]
+    return st
+
+def svc_running(states, name):
+    return states.get(name, "").upper().startswith("RUNNING")
+
+def sock_ok(path):
+    try:
+        return stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+def portal_ok(port):
+
+    try:
+        ctx = ssl._create_unverified_context()
+        with socket.create_connection(("127.0.0.1", port), timeout=4) as s:
+            with ctx.wrap_socket(s, server_hostname="localhost"):
+                return True
+    except Exception:
+        return False
+
+def ip_has(addr):
+    r = _run(["ip", "-4", "addr"], timeout=5)
+    return bool(r and r.stdout and addr and addr in r.stdout)
+
+def pingable(addr):
+    r = _run(["ping", "-c1", "-W1", addr], timeout=3)
+    return bool(r and r.returncode == 0)
+
+def is_mount(mp):
+    try:
+        return os.path.ismount(mp)
+    except Exception:
+        return False
+
+def collect():
+    states = pnctl_states()
+    checks = []
+
+    def add(name, status, detail, sev="crit"):
+        checks.append({"name": name, "status": status, "detail": detail, "sev": sev})
+
+    add("pnd (Dispatcher)", "ok" if svc_running(states, "pnd") else "fail",
+        "RUNNING" if svc_running(states, "pnd") else "NICHT running", "crit")
+    add("Broker-Socket", "ok" if sock_ok(BROKER_SOCK) else "fail",
+        BROKER_SOCK + (" vorhanden" if sock_ok(BROKER_SOCK) else " FEHLT"), "crit")
+    add("Portal (:%d TLS)" % PORTAL_PORT, "ok" if portal_ok(PORTAL_PORT) else "fail",
+        "erreichbar" if portal_ok(PORTAL_PORT) else "keine TLS-Antwort", "crit")
+    add("LLM-Broker (pn-llmd)", "ok" if svc_running(states, "pn-llmd") else "fail",
+        "RUNNING" if svc_running(states, "pn-llmd") else "NICHT running", "crit")
+    se = "/run/brainbox/site.env"
+    se_ok = os.path.exists(se) and os.path.getsize(se) > 0
+    add("Site-Autodetect (site.env)", "ok" if se_ok else "fail",
+        "frisch erzeugt" if se_ok else "fehlt/leer — pn-sitedetect lief nicht", "crit")
+    add("cgroup pn.slice", "ok" if os.path.exists("/sys/fs/cgroup/pn.slice") else "fail",
+        "delegiert" if os.path.exists("/sys/fs/cgroup/pn.slice") else "FEHLT", "crit")
+
+    if HA and VIP:
+        held = ip_has(VIP)
+        reach = held or pingable(VIP)
+        add("VIP %s erreichbar" % VIP, "ok" if reach else "fail",
+            ("hier gehalten (Master)" if held else "erreichbar (Peer haelt sie)") if reach
+            else "NICHT erreichbar", "crit")
+        add("keepalived", "ok" if svc_running(states, "keepalived") else "warn",
+            "RUNNING" if svc_running(states, "keepalived") else "nicht running", "warn")
+
+    it = "/sys/fs/cgroup/pn.slice/interactive"
+    add("cgroup interactive-Tier", "ok" if os.path.exists(it) else "warn",
+        "vorhanden" if os.path.exists(it) else "fehlt (S2 nicht angelegt)", "warn")
+    if NAS_DATA_MNT:
+        m = is_mount(NAS_DATA_MNT)
+        add("NAS-Daten-Mount", "ok" if m else "warn",
+            (NAS_DATA_MNT + " gemountet") if m else (NAS_DATA_MNT + " NICHT gemountet (NAS offline?)"), "warn")
+    add("zyrkel", "ok" if svc_running(states, "zyrkel") else "warn",
+        "RUNNING" if svc_running(states, "zyrkel") else "nicht running", "warn")
+
+    relay = states.get("pn-relayd", "?")
+    add("pn-relayd (Off-LAN)", "info",
+        "disabled = dunkel by design (arm via Freigabe)" if relay == "disabled" else "Zustand: " + relay, "info")
+
+    return checks
+
+def overall(checks):
+    if any(c["status"] == "fail" and c["sev"] == "crit" for c in checks):
+        return "fail"
+    if any(c["status"] in ("fail", "warn") for c in checks):
+        return "warn"
+    return "ok"
+
+def main():
+    boot = "--boot" in sys.argv
+    deadline = time.time() + (20 if boot else 0)
+    checks = collect()
+
+    while time.time() < deadline and any(c["status"] == "fail" and c["sev"] == "crit" for c in checks):
+        time.sleep(2)
+        checks = collect()
+
+    host = socket.gethostname()
+    ov = overall(checks)
+    result = {
+        "ts": int(time.time()), "boot": boot, "overall": ov, "host": host,
+        "vip": VIP, "vip_held": (ip_has(VIP) if (HA and VIP) else None),
+        "profile": (cfg("NET_PROFILE", "home")),
+        "checks": checks,
+        "summary": "%d ok / %d warn / %d fail" % (
+            sum(c["status"] == "ok" for c in checks),
+            sum(c["status"] == "warn" for c in checks),
+            sum(c["status"] == "fail" for c in checks)),
+    }
+    try:
+        tmp = OUT + ".tmp"
+        open(tmp, "w").write(json.dumps(result, ensure_ascii=False))
+        os.replace(tmp, OUT)
+    except OSError as e:
+        sys.stderr.write("[pn-selftest] cannot write %s: %s\n" % (OUT, e))
+    fails = [c["name"] for c in checks if c["status"] == "fail"]
+    sys.stderr.write("[pn-selftest] overall=%s  %s%s\n" % (
+        ov, result["summary"], ("  FAIL: " + ", ".join(fails)) if fails else ""))
+    return 0 if ov != "fail" else 1
+
+if __name__ == "__main__":
+    sys.exit(main())

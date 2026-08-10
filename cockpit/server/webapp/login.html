@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>brainarbeit — Login</title>
+<link rel="icon" href="/favicon-32.png" sizes="32x32">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8fafc">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#020617">
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f8fafc; --card:#ffffff; --bd:#e2e8f0; --bd2:#cbd5e1;
+    --fg:#0f172a; --mut:#64748b; --acc:#6f5fe6; --acc2:#8a7fff; --err:#ef4444;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#020617; --card:#0f172a; --bd:#1e293b; --bd2:#334155; --fg:#f1f5f9; --mut:#94a3b8; --acc:#8a7fff; --acc2:#a89fff; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0; min-height:100dvh; display:grid; place-items:center; padding:24px;
+    background:var(--bg); color:var(--fg);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  form{background:var(--card); border:1px solid var(--bd); border-radius:20px; padding:32px 28px;
+    width:100%; max-width:340px; box-shadow:0 12px 32px rgba(2,6,23,.12); text-align:center}
+  .brand-logo{width:200px; max-width:70%; height:auto; margin:2px auto 10px; display:block}
+  .brand{display:inline-flex; align-items:center; gap:7px; margin:2px 0; font-weight:800; letter-spacing:.01em; color:var(--acc); font-size:17px}
+  h1{font-size:12px; margin:2px 0 20px; font-weight:600; color:var(--mut); letter-spacing:.16em; text-transform:uppercase}
+  label{display:block; text-align:left; font-size:12px; color:var(--mut); margin:12px 0 5px}
+  input{width:100%; background:transparent; color:var(--fg); border:1px solid var(--bd2);
+    border-radius:11px; padding:12px 14px; font-size:16px}
+  input:focus{outline:2px solid var(--acc2); outline-offset:1px; border-color:var(--acc)}
+  button{margin-top:20px; width:100%; min-height:48px; background:var(--acc); color:#fff; border:0;
+    border-radius:11px; font-size:15px; font-weight:700; cursor:pointer}
+  button:hover{filter:brightness(1.05)}
+  button.ghost{background:transparent;border:1px solid var(--bd);color:var(--fg)}
+  .err{font-size:13px; min-height:18px; margin-top:12px; color:var(--err)}
+  .hint{color:var(--mut); font-size:11px; margin-top:14px}
+
+  .rem{display:none; align-items:center; gap:12px; text-align:left; background:var(--bg);
+    border:1px solid var(--bd); border-radius:14px; padding:11px 13px; margin:4px 0 2px}
+  .rem .av{width:40px; height:40px; flex:0 0 40px; border-radius:50%; display:grid; place-items:center;
+    background:var(--acc); color:#fff; font-weight:800; font-size:18px}
+  .rem .who{flex:1; min-width:0}
+  .rem .who .nm{font-weight:700; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .rem .who .sub{font-size:11px; color:var(--mut); margin-top:2px}
+</style>
+</head>
+<body>
+  <form method="POST" action="/api/login">
+    <img class="brand-logo" src="/brand/lockup.png" alt="brainarbeit" width="200" height="49">
+
+    <h1>anmelden</h1>
+
+    <div class="rem" id="remBanner">
+      <div class="av" id="remAv">?</div>
+      <div class="who">
+        <div class="nm" id="remName">—</div>
+        <div class="sub">weiter mit Passwort oder Fingerabdruck</div>
+      </div>
+    </div>
+
+    <div id="userField">
+      <label for="user">Benutzer</label>
+      <input id="user" name="user" type="text" autocapitalize="none" autocorrect="off" autocomplete="username" placeholder="Benutzer" autofocus>
+    </div>
+
+    <label for="password">Passwort</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Passwort / PIN">
+    <button type="submit">Eintreten</button>
+    <button type="button" id="pkLogin" hidden class="ghost" style="margin-top:8px">🔐 Mit Passkey / Fingerabdruck anmelden</button>
+    <div class="err">%ERR%</div>
+
+    <div class="hint" id="switchLine" style="display:none">Nicht <b id="switchName">—</b>? · <a href="#" id="forgetLink" style="color:var(--acc)">Anderen Benutzer wählen</a></div>
+
+    <div class="hint"><span id="ownerHint">owner: Benutzer „owner“ + PIN · </span><a href="#" id="forgotLink" style="color:var(--acc)">Passwort vergessen?</a> · <a href="#" id="regLink" style="color:var(--acc)">Konto anfordern</a></div>
+    <div class="hint" style="margin-top:8px">„Nicht sicher“? → <a href="/trust" style="color:var(--acc)">Diese Box als vertrauenswürdig einrichten</a> (einmal pro Gerät)</div>
+  </form>
+
+  <form id="regForm" hidden onsubmit="return false">
+    <img class="brand-logo" src="/brand/lockup.png" alt="brainarbeit" width="200" height="49">
+
+    <h1>konto anfordern</h1>
+    <label for="rname">Name</label>
+    <input id="rname" type="text" autocomplete="name" placeholder="Vor- und Nachname">
+    <label for="remail">E-Mail</label>
+    <input id="remail" type="email" autocomplete="email" placeholder="du@example.org">
+    <label for="rpw">Passwort (min. 8 Zeichen)</label>
+    <input id="rpw" type="password" autocomplete="new-password" placeholder="Passwort wählen">
+    <label for="rpw2">Passwort bestätigen</label>
+    <input id="rpw2" type="password" autocomplete="new-password" placeholder="Passwort wiederholen">
+    <button id="rsend" type="button">Konto anfordern</button>
+    <div class="err" id="rmsg"></div>
+    <div class="hint"><a href="#" id="rbackLink" style="color:var(--acc)">Zurück zum Login</a></div>
+  </form>
+
+  <form id="forgotForm" hidden onsubmit="return false">
+    <img class="brand-logo" src="/brand/lockup.png" alt="brainarbeit" width="200" height="49">
+
+    <h1>passwort zurücksetzen</h1>
+    <label for="fuser">Benutzer oder E-Mail</label>
+    <input id="fuser" type="text" autocapitalize="none" autocorrect="off" placeholder="Benutzer / E-Mail">
+    <button id="fsend" type="button">Reset-Link per E-Mail senden</button>
+    <div class="err" id="fmsg"></div>
+    <div class="hint"><a href="#" id="backLink" style="color:var(--acc)">Zurück zum Login</a></div>
+  </form>
+
+  <script>
+  (function () {
+    var lf = document.querySelector('form[action="/api/login"]'), ff = document.getElementById('forgotForm');
+    var userInput = document.getElementById('user'), userField = document.getElementById('userField');
+    var remBanner = document.getElementById('remBanner'), remAv = document.getElementById('remAv'),
+        remName = document.getElementById('remName'), switchLine = document.getElementById('switchLine'),
+        switchName = document.getElementById('switchName'), ownerHint = document.getElementById('ownerHint');
+    var errBox = document.querySelector('.err');
+    var LS_KEY = 'pn_last_user';
+
+    function lsGet(){ try { return localStorage.getItem(LS_KEY) || ''; } catch (e) { return ''; } }
+    function lsSet(v){ try { if (v) localStorage.setItem(LS_KEY, v); } catch (e) {} }
+    function lsDel(){ try { localStorage.removeItem(LS_KEY); } catch (e) {} }
+
+    function applyRemembered(name) {
+      userInput.value = name;
+      userField.style.display = 'none';
+      remBanner.style.display = 'flex';
+      remAv.textContent = (name.charAt(0) || '?').toUpperCase();
+      remName.textContent = name;
+      switchName.textContent = name;
+      switchLine.style.display = 'block';
+      if (ownerHint) ownerHint.style.display = 'none';
+      var p = document.getElementById('password'); if (p) setTimeout(function () { p.focus(); }, 0);
+    }
+    function forgetUser() {
+      lsDel();
+      userInput.value = '';
+      userField.style.display = '';
+      remBanner.style.display = 'none';
+      switchLine.style.display = 'none';
+      if (ownerHint) ownerHint.style.display = '';
+      userInput.focus();
+    }
+    var remembered = lsGet();
+    if (remembered) applyRemembered(remembered);
+    document.getElementById('forgetLink').addEventListener('click', function (e) { e.preventDefault(); forgetUser(); });
+
+    lf.addEventListener('submit', function () { var u = (userInput.value || '').trim(); if (u) lsSet(u); });
+
+    document.getElementById('forgotLink').addEventListener('click', function (e) {
+      e.preventDefault(); lf.hidden = true; ff.hidden = false; document.getElementById('fuser').focus();
+    });
+    document.getElementById('backLink').addEventListener('click', function (e) {
+      e.preventDefault(); ff.hidden = true; lf.hidden = false;
+    });
+    var rf = document.getElementById('regForm');
+    document.getElementById('regLink').addEventListener('click', function (e) {
+      e.preventDefault(); lf.hidden = true; ff.hidden = true; rf.hidden = false;
+      document.getElementById('rname').focus();
+    });
+    document.getElementById('rbackLink').addEventListener('click', function (e) {
+      e.preventDefault(); rf.hidden = true; lf.hidden = false;
+    });
+
+    function b64uToBuf(s){s=String(s).replace(/-/g,'+').replace(/_/g,'/');var p=s.length%4;if(p)s+='='.repeat(4-p);var bin=atob(s),b=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b.buffer;}
+    function bufToB64u(buf){var b=new Uint8Array(buf),s='';for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+    var pkBtn = document.getElementById('pkLogin');
+    if (window.PublicKeyCredential && pkBtn) {
+      fetch('/api/passkey/available').then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.available) { pkBtn.hidden = false; }
+      }).catch(function () {});
+    }
+    if (pkBtn) pkBtn.addEventListener('click', function () {
+      var user = (userInput.value || '').trim();
+      pkBtn.disabled = true; var label = pkBtn.textContent; pkBtn.textContent = 'Warte auf Fingerabdruck…';
+      if (errBox) { errBox.style.color = 'var(--err)'; errBox.textContent = ''; }
+      fetch('/api/passkey/login/begin', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: user }) })
+        .then(function (r) { return r.json(); }).then(function (d) {
+          if (!d || !d.ok || !d.publicKey) throw new Error('Start fehlgeschlagen');
+          var pk = d.publicKey;
+          var opt = { challenge: b64uToBuf(pk.challenge), rpId: pk.rpId, timeout: pk.timeout || 120000,
+                      userVerification: pk.userVerification || 'required',
+                      allowCredentials: (pk.allowCredentials || []).map(function (c) {
+                        return { type: 'public-key', id: b64uToBuf(c.id) }; }) };
+          return navigator.credentials.get({ publicKey: opt }).then(function (cred) {
+            var resp = { id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type, response: {
+              authenticatorData: bufToB64u(cred.response.authenticatorData),
+              clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+              signature: bufToB64u(cred.response.signature) } };
+            return fetch('/api/passkey/login/finish', { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cid: d.cid, response: resp }) });
+          });
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d.ok) { lsSet(d.user || user); location.href = d.redirect || '/'; }
+          else { throw new Error((d && d.error) || 'Anmeldung fehlgeschlagen'); }
+        }).catch(function (e) {
+
+          if (!user) {
+            forgetUser();
+            if (errBox) { errBox.style.color = 'var(--mut)';
+              errBox.textContent = 'Gib zuerst deinen Benutzernamen ein — dann auf Fingerabdruck tippen.'; }
+          } else if (errBox) { errBox.style.color = 'var(--err)';
+            errBox.textContent = 'Passkey: ' + (e && e.message ? e.message : e); }
+          pkBtn.disabled = false; pkBtn.textContent = label;
+        });
+    });
+
+    document.getElementById('rsend').addEventListener('click', function () {
+      var n = document.getElementById('rname').value.trim(),
+          v = document.getElementById('remail').value.trim(),
+          p1 = document.getElementById('rpw').value,
+          p2 = document.getElementById('rpw2').value,
+          m = document.getElementById('rmsg');
+      if (p1.length < 8) { m.style.color = 'var(--err)'; m.textContent = 'Passwort: mindestens 8 Zeichen.'; return; }
+      if (p1 !== p2) { m.style.color = 'var(--err)'; m.textContent = 'Passwörter stimmen nicht überein.'; return; }
+      m.style.color = 'var(--mut)'; m.textContent = 'Sende…';
+      fetch('/api/register/request', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: n, email: v, password: p1 }) })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            rf.innerHTML = '<img class="brand-logo" src="/brand/lockup.png" alt="brainarbeit" width="200" height="49">'
+              + '<h1>✓ Anfrage gesendet</h1>'
+              + '<p style="color:var(--mut);line-height:1.5;margin:.4em 0 1em">'
+              + (j.msg || 'Ein Admin schaltet dich frei. Danach meldest du dich mit deinem Passwort an.')
+              + '</p><button id="rdoneBack" type="button">Zur Anmeldung</button>';
+            var bd = document.getElementById('rdoneBack');
+            if (bd) bd.addEventListener('click', function () { location.reload(); });
+          } else { m.style.color = 'var(--err)'; m.textContent = (j && j.error) || 'Fehlgeschlagen.'; }
+        })
+        .catch(function () { m.style.color = 'var(--err)'; m.textContent = 'Netzwerkfehler.'; });
+    });
+    document.getElementById('fsend').addEventListener('click', function () {
+      var v = document.getElementById('fuser').value.trim(), m = document.getElementById('fmsg');
+      m.style.color = 'var(--mut)'; m.textContent = 'Sende…';
+      fetch('/api/auth/forgot', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: v }) })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { m.style.color = 'var(--mut)';
+          m.textContent = j.msg || 'Falls ein Konto existiert, wurde eine E-Mail gesendet.'; })
+        .catch(function () { m.style.color = 'var(--err)'; m.textContent = 'Netzwerkfehler.'; });
+    });
+  })();
+</script>
+</body>
+</html>
