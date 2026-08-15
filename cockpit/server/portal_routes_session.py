@@ -324,6 +324,7 @@ _cell_desktop_status = None
 _flathub_search = None
 _cell_freeze = None
 _cell_kill_erase = None
+KIT_DECKEL = int(os.environ.get("PN_KIT_DECKEL", "14"))
 _cell_power = None
 
 _RELAY_WARMING = set()
@@ -332,18 +333,20 @@ def _relay_warm_kick(principal, sid):
     key = (principal, sid)
     with _RELAY_WARM_LOCK:
         if key in _RELAY_WARMING:
-            return
+            return False
         _RELAY_WARMING.add(key)
     def _run():
         try:
             if callable(_cell_power):
                 _cell_power(principal, sid, True)
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write("[pn-session] %s: Hochfahren im Hintergrund "
+                             "fehlgeschlagen: %s\n" % (sid, e))
         finally:
             with _RELAY_WARM_LOCK:
                 _RELAY_WARMING.discard(key)
-    threading.Thread(target=_run, name="relay-warm", daemon=True).start()
+    threading.Thread(target=_run, name="zelle-hochfahren", daemon=True).start()
+    return True
 
 _cell_resources = None
 _cells_enabled = None
@@ -800,8 +803,12 @@ class SessionRoutes:
             if lim > 0 and len(turns) > lim:
                 turns = turns[-lim:]
             out = [{"i": t.get("i"), "role": t.get("role"), "text": t.get("text"),
-                    "ts": t.get("ts")} for t in turns]
-            return self._sess_json({"ok": True, "sid": sid, "turns": out})
+                    "ts": t.get("ts"), "model": self._model_label(t.get("model"))} for t in turns]
+            resp = {"ok": True, "sid": sid, "turns": out}
+            if args.get("act"):
+                resp["activity"] = self._bounded_call(
+                    lambda: self._relay_activity(principal, sid), 2.0, None)
+            return self._sess_json(resp)
 
         if op == "session.say":
             sid = str(args.get("sid") or "").strip()
@@ -1109,7 +1116,7 @@ class SessionRoutes:
             if p2 is None or not _os.path.isfile(p2):
                 return self._sess_json({"ok": False, "error": "Datei nicht gefunden"}, 404)
             CHUNK = 256 * 1024
-            MAXGET = 64 * 1024 * 1024
+            MAXGET = 512 * 1024 * 1024
             try:
                 size = _os.path.getsize(p2)
             except OSError as e:
@@ -1185,7 +1192,161 @@ class SessionRoutes:
                 return self._sess_json({"ok": True})
             except Exception as e:
                 return self._sess_json({"ok": False, "error": "push: %s" % e}, 500)
+        if op == "files.put":
+            import base64 as _b64u
+            sid = str(args.get("sid") or "").strip()
+            bad = self._bad_sid(sid, principal)
+            if bad:
+                return bad
+            rec = _share_pub(sid, principal=principal)
+            fpath = (rec or {}).get("path")
+            if not fpath or not _os.path.isdir(fpath):
+                return self._sess_json({"ok": False, "error": "Kein Austausch-Ordner für diese Session"}, 404)
+            fbase = _os.path.realpath(fpath)
+            d = self._sess_files_resolve(fbase, str(args.get("sub") or ""))
+            if d is None or not _os.path.isdir(d):
+                return self._sess_json({"ok": False, "error": "Zielordner nicht gefunden"}, 404)
+            name = _os.path.basename(str(args.get("name") or "").strip())
+            if not name or name.startswith("."):
+                return self._sess_json({"ok": False, "error": "Dateiname fehlt/ungültig"}, 400)
+            dest = _os.path.join(d, name)
+            tmp = dest + ".pn-up"
+            CHUNK = 256 * 1024
+            MAXPUT = 256 * 1024 * 1024
+            try:
+                offset = max(0, int(args.get("offset") or 0))
+            except Exception:
+                offset = 0
+            try:
+                data = _b64u.b64decode(str(args.get("chunk") or ""), validate=True)
+            except Exception:
+                return self._sess_json({"ok": False, "error": "bad chunk"}, 400)
+            if len(data) > 2 * CHUNK:
+                return self._sess_json({"ok": False, "error": "chunk too large"}, 400)
+            if offset + len(data) > MAXPUT:
+                try: _os.remove(tmp)
+                except OSError: pass
+                return self._sess_json({"ok": False, "error":
+                    "Datei zu groß fürs Handy (>256 MiB) — über das Netzlaufwerk laden."}, 413)
+            try:
+                cur = _os.path.getsize(tmp) if _os.path.exists(tmp) else 0
+            except OSError:
+                cur = 0
+            if offset == 0:
+                mode = "wb"
+            elif offset == cur:
+                mode = "r+b"
+            else:
+                return self._sess_json({"ok": False, "error": "offset mismatch", "expected": cur}, 409)
+            try:
+                with open(tmp, mode) as f:
+                    f.seek(offset)
+                    f.write(data)
+            except OSError as e:
+                return self._sess_json({"ok": False, "error": "Schreiben fehlgeschlagen: %s" % e}, 500)
+            if bool(args.get("eof")):
+                try:
+                    _os.replace(tmp, dest)
+                    size = _os.path.getsize(dest)
+                except OSError as e:
+                    return self._sess_json({"ok": False, "error": "Abschluss fehlgeschlagen: %s" % e}, 500)
+                return self._sess_json({"ok": True, "name": name, "size": size, "done": True})
+            return self._sess_json({"ok": True, "name": name, "offset": offset + len(data), "done": False})
         return self._sess_json({"ok": False, "error": "unknown op %r" % op}, 400)
+
+    def _model_label(self, m):
+        if not m:
+            return None
+        low = str(m).lower()
+        for key, lab in (("opus", "Opus 4.8"), ("sonnet", "Sonnet 5"),
+                         ("haiku", "Haiku 4.5"), ("fable", "Fable 5")):
+            if key in low:
+                return lab
+        base = str(m).split("/")[-1].split("-")[0].strip()
+        return base[:16] or None
+
+    def _bounded_call(self, fn, timeout, default):
+        import threading as _th
+        box = [default]
+        def _run():
+            try:
+                box[0] = fn()
+            except Exception:
+                pass
+        t = _th.Thread(target=_run, daemon=True)
+        t.start(); t.join(timeout)
+        return box[0]
+
+    def _relay_activity(self, principal, sid):
+        now = time.time()
+        try:
+            la = (_session_store(principal).get(sid) or {}).get("last_active")
+        except Exception:
+            la = None
+        try:
+            import pn_cell_session as _cs
+            cell = _cs.get_manager().get(principal, sid)
+        except Exception:
+            cell = None
+        if cell is None:
+            return {"warm": False, "running": False, "working": False, "last_active": la}
+        if not bool(self._bounded_call(cell.alive, 1.5, False)):
+            return {"warm": False, "running": False, "working": False, "last_active": la}
+        try:
+            paused = bool((_sessprov_get(principal, sid) or {}).get("paused"))
+        except Exception:
+            paused = False
+        health = None; toks = None; jact = None
+        try:
+            import pn_session_watchdog as _wd
+            health = _wd.health(principal, sid) if hasattr(_wd, "health") else None
+            toks = _wd.tokens_of(principal, sid) if hasattr(_wd, "tokens_of") else None
+            jact = _wd.jsonl_activity_of(principal, sid) if hasattr(_wd, "jsonl_activity_of") else None
+        except Exception:
+            pass
+        prog = None
+        try:
+            if hasattr(cell, "progress_cache"):
+                prog = cell.progress_cache()
+        except Exception:
+            prog = None
+        obs = None
+        try:
+            ob = getattr(cell, "_observer", None)
+            if ob and ob.get("text"):
+                obs = {"text": ob["text"][:240], "problem": bool(ob.get("problem"))}
+        except Exception:
+            obs = None
+        grew = (jact or {}).get("grew_ts") if isinstance(jact, dict) else None
+        prog_age = prog.get("age_s") if isinstance(prog, dict) else None
+        if grew:
+            active_age = max(0, int(now - float(grew)))
+        elif prog_age is not None:
+            active_age = int(prog_age)
+        elif la:
+            active_age = max(0, int(now - float(la)))
+        else:
+            active_age = None
+        FRESH, STALL = 240, 1500
+        working = None if active_age is None else (active_age <= FRESH)
+        preview = None
+        if isinstance(prog, dict) and prog.get("tail"):
+            for ln in reversed(str(prog["tail"]).splitlines()):
+                ln = ln.strip("#-*> \t")
+                if ln:
+                    preview = ln[:160]
+                    break
+        if not preview and obs:
+            preview = obs["text"][:160]
+        st = str((health or {}).get("state") or "")
+        restarting = st in ("restarting", "restart", "failed", "stalled")
+        return {"warm": True, "running": (not paused), "paused": paused,
+                "working": working, "active_age_s": active_age, "age_s": prog_age,
+                "tokens_ctx": toks, "preview": preview,
+                "problem": bool(obs and obs.get("problem")),
+                "restarting": restarting,
+                "stale": (active_age is not None and active_age >= STALL),
+                "last_active": la}
 
     def _bus_turns(self, principal, sid, since=0):
 
@@ -1897,8 +2058,8 @@ class SessionRoutes:
                 import pn_software_shelf as _shelf
                 for _k in _want:
                     (_ok if _shelf.kit_img(_k) else _kits_unknown).append(_k)
-                patch["kits"] = _ok[:6]
-                _kits_unknown += _ok[6:]
+                patch["kits"] = _ok[:KIT_DECKEL]
+                _kits_unknown += _ok[KIT_DECKEL:]
             except Exception:
                 _traceback_log("session provision kits")
                 _kits_unknown = list(_want)
@@ -1987,6 +2148,7 @@ class SessionRoutes:
             except Exception:
                 pass
         _prov_rebooted = False; _prov_live_only = False
+        _prov_wieder_an = None
         if body.get("restart"):
             try:
                 tn = _session_store(uid, "cockpit").tmux_name(sid)
@@ -2009,6 +2171,11 @@ class SessionRoutes:
                     if any(old.get(k) != enf_new.get(k) for k in _boot_keys):
                         _cell_power(uid, sid, False)
                         _prov_rebooted = True
+                        try:
+                            _an = _cell_power(uid, sid, True)
+                        except Exception as _e:
+                            _an = {"ok": False, "reason": "Wiederanlauf: %s" % _e}
+                        _prov_wieder_an = _an
                     else:
                         _prov_live_only = True
             except Exception:
@@ -2018,9 +2185,14 @@ class SessionRoutes:
         except Exception:
             _traceback_log("meta ensure for session")
         _prov_log("session.provision", uid, json.dumps({"sid": sid, "prov": patch}), {"wire": "api"})
-        return self._sess_json({"ok": True, "sid": sid, "prov": prov,
-                                "rebooted": _prov_rebooted, "live_only": _prov_live_only,
-                                "kits_unknown": _kits_unknown})
+        _antwort = {"ok": True, "sid": sid, "prov": prov,
+                    "rebooted": _prov_rebooted, "live_only": _prov_live_only,
+                    "kits_unknown": _kits_unknown}
+        if _prov_wieder_an is not None:
+            _antwort["wieder_an"] = bool(_prov_wieder_an.get("ok"))
+            if not _prov_wieder_an.get("ok"):
+                _antwort["wieder_an_grund"] = _prov_wieder_an.get("reason")
+        return self._sess_json(_antwort)
 
     def _api_session_pause(self, raw):
 
@@ -2074,11 +2246,21 @@ class SessionRoutes:
         if bad:
             return bad
         on = bool(body.get("on"))
+        if on:
+            frisch = _relay_warm_kick(uid, sid)
+            _prov_log("session.power", uid,
+                      json.dumps({"sid": sid, "on": True, "ok": None, "hintergrund": True}),
+                      {"wire": "api"})
+            return self._sess_json({
+                "ok": True, "sid": sid, "on": True,
+                "gestartet": bool(frisch), "laeuft_schon": not frisch,
+                "hinweis": ("Die Zelle faehrt hoch. Der Gast ist in Sekunden da; die "
+                            "Werkzeugkisten brauchen laenger — der Fortschritt steht im "
+                            "Lebenslauf der Sitzung.")})
         res = _cell_power(uid, sid, on)
         ok = bool(res.get("ok")) if isinstance(res, dict) else bool(res)
         reason = res.get("reason") if isinstance(res, dict) else None
-        if not on:
-            _sessprov_set(uid, sid, {"paused": False})
+        _sessprov_set(uid, sid, {"paused": False})
         _prov_log("session.power", uid, json.dumps({"sid": sid, "on": on, "ok": ok}), {"wire": "api"})
         out = {"ok": ok, "sid": sid, "on": on}
         if not ok and reason:

@@ -123,7 +123,8 @@ CONTROL_READ_VERBS = frozenset({"cvm", "events", "replay", "job", "pending", "my
 CONTROL_DECISION_VERBS = frozenset({"approve", "deny", "reject", "revise", "steer"})
 
 CONTROL_PORTAL_READ = frozenset({"portal.sessions", "portal.transcript", "portal.stt", "portal.voicetail", "portal.tts", "portal.voicewarm", "portal.sessmeta", "portal.pushkey", "portal.pushsub", "portal.pushunsub", "portal.sessinfo", "portal.decisions", "portal.files", "portal.file", "portal.sesswarm"})
-CONTROL_PORTAL_WRITE = frozenset({"portal.say", "portal.voiceturn", "portal.newsession", "portal.archive", "portal.rename", "portal.provision", "portal.decide", "portal.dismiss"})
+CONTROL_PORTAL_WRITE = frozenset({"portal.say", "portal.voiceturn", "portal.newsession", "portal.archive", "portal.rename", "portal.provision", "portal.decide", "portal.dismiss", "portal.upload"})
+RATE_EXEMPT_CONTROL = frozenset({"portal.file", "portal.upload"})
 _PORTAL_OP = {"portal.sessions": "sessions.list", "portal.transcript": "session.transcript",
               "portal.say": "session.say", "portal.stt": "stt",
               "portal.voiceturn": "voice.turn", "portal.voicetail": "voice.tail", "portal.tts": "tts", "portal.voicewarm": "voice.warm",
@@ -131,7 +132,7 @@ _PORTAL_OP = {"portal.sessions": "sessions.list", "portal.transcript": "session.
               "portal.sessmeta": "session.meta", "portal.provision": "session.provision",
               "portal.pushkey": "push.pubkey", "portal.pushsub": "push.subscribe", "portal.pushunsub": "push.unsubscribe", "portal.sessinfo": "session.info",
               "portal.decisions": "decisions.list", "portal.decide": "decisions.decide", "portal.dismiss": "decisions.dismiss",
-              "portal.files": "files.list", "portal.file": "files.get", "portal.sesswarm": "session.warm"}
+              "portal.files": "files.list", "portal.file": "files.get", "portal.sesswarm": "session.warm", "portal.upload": "files.put"}
 
 def _stepup_control_verbs() -> set:
     import os
@@ -290,11 +291,17 @@ class BoxSession:
         if not isinstance(ts, (int, float)) or abs(time.time() - ts) > 300:
             return self._reissue_err(did, "submission timestamp outside the freshness window")
 
-        ok, why = registry.check_and_record_rate(self.reg, did)
-        if not ok:
-            return self._reissue_err(did, why)
         tt = payload.get("task_type")
         is_control = (tt == CONTROL_TASK_TYPE)
+        _cverb = None
+        if is_control:
+            _ci = (payload.get("params") or {}).get("control")
+            if isinstance(_ci, dict):
+                _cverb = _ci.get("verb")
+        if _cverb not in RATE_EXEMPT_CONTROL:
+            ok, why = registry.check_and_record_rate(self.reg, did)
+            if not ok:
+                return self._reissue_err(did, why)
 
         if not is_control:
             max_conc = al["max_concurrency"]
