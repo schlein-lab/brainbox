@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/bin"))
+import portal_sessions as PS
+
+def _load_portal():
+    path = os.path.expanduser("~/.local/bin/brainbox-portal")
+    loader = importlib.machinery.SourceFileLoader("pp", path)
+    spec = importlib.util.spec_from_loader("pp", loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    return m
+
+def _capture(st, session):
+
+    try:
+        sid = session["id"]
+        tm = session.get("tmux") or st.tmux_name(sid)
+        if subprocess.run(["tmux", "has-session", "-t", tm], capture_output=True).returncode == 0:
+            out = subprocess.run(["tmux", "capture-pane", "-p", "-S", "-100000", "-t", tm],
+                                 capture_output=True).stdout
+            if out:
+                os.makedirs(st.transcripts_dir, exist_ok=True)
+                with open(st.transcript_path(sid), "wb") as f:
+                    f.write(out)
+                return True
+    except Exception:
+        pass
+    return False
+
+BEHALTEN_BODY = (
+    "Hallo,\n\n"
+    "Ihre Portal-Session „%s“ ist seit 28 Tagen ohne Aktivität und wird in 72 Stunden "
+    "gelöscht.\n\n"
+    "Wenn Sie sie behalten möchten, klicken Sie im Portal auf „Behalten“ — dann bleibt "
+    "sie für weitere 28 Tage erhalten. Andernfalls können Sie das Transkript danach noch 14 Tage "
+    "lang herunterladen.\n\n— Brainarbeit\n"
+)
+
+def main():
+    pp = _load_portal()
+    now = time.time()
+    users = pp.user_list()
+    mj = False
+    try:
+        mj = pp.mailjet_configured()
+    except Exception:
+        mj = False
+    n_users = n_cap = n_mail = n_del = n_dl = 0
+    for u in users:
+        uid = u.get("uid")
+        email = u.get("email")
+        if not uid:
+            continue
+        n_users += 1
+        base = pp.user_dir(uid)
+        st = PS.SessionStore(base, uid)
+        sessions = st.list()
+        by_id = {s["id"]: s for s in sessions}
+        for s in sessions:
+            if _capture(st, s):
+                n_cap += 1
+        acts = PS.retention_scan(sessions, now=now, has_client=False)
+        if not acts:
+            continue
+
+        to_apply = {}
+        for sid, a in acts.items():
+            action = a.get("action")
+            if action == "enter_grace":
+                if email and mj:
+                    em = a.get("email", {})
+                    try:
+                        pp.mailjet_send(email, em.get("subject", "Ihre Portal-Session wird gelöscht"),
+                                        BEHALTEN_BODY % (em.get("title") or sid))
+                        n_mail += 1
+                        to_apply[sid] = a
+                    except Exception as e:
+
+                        print("[janitor] mail to %s failed (will retry): %s" % (uid, e))
+                else:
+
+                    to_apply[sid] = a
+                continue
+            if action in ("offer_download", "delete"):
+                sd = by_id.get(sid)
+                if sd:
+                    _capture(st, sd)
+                if action == "offer_download":
+                    n_dl += 1
+                if action == "delete":
+                    n_del += 1
+            to_apply[sid] = a
+        st.apply_scan(to_apply, now=now)
+    print("[pn-session-janitor] %s users=%d transcripts=%d behalten_mails=%d download_offered=%d deleted=%d"
+          % (time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)), n_users, n_cap, n_mail, n_dl, n_del))
+
+if __name__ == "__main__":
+    main()

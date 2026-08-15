@@ -1,0 +1,12 @@
+# phantom — grant the 'input' group access to /dev/uinput so the actuator needs
+# only group membership, not full root.
+#
+# Install (one-time, needs sudo):
+#   sudo cp setup/99-phantom-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo modprobe uinput
+#   sudo udevadm trigger /dev/uinput
+#   sudo usermod -aG input "$USER"      # then log out/in (or: newgrp input)
+#
+# After that, `inject` works without sudo.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

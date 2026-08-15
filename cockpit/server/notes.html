@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset=utf-8><title>Notes</title><style>
+html,body{margin:0;height:100%;font:14px system-ui,sans-serif;background:#0d0d16;color:#e7e7f2}
+#wrap{display:flex;height:100%}#side{width:210px;background:#141422;border-right:1px solid #23233a;display:flex;flex-direction:column}
+#list{flex:1;overflow:auto}.it{padding:9px 12px;cursor:pointer;border-bottom:1px solid #1c1c2e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.it:hover{background:#1b1b2c}.it.sel{background:#26264a}#new{margin:8px;padding:8px;background:#6b7cff;color:#0b0b14;border:0;border-radius:8px;font-weight:700;cursor:pointer}
+#main{flex:1;display:flex;flex-direction:column}#name{background:#0b0b14;color:#eee;border:0;border-bottom:1px solid #23233a;padding:10px 12px;font:inherit}
+#body{flex:1;background:#0b0b14;color:#e7e7f2;border:0;padding:12px;font:14px ui-monospace,Menlo,monospace;resize:none;outline:none}
+#status{padding:4px 12px;color:#7a7a95;font-size:12px;background:#141422;border-top:1px solid #23233a}
+</style><script src="/portal-nav.js" defer></script></head><body><div id=wrap>
+<div id=side><button id=new>+ Neue Notiz</button><div id=list></div></div>
+<div id=main><input id=name placeholder='titel.md'><textarea id=body placeholder='… (auto-gespeichert auf dem NAS)'></textarea><div id=status>bereit</div></div>
+</div><script>
+var API='/api/fs?app=notes';var cur=null,t=null;
+function st(s){document.getElementById('status').textContent=s;}
+async function list(){var r=await fetch(API);var d=await r.json();var L=document.getElementById('list');L.innerHTML='';
+ (d.files||[]).forEach(function(f){var e=document.createElement('div');e.className='it'+(f.name===cur?' sel':'');
+   var t=document.createElement('span');t.textContent=f.name;t.style.cssText='flex:1;overflow:hidden;text-overflow:ellipsis';t.onclick=function(){open(f.name);};
+   var v=document.createElement('button');v.textContent='→ Tresor';v.title='Diese Datei verschlüsselt im Schlüssel-Tresor ablegen (für Sitzungen nutzbar)';
+   v.style.cssText='margin-left:6px;padding:2px 7px;font-size:11px;background:#26264a;color:#c8c8ff;border:0;border-radius:6px;cursor:pointer';
+   v.onclick=function(ev){ev.stopPropagation();toVault(f.name);};
+   e.style.cssText='display:flex;align-items:center';e.appendChild(t);e.appendChild(v);L.appendChild(e);});}
+async function toVault(n){st('lade '+n+' …');var r=await fetch(API+'&file='+encodeURIComponent(n));var txt=await r.text();
+ var kind='env';if(/BEGIN [A-Z ]*PRIVATE KEY/.test(txt))kind='ssh_key';else if(/^Host\s+/m.test(txt)&&/(IdentityFile|ProxyJump|HostName)/.test(txt))kind='ssh_config';
+ var res=await fetch('/api/secrets/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n.replace(/[^A-Za-z0-9._-]/g,'_'),value:txt,kind:kind})});
+ var d=await res.json().catch(function(){return{};});st(d&&d.ok?('✅ im Tresor: '+d.name+' ('+kind+')'):('✗ '+((d&&d.error)||'Fehler')));}
+async function open(n){var r=await fetch(API+'&file='+encodeURIComponent(n));var txt=await r.text();cur=n;
+ document.getElementById('name').value=n;document.getElementById('body').value=txt;list();st('geladen: '+n);}
+async function save(){var n=document.getElementById('name').value.trim();if(!n){return;}var b=document.getElementById('body').value;
+ st('speichere…');await fetch(API+'&file='+encodeURIComponent(n),{method:'POST',body:b});cur=n;st('gespeichert auf NAS: '+n+' ('+new Date().toLocaleTimeString()+')');list();}
+function sched(){clearTimeout(t);t=setTimeout(save,600);}
+document.getElementById('body').addEventListener('input',sched);
+document.getElementById('name').addEventListener('change',save);
+document.getElementById('new').onclick=function(){cur=null;document.getElementById('name').value='';document.getElementById('body').value='';document.getElementById('name').focus();};
+list();
+</script></body></html>

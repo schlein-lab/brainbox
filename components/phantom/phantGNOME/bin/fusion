@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""fusion — compose several programs/functions into ONE fused program (with or without GUI).
+
+A *fusion* is described by a single declarative manifest (schema X, JSON). It names the
+underlying programs it fuses (components), the callable units that wrap them (functions),
+a PIPELINE that wires those functions into a DAG — independent steps run SIMULTANEOUSLY,
+dependent steps run in ORDER — and, optionally, a GUI spec from which a reusable web
+interface is generated automatically. Agents assemble new programs by writing a manifest
+(constrained shape) while keeping a free hand (arbitrary shell in each function's `run`).
+
+  fusion scaffold <name>           write a starter manifest + dirs (~/fusions/<name>/)
+  fusion check    <name|manifest>  report which fused programs are present / missing
+  fusion run      <name> [--set k=v ...]   run the pipeline headlessly, stream the log
+  fusion fn       <name> <fnid> [--set ...] run a single fused function
+  fusion gui      <name> [--port N] [--open]  serve the generated web GUI (phantom-themed)
+  fusion gallery  [--port N] [--open]  one "fusion desktop": list all fusions, open each GUI in a panel
+  fusion list                      list known fusions
+
+Schema X (fusion.json):
+  {
+    "name": "...", "title": "...",
+    "components": { "<id>": {"bin": "ffmpeg", "install": "apt:ffmpeg", "desc": "..."} },
+    "defaults":   { "<param>": "value" },
+    "functions":  { "<id>": {"run": "shell with {params}", "outputs": ["{out}/x.png"], "desc": "..."} },
+    "pipeline":   [ {"id": "a", "fn": "..."} , {"id": "b", "fn": "...", "after": ["a"]} ],
+    "gui": { "title": "...", "panels": [ {"title": "...", "widgets": [ ... ]} ] }
+  }
+Reserved params always available: {root} {work} {out} {name}. --set / GUI fields add more.
+No third-party deps (stdlib only).
+"""
+import json, os, re, sys, time, subprocess, threading, mimetypes, html, urllib.parse
+import shutil
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOME = os.path.expanduser("~")
+FUSIONS = os.path.join(HOME, "fusions")
+
+def fusion_dir(name):  return os.path.join(FUSIONS, name)
+def manifest_path(name):
+
+    if name.endswith(".json") and os.path.exists(name):
+        return name
+    return os.path.join(fusion_dir(name), "fusion.json")
+
+def load_manifest(name):
+    with open(manifest_path(name)) as f:
+        m = json.load(f)
+    m.setdefault("name", name)
+    return m
+
+def base_params(m):
+    name = m["name"]
+    root = fusion_dir(name)
+    out, work = os.path.join(root, "out"), os.path.join(root, "work")
+    os.makedirs(out, exist_ok=True); os.makedirs(work, exist_ok=True)
+    p = {"root": root, "out": out, "work": work, "name": name}
+    p.update(m.get("defaults", {}))
+    return p
+
+def subst(t, p):
+    if not isinstance(t, str):
+        return t
+    return re.sub(r"\{([a-zA-Z0-9_]+)\}", lambda mm: str(p.get(mm.group(1), mm.group(0))), t)
+
+def run_step(step, m, params, logfn):
+    sid = step["id"]
+    fn = m.get("functions", {}).get(step.get("fn")) if step.get("fn") else None
+    run_tpl = step.get("run") or (fn or {}).get("run")
+    if not run_tpl:
+        logfn(f"⚠ step {sid}: no run/fn"); return {"id": sid, "ok": False, "exit": -1, "log": "no run", "outputs": []}
+    p = dict(params); p.update(step.get("set", {}))
+    cmd = subst(run_tpl, p)
+    logfn(f"▶ {sid}: {cmd}")
+    t0 = time.time()
+    try:
+        proc = subprocess.run(["bash", "-lc", cmd], cwd=p["work"],
+                              capture_output=True, text=True, timeout=step.get("timeout", 600))
+        ok = proc.returncode == 0
+        tail = (proc.stdout or "")[-1500:] + (("\n[stderr] " + proc.stderr[-1500:]) if proc.stderr.strip() else "")
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        ok, tail, rc = False, "TIMEOUT", -2
+    logfn(f"{'✔' if ok else '✘'} {sid} exit={rc} ({time.time()-t0:.1f}s)")
+    outs = [subst(o, p) for o in ((fn or {}).get("outputs") or step.get("outputs") or [])]
+    outs = [o for o in outs if os.path.exists(o)]
+    if tail.strip():
+        logfn(tail.strip())
+    return {"id": sid, "ok": ok, "exit": rc, "log": tail, "outputs": outs}
+
+def run_pipeline(m, params, logfn, only_fn=None):
+
+    if only_fn:
+        steps = [{"id": only_fn, "fn": only_fn}]
+    else:
+        steps = m.get("pipeline") or [{"id": fid, "fn": fid} for fid in m.get("functions", {})]
+    done, futs = {}, {}
+    results, outputs = [], []
+    ex = ThreadPoolExecutor(max_workers=min(8, max(1, len(steps))))
+    while len(done) < len(steps):
+        progressed = False
+        for s in steps:
+            sid = s["id"]
+            if sid in done or sid in futs.values():
+                continue
+            deps = s.get("after", [])
+            if any(d in done and not done[d]["ok"] for d in deps):
+                done[sid] = {"id": sid, "ok": False, "exit": -3, "log": "skipped (dep failed)", "outputs": []}
+                logfn(f"⊘ {sid} skipped (dependency failed)"); progressed = True; continue
+            if all(d in done for d in deps):
+                futs[ex.submit(run_step, s, m, params, logfn)] = sid; progressed = True
+        if futs:
+            completed, _ = wait(list(futs), return_when=FIRST_COMPLETED)
+            for f in completed:
+                sid = futs.pop(f)
+                done[sid] = f.result()
+        elif not progressed:
+            for s in steps:
+                done.setdefault(s["id"], {"id": s["id"], "ok": False, "exit": -4, "log": "unreachable dep", "outputs": []})
+            break
+    ex.shutdown(wait=True)
+    for s in steps:
+        r = done.get(s["id"], {})
+        results.append(r); outputs.extend(r.get("outputs", []))
+    ok = all(r.get("ok") for r in results)
+    return {"ok": ok, "results": results, "outputs": outputs}
+
+_PATH_ZUSATZ = ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+                "/snap/bin", os.path.expanduser("~/.local/bin"), os.path.expanduser("~/bin"))
+
+def _vorhanden(b):
+
+    if not b:
+        return False
+    if shutil.which(b):
+        return True
+    return bool(shutil.which(b, path=os.pathsep.join(_PATH_ZUSATZ)))
+
+def cmd_check(name):
+    m = load_manifest(name)
+    print(f"fusion '{m['name']}' — {m.get('title','')}")
+    miss = []
+    for cid, c in m.get("components", {}).items():
+        b = c.get("bin", cid)
+        present = _vorhanden(b)
+        print(f"  [{'✔' if present else '✘'}] {cid:14s} bin={b:16s} {'' if present else '→ '+c.get('install','(install manually)')}")
+        if not present:
+            miss.append((cid, c.get("install", "")))
+    print("ALL COMPONENTS PRESENT" if not miss else f"MISSING: {[x[0] for x in miss]}")
+    return miss
+
+SCAFFOLD = {
+    "name": "", "title": "A fused program",
+    "components": {"echo": {"bin": "echo", "install": "builtin", "desc": "demo"}},
+    "defaults": {"text": "hello"},
+    "functions": {
+        "a": {"run": "echo '{text}' | tr a-z A-Z > {out}/a.txt; cat {out}/a.txt", "outputs": ["{out}/a.txt"], "desc": "upper"},
+        "b": {"run": "echo '{text}' | rev > {out}/b.txt; cat {out}/b.txt", "outputs": ["{out}/b.txt"], "desc": "reverse"},
+        "c": {"run": "paste -d' | ' {out}/a.txt {out}/b.txt > {out}/c.txt; cat {out}/c.txt", "outputs": ["{out}/c.txt"], "desc": "combine"},
+    },
+    "pipeline": [
+        {"id": "a", "fn": "a"},
+        {"id": "b", "fn": "b"},
+        {"id": "c", "fn": "c", "after": ["a", "b"]},
+    ],
+    "gui": {"title": "Demo Fusion", "panels": [
+        {"title": "Input", "widgets": [{"type": "text", "id": "text", "label": "Text", "value": "hello world"}]},
+        {"title": "Run", "widgets": [{"type": "button", "label": "Run pipeline", "action": "pipeline"}]},
+        {"title": "Output", "widgets": [{"type": "output", "id": "log"}]},
+    ]},
+}
+
+def cmd_scaffold(name):
+    d = fusion_dir(name)
+    if os.path.exists(manifest_path(name)):
+        print(f"exists: {manifest_path(name)}"); return
+    os.makedirs(os.path.join(d, "out"), exist_ok=True)
+    os.makedirs(os.path.join(d, "work"), exist_ok=True)
+    m = dict(SCAFFOLD); m["name"] = name
+    with open(manifest_path(name), "w") as f:
+        json.dump(m, f, indent=2)
+    print(f"scaffolded fusion '{name}' -> {manifest_path(name)}")
+
+def cmd_list():
+    if not os.path.isdir(FUSIONS):
+        print("no fusions yet (fusion scaffold <name>)"); return
+    for n in sorted(os.listdir(FUSIONS)):
+        if os.path.exists(manifest_path(n)):
+            try:
+                t = load_manifest(n).get("title", "")
+            except Exception:
+                t = "(unreadable)"
+            print(f"{n:20s} {t}")
+
+RUNS = {}
+RUNS_LOCK = threading.Lock()
+
+CSS = """
+:root{--bg:#11111c;--bg2:#171724;--fg:#d4d4e2;--mut:#8a8aac;--acc:#8a7fff;--ok:#8fd0a0;--err:#e58a93}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 'JetBrains Mono',ui-monospace,monospace}
+header{padding:14px 20px;background:linear-gradient(90deg,#15151f,#11111c);border-bottom:1px solid #23233a;display:flex;align-items:center;gap:12px}
+header .pill{background:var(--acc);color:#0b0b14;font-weight:700;border-radius:8px;padding:3px 10px}
+header h1{font-size:16px;margin:0;font-weight:600}
+main{max-width:1100px;margin:0 auto;padding:20px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.panel{background:var(--bg2);border:1px solid #23233a;border-radius:14px;padding:16px}
+.panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:0 0 12px}
+label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+input,select,textarea{width:100%;background:#0e0e18;border:1px solid #2a2a40;color:var(--fg);border-radius:9px;padding:9px 11px;font:inherit}
+button{background:var(--acc);color:#0b0b14;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:700;cursor:pointer;margin-top:8px}
+button:hover{filter:brightness(1.08)}button:active{transform:translateY(1px)}
+.out{background:#0a0a12;border:1px solid #23233a;border-radius:9px;padding:10px;white-space:pre-wrap;max-height:360px;overflow:auto;font-size:12.5px}
+.out .ok{color:var(--ok)}.out .err{color:var(--err)}.out .cmd{color:var(--acc)}
+.files{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.files a{color:var(--acc);text-decoration:none;border:1px solid #2a2a40;border-radius:8px;padding:6px 10px;font-size:12px}
+.files img{max-width:240px;border-radius:8px;border:1px solid #2a2a40;display:block}
+.status{font-size:12px;color:var(--mut)}.spin{color:var(--acc)}
+"""
+
+JS = """
+const $=s=>document.querySelector(s);
+function vals(){const o={};document.querySelectorAll('[data-field]').forEach(e=>{o[e.dataset.field]=e.type==='checkbox'?(e.checked?'1':''):e.value});return o}
+async function run(action){
+  const log=$('#log');if(log){log.textContent='starting…'}
+  const files=$('#files');if(files)files.innerHTML='';
+  const st=$('#status');if(st){st.textContent='running ';st.className='status spin'}
+  const r=await fetch('api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,params:vals()})});
+  const {run}=await r.json();poll(run);
+}
+async function poll(id){
+  const r=await fetch('api/log?run='+id);const d=await r.json();
+  const log=$('#log');if(log){log.innerHTML=d.log.map(fmt).join('\\n')}
+  const st=$('#status');
+  if(d.status==='running'){if(st){st.textContent='running ●';st.className='status spin'}setTimeout(()=>poll(id),700)}
+  else{if(st){st.textContent=d.status==='ok'?'done ✔':'failed ✘';st.className='status '+(d.status==='ok'?'':'err')}
+    const files=$('#files');if(files){files.innerHTML=d.outputs.map(fcard).join('')}}
+}
+function fmt(l){l=l.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  if(l.startsWith('▶'))return '<span class=cmd>'+l+'</span>';if(l.startsWith('✔'))return '<span class=ok>'+l+'</span>';
+  if(l.startsWith('✘')||l.startsWith('⚠')||l.startsWith('⊘'))return '<span class=err>'+l+'</span>';return l}
+function fcard(p){const u='file?path='+encodeURIComponent(p);const b=p.split('/').pop();
+  if(/\\.(png|jpg|jpeg|gif|webp|svg|bmp)$/i.test(p))return '<a href="'+u+'" target=_blank><img src="'+u+'"><div>'+b+'</div></a>';
+  if(/\\.(mp4|webm|mov|mkv)$/i.test(p))return '<div><video src="'+u+'" controls style="max-width:320px;border-radius:8px;border:1px solid #2a2a40"></video><div>'+b+'</div></div>';
+  if(/\\.(mp3|wav|ogg|flac|m4a|aac)$/i.test(p))return '<div style="min-width:240px"><audio src="'+u+'" controls style="width:100%"></audio><div>'+b+'</div></div>';
+  if(/\\.pdf$/i.test(p))return '<a href="'+u+'" target=_blank>📄 '+b+'</a>';
+  return '<a href="'+u+'" target=_blank>'+b+'</a>'}
+"""
+
+def render_widget(w):
+    wid = w.get("id", "")
+    t = w.get("type")
+    label = html.escape(w.get("label", wid))
+    if t == "text":
+        return f'<label>{label}</label><input data-field="{wid}" value="{html.escape(str(w.get("value","")))}">'
+    if t == "number":
+        return f'<label>{label}</label><input type=number data-field="{wid}" value="{html.escape(str(w.get("value","")))}">'
+    if t == "file":
+        return f'<label>{label}</label><input data-field="{wid}" placeholder="{html.escape(w.get("placeholder","/path/to/file"))}" value="{html.escape(str(w.get("value","")))}">'
+    if t == "select":
+        opts = "".join(f'<option value="{html.escape(str(o))}">{html.escape(str(o))}</option>' for o in w.get("options", []))
+        return f'<label>{label}</label><select data-field="{wid}">{opts}</select>'
+    if t == "checkbox":
+        return f'<label><input type=checkbox data-field="{wid}" style="width:auto"> {label}</label>'
+    if t == "textarea":
+        return f'<label>{label}</label><textarea data-field="{wid}" rows=4>{html.escape(str(w.get("value","")))}</textarea>'
+    if t == "button":
+        act = w.get("action", "pipeline")
+        return f'<button onclick="run(\'{html.escape(act)}\')">{html.escape(w.get("label","Run"))}</button>'
+    if t == "output":
+        return '<div class=status id=status></div><div class=out id=log></div><div class=files id=files></div>'
+    if t == "note":
+        return f'<p class=status>{html.escape(w.get("text",""))}</p>'
+    return f'<!-- unknown widget {t} -->'
+
+def render_page(m):
+    gui = m.get("gui", {})
+    title = html.escape(gui.get("title", m.get("title", m["name"])))
+    panels = ""
+    for p in gui.get("panels", []):
+        ws = "".join(render_widget(w) for w in p.get("widgets", []))
+        panels += f'<section class=panel><h2>{html.escape(p.get("title",""))}</h2>{ws}</section>'
+    return (f'<!doctype html><html><head><meta charset=utf-8><title>{title}</title>'
+            f'<style>{CSS}</style></head><body>'
+            f'<header><span class=pill>◉ fusion</span><h1>{title}</h1></header>'
+            f'<main>{panels}</main><script>{JS}</script></body></html>')
+
+class Handler(BaseHTTPRequestHandler):
+    manifest = None
+    def log_message(self, *a):
+        pass
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path in ("/", "/index.html"):
+            return self._send(200, render_page(self.manifest))
+        if u.path == "/api/log":
+            rid = urllib.parse.parse_qs(u.query).get("run", [""])[0]
+            with RUNS_LOCK:
+                r = RUNS.get(rid, {"status": "unknown", "log": [], "outputs": []})
+                return self._send(200, json.dumps(r), "application/json")
+        if u.path == "/file":
+            path = urllib.parse.parse_qs(u.query).get("path", [""])[0]
+            rp = os.path.realpath(path)
+            root = os.path.realpath(fusion_dir(self.manifest["name"]))
+            if not rp.startswith(root) or not os.path.isfile(rp):
+                return self._send(403, "forbidden", "text/plain")
+            ctype = mimetypes.guess_type(rp)[0] or "application/octet-stream"
+            with open(rp, "rb") as f:
+                return self._send(200, f.read(), ctype)
+        self._send(404, "not found", "text/plain")
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path != "/api/run":
+            return self._send(404, "not found", "text/plain")
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        action = body.get("action", "pipeline")
+        params = base_params(self.manifest)
+        params.update({k: v for k, v in (body.get("params") or {}).items()})
+        rid = str(int(time.time() * 1000))
+        with RUNS_LOCK:
+            RUNS[rid] = {"status": "running", "log": [], "outputs": []}
+        def logfn(line):
+            with RUNS_LOCK:
+                RUNS[rid]["log"].append(line)
+        def go():
+            only = action.split("fn:", 1)[1] if action.startswith("fn:") else None
+            res = run_pipeline(self.manifest, params, logfn, only_fn=only)
+            with RUNS_LOCK:
+                RUNS[rid]["status"] = "ok" if res["ok"] else "failed"
+                RUNS[rid]["outputs"] = res["outputs"]
+        threading.Thread(target=go, daemon=True).start()
+        self._send(200, json.dumps({"run": rid}), "application/json")
+
+def cmd_gui(name, port, do_open):
+    m = load_manifest(name)
+    Handler.manifest = m
+
+    host = os.environ.get("FUSION_BIND", "127.0.0.1")
+    srv = ThreadingHTTPServer((host, port), Handler)
+    url = f"http://127.0.0.1:{port}/"
+    print(f"fusion GUI for '{name}' on {url}  (Ctrl-C to stop)")
+    if do_open:
+        env = os.environ.copy()
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        subprocess.Popen(["xdg-open", url], env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+GAL_PROCS = {}
+GAL_NEXT = [8800]
+
+def list_fusions():
+    out = []
+    if os.path.isdir(FUSIONS):
+        for n in sorted(os.listdir(FUSIONS)):
+            mp = manifest_path(n)
+            if os.path.exists(mp):
+                try:
+                    m = json.load(open(mp))
+                    out.append((n, m.get("title", n)))
+                except Exception:
+                    out.append((n, "(unreadable manifest)"))
+    return out
+
+def launch_fusion_gui(name):
+    if name in GAL_PROCS:
+        return GAL_PROCS[name]
+    port = GAL_NEXT[0]; GAL_NEXT[0] += 1
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "gui", name, "--port", str(port)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdin=subprocess.DEVNULL, start_new_session=True)
+    GAL_PROCS[name] = port
+    time.sleep(0.6)
+    return port
+
+GAL_JS = """
+const $=s=>document.querySelector(s);
+async function open_(name,el){
+  document.querySelectorAll('.card').forEach(c=>c.classList.remove('active'));el.classList.add('active');
+  $('#framewrap').style.display='block';$('#frame').src='about:blank';$('#hint').textContent='starte '+name+' …';
+  const r=await fetch('launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  const d=await r.json();$('#hint').textContent=name+'  ·  '+d.url;
+  setTimeout(()=>{$('#frame').src=d.url},300);
+}
+"""
+
+def render_gallery():
+    cards = ""
+    for n, t in list_fusions():
+        cards += (f'<div class=card onclick="open_(\'{html.escape(n)}\',this)">'
+                  f'<div class=cn>◆ {html.escape(n)}</div><div class=ct>{html.escape(t)}</div></div>')
+    extra = """
+    .wrap{display:flex;gap:16px;align-items:flex-start}
+    .side{flex:0 0 300px;display:flex;flex-direction:column;gap:10px}
+    .card{background:var(--bg2);border:1px solid #23233a;border-radius:12px;padding:13px 14px;cursor:pointer;transition:.12s}
+    .card:hover{border-color:var(--acc)}.card.active{border-color:var(--acc);background:#1b1b2b}
+    .card .cn{font-weight:700;color:var(--acc)}.card .ct{font-size:12px;color:var(--mut);margin-top:3px}
+    #framewrap{flex:1;display:none}#hint{font-size:12px;color:var(--mut);margin-bottom:6px}
+    #frame{width:100%;height:78vh;border:1px solid #23233a;border-radius:12px;background:#0a0a12}
+    """
+    return (f'<!doctype html><html><head><meta charset=utf-8><title>fusion desktop</title>'
+            f'<style>{CSS}{extra}</style></head><body>'
+            f'<header><span class=pill>◉ fusion</span><h1>fusion desktop — {len(list_fusions())} fusionierte Programme</h1></header>'
+            f'<main style="max-width:1400px;display:block"><div class=wrap>'
+            f'<div class=side>{cards}</div>'
+            f'<div id=framewrap><div id=hint></div><iframe id=frame></iframe></div>'
+            f'</div></main><script>{GAL_JS}</script></body></html>')
+
+class GalleryHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code); self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_GET(self):
+        if urllib.parse.urlparse(self.path).path in ("/", "/index.html"):
+            return self._send(200, render_gallery())
+        self._send(404, "not found", "text/plain")
+    def do_POST(self):
+        if urllib.parse.urlparse(self.path).path != "/launch":
+            return self._send(404, "not found", "text/plain")
+        n = int(self.headers.get("Content-Length", 0))
+        name = json.loads(self.rfile.read(n) or b"{}").get("name", "")
+        if not os.path.exists(manifest_path(name)):
+            return self._send(404, json.dumps({"error": "no such fusion"}), "application/json")
+        port = launch_fusion_gui(name)
+
+        host = (self.headers.get("Host") or "127.0.0.1").split(":")[0]
+        self._send(200, json.dumps({"url": f"http://{host}:{port}/"}), "application/json")
+
+def cmd_gallery(port, do_open):
+
+    host = os.environ.get("FUSION_BIND", "127.0.0.1")
+    srv = ThreadingHTTPServer((host, port), GalleryHandler)
+    url = f"http://127.0.0.1:{port}/"
+    print(f"fusion desktop on {url} — {len(list_fusions())} fusions (Ctrl-C to stop)")
+    if do_open:
+        env = os.environ.copy()
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        subprocess.Popen(["xdg-open", url], env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+def parse_sets(args):
+    out = {}
+    i = 0
+    while i < len(args):
+        if args[i] == "--set" and i + 1 < len(args):
+            k, _, v = args[i + 1].partition("=")
+            out[k] = v; i += 2
+        else:
+            i += 1
+    return out
+
+def cmd_run(name, sets, only_fn=None):
+    m = load_manifest(name)
+    params = base_params(m); params.update(sets)
+    res = run_pipeline(m, params, lambda l: print(l, flush=True), only_fn=only_fn)
+    print(("OK" if res["ok"] else "FAILED") + " — outputs: " + ", ".join(res["outputs"]))
+    sys.exit(0 if res["ok"] else 1)
+
+def main():
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__); return
+    cmd = a[0]
+    if cmd == "scaffold":
+        cmd_scaffold(a[1])
+    elif cmd == "check":
+        cmd_check(a[1])
+    elif cmd == "run":
+        cmd_run(a[1], parse_sets(a[2:]))
+    elif cmd == "fn":
+        cmd_run(a[1], parse_sets(a[3:]), only_fn=a[2])
+    elif cmd == "gui":
+        port = int(a[a.index("--port") + 1]) if "--port" in a else 8765
+        cmd_gui(a[1], port, "--open" in a)
+    elif cmd == "gallery":
+        port = int(a[a.index("--port") + 1]) if "--port" in a else 8888
+        cmd_gallery(port, "--open" in a)
+    elif cmd == "list":
+        cmd_list()
+    else:
+        print(__doc__)
+
+if __name__ == "__main__":
+    main()

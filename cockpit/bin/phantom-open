@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -u
+url="${1:-}"
+[ -z "$url" ] && { echo "phantom-open: usage: phantom-open <url>" >&2; exit 2; }
+uid="$(id -u)"; rt="${XDG_RUNTIME_DIR:-/run/user/$uid}"; dir="$rt/phantom"
+mkdir -p "$dir" 2>/dev/null || true
+printf '%s\n' "$url" > "$dir/browser-open.url" 2>/dev/null || true
+printf '%s\t%s\n' "$(date -u +%FT%TZ 2>/dev/null || echo -)" "$url" >> "$dir/browser-open.log" 2>/dev/null || true
+export MOZ_ENABLE_WAYLAND=1 GDK_BACKEND=wayland MOZ_DISABLE_WAYLAND_DMABUF=1
+export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+export XDG_RUNTIME_DIR="$rt"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$rt/bus}"
+case "$DBUS_SESSION_BUS_ADDRESS" in unix:path=*)
+  _bus="${DBUS_SESSION_BUS_ADDRESS#unix:path=}"
+  [ -S "$_bus" ] || command -v dbus-daemon >/dev/null 2>&1 && [ ! -S "$_bus" ] && \
+    setsid dbus-daemon --session --address="unix:path=$_bus" --nopidfile --fork >/dev/null 2>&1 || true ;;
+esac
+export WAYLAND_DISPLAY="${PHANTOM_SEAT_WL:-$rt/phantom-seat/screen-0}"
+ff=""
+for c in /usr/bin/firefox /usr/lib/firefox/firefox-bin /snap/bin/firefox; do
+  [ -x "$c" ] && { ff="$c"; break; }
+done
+opened=0
+if [ -n "$ff" ]; then setsid "$ff" --new-tab "$url" >/dev/null 2>&1 < /dev/null & opened=1; fi
+{
+  echo ""
+  if [ "$opened" = 1 ]; then
+    echo "🌐  Im Screen-Tab geöffnet:  $url"
+    echo "    (Erscheint nichts? URL kopieren und in einem Browser öffnen.)"
+  else
+    echo "🌐  Bitte diese URL in einem Browser öffnen:"; echo "    $url"
+  fi
+  echo ""
+} >&2
+exit 0

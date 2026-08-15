@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "[netpin] pinning primary link up"
+for i in $(ls /sys/class/net 2>/dev/null); do
+  [ "$i" = lo ] && continue
+  ip link set "$i" up 2>/dev/null && echo "[netpin] $i up"
+done
+echo "[netpin] done"

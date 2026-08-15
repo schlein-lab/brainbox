@@ -1,0 +1,17 @@
+# Installed to /etc/sudoers.d/brainbox-mediashare (0440 root:root). Lets the portal (uid 1000) drive
+# the ONE root-owned media helper non-interactively. /usr/local/sbin/pn-mediashare-provision is a
+# root-owned FIXED-PATH copy (never the user-writable repo file) and each verb is internally locked:
+#   * add/remove/sso  — only ever touch nologin accounts named bshare-* or a shape-checked SSO uid,
+#                       never a real login/system/owner account (deny-list enforced in the helper);
+#   * reload          — installs only a conf that resolves to /etc/samba/smb.conf, rejects every
+#                       exec-capable smb.conf directive (preexec/vfs objects/include/…), testparm-gated;
+#   * setflag/media   — write only 4 ALLOWLISTED boolean flags (values 0/1) into root-owned site.conf
+#                       and start/stop the media daemons; NOT a general file-writer.
+# Residual, by design: because the grant covers the whole binary for the service user, anything
+# running AS that user can call setflag/media — the portal holds exactly uid-1000 privilege and must
+# be able to flip the media toggle, so no same-uid check can distinguish it from a service-user
+# compromise. This is bounded (audited to a root-owned file /var/log/brainbox-mediashare-audit.log
+# with the caller uid — the appliance runs no syslog daemon; 0/1 flags only; no path/content
+# primitive; cells are microVMs that must first escape the VM to reach uid 1000) and accepted. Replace
+# SERVICE_USER with the box owner account (uid 1000).
+SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/pn-mediashare-provision

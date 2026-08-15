@@ -1,0 +1,53 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# --- Compiled init / native helpers (build from source; see os/init/Makefile) ---
+os/init/pn-init
+os/init/pndstub
+os/init/memhog
+*.o
+*.a
+
+# --- Appliance / ISO build artifacts ---
+*.raw
+*.raw.xz
+*.qcow2
+*.img
+*.iso
+/out/
+/var/tmp/bbx/
+iso-root/
+
+# --- WASM / node build outputs ---
+components/phantom-wasm/pkg/
+node_modules/
+target/
+
+# --- Local runtime / secrets (never commit) ---
+*.env
+.env.local
+*.key
+*.pem
+id_rsa
+id_ed25519
+site.conf
+
+# --- Editor / OS noise ---
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# --- Logs / scratch ---
+*.log
+/tmp/
+*.bak
+*.orig

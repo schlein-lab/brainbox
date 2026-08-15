@@ -1,0 +1,4 @@
+#!/bin/sh
+[ "$ACTION" = "add" ] || exit 0
+[ -n "$MODALIAS" ] || exit 0
+exec /sbin/modprobe -qab -- "$MODALIAS" 2>/dev/null

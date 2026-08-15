@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Brainarbeit Cockpit</title>
+
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">Brainarbeit <span class="sub">Cockpit</span></div>
+  <div id="health" class="health" title="brain / watchdog / credential health">
+    <span class="pill" id="health-brain">brain ?</span>
+    <span class="pill" id="health-conn">conn ?</span>
+    <span class="pill" id="health-cursor">cursor 0</span>
+  </div>
+  <nav id="tabs">
+    <button class="tab active" data-view="inbox">Approval Inbox <span id="inbox-badge" class="badge hidden">0</span></button>
+    <button class="tab" data-view="queue">Queue</button>
+    <button class="tab" data-view="health">Health</button>
+  </nav>
+</header>
+
+<main>
+  
+  <section id="view-inbox" class="view active">
+    <h2>Awaiting your approval</h2>
+    <p class="hint" id="inbox-empty">Nothing awaiting approval. New approval requests appear here live, on every device.</p>
+    <div id="inbox-list" class="cards"></div>
+  </section>
+
+  
+  <section id="view-queue" class="view">
+    <h2>Queue</h2>
+    <div id="queue-list" class="cards"></div>
+  </section>
+
+  
+  <section id="view-health" class="view">
+    <h2>Brain &amp; watchdog</h2>
+    <pre id="health-detail" class="mono">connecting…</pre>
+  </section>
+</main>
+
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

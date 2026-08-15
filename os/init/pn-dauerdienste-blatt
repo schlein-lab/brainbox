@@ -1,0 +1,113 @@
+#!/bin/sh
+set -u
+
+CONF="${PN_DAUERDIENSTE_CONF:-/etc/pn-dauerdienste.conf}"
+CGROOT="${PN_CGROOT:-/sys/fs/cgroup}"
+LOG="${PN_DAUERDIENSTE_LOG:-/var/log/pn-dauerdienste-blatt.log}"
+TROCKEN=0
+LEISE=0
+
+for a in "$@"; do
+  case "$a" in
+    --trocken|-n) TROCKEN=1 ;;
+    --leise|-q)   LEISE=1 ;;
+    --hilfe|-h)
+      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      echo
+      echo "Aufruf: $(basename "$0") [--trocken] [--leise]"
+      echo "  --trocken   nur zeigen, was geschehen wuerde"
+      echo "Konfiguration: $CONF"
+      exit 0 ;;
+    *) echo "unbekannter Schalter: $a" >&2; exit 2 ;;
+  esac
+done
+
+sagen() {
+  [ "$LEISE" = 1 ] || echo "$*"
+  [ -w "$(dirname "$LOG")" ] 2>/dev/null && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$LOG" 2>/dev/null || true
+}
+
+if [ ! -r "$CONF" ]; then
+  sagen "keine Konfiguration unter $CONF — es wird nichts umgeraeumt."
+  sagen "Vorlage: pn-dauerdienste.conf.example im Verzeichnis os/init des Pakets."
+  exit 0
+fi
+
+if [ ! -d "$CGROOT/cgroup.controllers" ] && [ ! -f "$CGROOT/cgroup.controllers" ]; then
+  sagen "kein cgroup2 unter $CGROOT — hier ist nichts zu tun (kein Fehler)."
+  exit 0
+fi
+
+GETEILTE=""
+DIENSTE_BLATT=""
+DIENSTE_MUSTER=""
+n=0
+while IFS= read -r zeile || [ -n "$zeile" ]; do
+  case "$zeile" in ''|\#*) continue ;; esac
+  art="${zeile%%|*}"; rest="${zeile#*|}"
+  case "$art" in
+    geteilt)
+      GETEILTE="$GETEILTE $rest" ;;
+    dienst)
+      blatt="${rest%%|*}"; muster="${rest#*|}"
+      [ "$blatt" = "$muster" ] && { sagen "WARN unvollstaendige Zeile: $zeile"; continue; }
+      n=$((n+1))
+      eval "B_$n=\$blatt"
+      eval "M_$n=\$muster" ;;
+    *) sagen "WARN unbekannte Zeilenart '$art': $zeile" ;;
+  esac
+done < "$CONF"
+
+[ -n "$GETEILTE" ] || { sagen "keine geteilten Blaetter benannt — nichts zu tun."; exit 0; }
+[ "$n" -gt 0 ] || { sagen "keine Dienste benannt — nichts zu tun."; exit 0; }
+
+umgezogen=0
+geprueft=0
+for g in $GETEILTE; do
+  QUELLE="$CGROOT/$g"
+  [ -r "$QUELLE/cgroup.procs" ] || { sagen "geteiltes Blatt fehlt (uebersprungen): $g"; continue; }
+
+  for pid in $(cat "$QUELLE/cgroup.procs" 2>/dev/null); do
+    [ -r "/proc/$pid/cmdline" ] || continue
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+    [ -n "$cmd" ] || continue
+    geprueft=$((geprueft+1))
+
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      i=$((i+1))
+      eval "blatt=\$B_$i"
+      eval "muster=\$M_$i"
+      case "$cmd" in
+        *"$muster"*) ;;
+        *) continue ;;
+      esac
+
+      ZIEL="$CGROOT/$blatt"
+      if [ "$TROCKEN" = 1 ]; then
+        umgezogen=$((umgezogen+1))
+        sagen "WUERDE umziehen: pid $pid  ($(echo "$cmd" | cut -c1-60))  ->  $blatt"
+        break
+      fi
+      if [ ! -d "$ZIEL" ]; then
+        mkdir -p "$ZIEL" 2>/dev/null || { sagen "FEHLER Blatt nicht anlegbar: $blatt"; break; }
+      fi
+      if echo "$pid" > "$ZIEL/cgroup.procs" 2>/dev/null; then
+        umgezogen=$((umgezogen+1))
+        sagen "umgezogen: pid $pid  $(echo "$cmd" | cut -c1-60)  $g -> $blatt"
+      else
+        [ -d "/proc/$pid" ] && sagen "FEHLER Umzug abgelehnt: pid $pid -> $blatt"
+      fi
+      break
+    done
+  done
+done
+
+if [ "$umgezogen" = 0 ]; then
+  sagen "nichts umzuraeumen ($geprueft Prozesse in geteilten Blaettern geprueft)."
+elif [ "$TROCKEN" = 1 ]; then
+  sagen "Trockenlauf: $umgezogen Prozess(e) wuerden umziehen ($geprueft geprueft). Nichts veraendert."
+else
+  sagen "fertig: $umgezogen Prozess(e) in ihr eigenes Blatt geholt ($geprueft geprueft)."
+fi
+exit 0

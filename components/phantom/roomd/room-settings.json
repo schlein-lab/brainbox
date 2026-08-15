@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": ["Bash(*)","Read(*)","Write(*)","Edit(*)","Glob(*)","Grep(*)","WebFetch(*)","WebSearch(*)","TodoWrite(*)","NotebookEdit(*)","Task(*)"],
+    "deny": ["Read($HOME/server-credentials.txt)","Read($HOME/.env)","Read($HOME/.ssh/**)","Read($HOME/.claude/.credentials.json)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "$HOME/room-guard.py" } ] }
+    ]
+  }
+}

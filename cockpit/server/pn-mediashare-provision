@@ -1,0 +1,204 @@
+#!/bin/sh
+
+set -eu
+VERB="${1:-}"
+OWNER="${PN_SHARES_OWNER:-$(getent passwd 1000 | cut -d: -f6 | xargs -r basename 2>/dev/null || echo brainbox)}"
+GROUP=sharemembers
+OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6 2>/dev/null)"; OWNER_HOME="${OWNER_HOME:-/home/$OWNER}"
+
+AUDIT_LOG=/var/log/brainbox-mediashare-audit.log
+_audit(){
+  
+  
+  
+  if [ ! -f "$AUDIT_LOG" ]; then
+    : >> "$AUDIT_LOG" 2>/dev/null || true
+    chown "root:$OWNER" "$AUDIT_LOG" 2>/dev/null || true
+    chmod 0640 "$AUDIT_LOG" 2>/dev/null || true
+  fi
+  _ts="$(date -Is 2>/dev/null || date 2>/dev/null || echo '?')"
+  printf '%s uid=%s (%s) %s\n' "$_ts" "${SUDO_UID:-$(id -u 2>/dev/null)}" "${SUDO_USER:-direct}" "$*" \
+    >> "$AUDIT_LOG" 2>/dev/null || true
+  logger -t pn-mediashare-provision "$* by uid=${SUDO_UID:-$(id -u 2>/dev/null)} (${SUDO_USER:-direct})" 2>/dev/null || true
+}
+
+in_freigabe(){
+  _p="$(readlink -f -- "${1:-}" 2>/dev/null || true)"
+  [ -n "$_p" ] || { echo "refuse: Pfad nicht aufloesbar" >&2; exit 2; }
+  for _r in "/data/shares" "$OWNER_HOME/.local/share/brainbox-portal/shares"; do
+    _rr="$(readlink -f -- "$_r" 2>/dev/null || true)"; [ -n "$_rr" ] || _rr="$_r"
+    case "$_p/" in "$_rr"/*) printf '%s' "$_p"; return 0 ;; esac
+  done
+  echo "refuse: Pfad liegt ausserhalb der Freigabe-Wurzel" >&2; exit 2
+}
+
+case "$VERB" in
+  sso)
+    USER="${2:-}"; PATHDIR="${3:-}"
+    [ -z "$PATHDIR" ] || PATHDIR="$(in_freigabe "$PATHDIR")" || exit 2
+    printf '%s' "$USER" | grep -qE '^[a-z_][a-z0-9_-]{0,15}$' || { echo "refuse: bad uid shape" >&2; exit 2; }
+    case "$USER" in bshare-*) echo "refuse: bshare-* is the add verb, not sso" >&2; exit 2 ;; esac
+    case " root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc nobody sshd samba messagebus systemd-network $GROUP $OWNER " in
+      *" $USER "*) echo "refuse: reserved/system/owner account" >&2; exit 2 ;;
+    esac
+    if id "$USER" >/dev/null 2>&1; then
+      SH="$(getent passwd "$USER" | cut -d: -f7)"
+      case "$SH" in */nologin|*/false|/bin/false|"") : ;; *) echo "refuse: existing interactive account" >&2; exit 2 ;; esac
+    fi
+    getent group "$GROUP" >/dev/null 2>&1 || groupadd -r "$GROUP"
+    id -nG "$OWNER" 2>/dev/null | tr ' ' '\n' | grep -qx "$GROUP" || usermod -aG "$GROUP" "$OWNER" 2>/dev/null || true
+    if ! id "$USER" >/dev/null 2>&1; then
+      useradd -r -M -s /usr/sbin/nologin -c "brainbox SSO share" "$USER"
+    fi
+    usermod -aG "$GROUP" "$USER" 2>/dev/null || true
+    PW="$(cat)"
+    [ -n "$PW" ] || { echo "refuse: empty password" >&2; exit 2; }
+    if pdbedit -L 2>/dev/null | cut -d: -f1 | grep -qx "$USER"; then
+      printf '%s\n%s\n' "$PW" "$PW" | smbpasswd -s "$USER" >/dev/null
+    else
+      printf '%s\n%s\n' "$PW" "$PW" | smbpasswd -s -a "$USER" >/dev/null
+    fi
+    smbpasswd -e "$USER" >/dev/null 2>&1 || true
+    if [ -n "$PATHDIR" ] && [ -d "$PATHDIR" ]; then
+      chown -R "$OWNER":"$GROUP" "$PATHDIR" 2>/dev/null || true
+      chmod 2775 "$PATHDIR" 2>/dev/null || true
+    fi
+    ;;
+  add)
+    USER="${2:-}"; PATHDIR="${3:-}"
+    [ -z "$PATHDIR" ] || PATHDIR="$(in_freigabe "$PATHDIR")" || exit 2
+    case "$USER" in bshare-*) : ;; *) echo "refuse: user must be bshare-*" >&2; exit 2 ;; esac
+    printf '%s' "$USER" | grep -qE '^bshare-[a-z0-9-]{1,13}$' || { echo "refuse: bad user shape" >&2; exit 2; }
+    getent group "$GROUP" >/dev/null 2>&1 || groupadd -r "$GROUP"
+    id -nG "$OWNER" 2>/dev/null | tr ' ' '\n' | grep -qx "$GROUP" || usermod -aG "$GROUP" "$OWNER" 2>/dev/null || true
+    if ! id "$USER" >/dev/null 2>&1; then
+      useradd -r -M -s /usr/sbin/nologin -c "brainbox session share" "$USER"
+    fi
+    usermod -aG "$GROUP" "$USER" 2>/dev/null || true
+    PW="$(cat)"
+    printf '%s\n%s\n' "$PW" "$PW" | smbpasswd -s -a "$USER" >/dev/null
+    smbpasswd -e "$USER" >/dev/null 2>&1 || true
+    if [ -n "$PATHDIR" ] && [ -d "$PATHDIR" ]; then
+      chown "$OWNER":"$OWNER" "$PATHDIR" 2>/dev/null || true
+      chmod 2770 "$PATHDIR" 2>/dev/null || true
+      PUB="$(dirname "$(dirname "$PATHDIR")")/public"
+      PUB="$(in_freigabe "$PUB" 2>/dev/null || true)"
+      if [ -n "$PUB" ] && [ -d "$PUB" ]; then
+        chown "$OWNER":"$GROUP" "$PUB" 2>/dev/null || true
+        chmod 2775 "$PUB" 2>/dev/null || true
+      fi
+    fi
+    ;;
+  remove)
+    USER="${2:-}"
+    case "$USER" in
+      bshare-*) : ;;
+      *)
+        printf '%s' "$USER" | grep -qE '^[a-z_][a-z0-9_-]{0,15}$' || { echo "refuse: bad uid shape" >&2; exit 2 ; }
+        case " root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc nobody sshd samba messagebus systemd-network $GROUP $OWNER " in
+          *" $USER "*) echo "refuse: reserved/system/owner account" >&2; exit 2 ;;
+        esac
+        if id "$USER" >/dev/null 2>&1; then
+          SH="$(getent passwd "$USER" | cut -d: -f7)"
+          case "$SH" in */nologin|*/false|/bin/false|"") : ;; *) echo "refuse: existing interactive account" >&2; exit 2 ;; esac
+        fi
+        ;;
+    esac
+    smbpasswd -x "$USER" >/dev/null 2>&1 || true
+    userdel "$USER" >/dev/null 2>&1 || true
+    ;;
+  reload)
+    CONF="${2:-/etc/samba/smb.conf}"
+    
+    
+    
+    CONF_R="$(readlink -f -- "$CONF" 2>/dev/null || true)"
+    [ "$CONF_R" = /etc/samba/smb.conf ] || { echo "refuse: conf path must resolve to /etc/samba/smb.conf" >&2; exit 2 ; }
+    CONF="$CONF_R"
+    NEW="$(cat)"
+    if [ -n "$NEW" ]; then
+      
+      
+      
+      if printf '%s\n' "$NEW" | tr 'A-Z' 'a-z' | grep -qE 'preexec|postexec|magic script|vfs objects|include|username map|add (user|machine|group) script|delete[a-z ]*script'; then
+        echo "refuse: smb.conf contains a forbidden directive" >&2
+        exit 2
+      fi
+      TMP="$(mktemp)"; printf '%s' "$NEW" > "$TMP"
+      if testparm -s "$TMP" >/dev/null 2>&1; then
+        install -m 0644 "$TMP" "$CONF"
+      else
+        echo "refuse: rendered smb.conf failed testparm — keeping existing $CONF" >&2
+      fi
+      rm -f "$TMP"
+    fi
+    smbcontrol smbd reload-config >/dev/null 2>&1 || pnctl reload smbd >/dev/null 2>&1 || true
+    ;;
+  setflag)
+    
+    
+    
+    
+    
+    
+    KEY="${2:-}"; VAL="${3:-}"
+    case "$KEY" in
+      MEDIA_SERVER_ENABLED|RELAY_ENABLED|VOICE_ENABLED|CELLS_ENABLED) : ;;
+      *) echo "refuse: flag not in allowlist" >&2; exit 2 ;;
+    esac
+    case "$VAL" in 0|1) : ;; *) echo "refuse: value must be 0 or 1" >&2; exit 2 ;; esac
+    SITE=/etc/brainbox/site.conf
+    mkdir -p /etc/brainbox
+    
+    
+    
+    
+    TMPF="$(mktemp /etc/brainbox/.site.conf.XXXXXX)"
+    { [ -f "$SITE" ] && grep -v "^$KEY=" "$SITE" || true; echo "$KEY=$VAL"; } > "$TMPF"
+    chmod 0644 "$TMPF"; chown root:root "$TMPF"
+    mv -f "$TMPF" "$SITE"
+    
+    
+    
+    _audit "setflag $KEY=$VAL"
+    
+    
+    
+    CAPS=/etc/brainbox/caps.env
+    if [ -f "$CAPS" ] && grep -q "^$KEY=" "$CAPS"; then
+      sed -i "s/^$KEY=.*/$KEY=$VAL/" "$CAPS"
+    fi
+    ;;
+  media)
+    
+    
+    
+    
+    
+    STATE="${2:-}"
+    case "$STATE" in on) V=1 ;; off) V=0 ;; *) echo "usage: media on|off" >&2; exit 2 ;; esac
+    
+    
+    _audit "media $STATE"
+    "$0" setflag MEDIA_SERVER_ENABLED "$V"
+    if [ "$V" = 1 ]; then
+      /usr/local/sbin/brainbox-smbd  >/dev/null 2>&1 || true
+      /usr/local/sbin/brainbox-dlnad >/dev/null 2>&1 || true
+    else
+      rm -f /etc/avahi/services/smb.service 2>/dev/null || true
+      smbcontrol smbd shutdown >/dev/null 2>&1 || true
+      
+      pkill -x smbd 2>/dev/null || true
+      pkill -x nmbd 2>/dev/null || true
+      pkill -x wsdd 2>/dev/null || true
+      pkill -f 'pn_dlnad\.py' 2>/dev/null || true
+    fi
+    ;;
+  ensure)
+    /usr/local/sbin/brainbox-smbd >/dev/null 2>&1 || true
+    ;;
+  *)
+    echo "usage: pn-mediashare-provision add|remove|sso|reload|ensure|setflag|media ..." >&2
+    exit 2
+    ;;
+esac

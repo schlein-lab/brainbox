@@ -1,0 +1,21 @@
+{
+  "name": "@brainarbeit/connect-core",
+  "version": "0.1.0",
+  "description": "The one client-core for the Brainarbeit account-bound connect-once client tier (PWA/desktop/mobile/SDK). Speaks the one-contract; connect-once per-device handshake + mandatory 2FA; single reality (user/<principal>); voice/text/file/path intake; approve/reject/revise; fully bidirectional media (mic/camera/screen + box video/screen + spoken replies).",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./contract": "./src/contract.js",
+    "./media": "./src/media.js",
+    "./intake": "./src/intake.js"
+  },
+  "files": ["src"],
+  "scripts": {
+    "test": "node test/core_test.mjs",
+    "lint": "node --check src/index.js"
+  },
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "sideEffects": false
+}

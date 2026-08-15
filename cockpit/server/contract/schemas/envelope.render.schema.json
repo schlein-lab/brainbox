@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portal-contract/1/envelope.render",
+  "title": "Render-lane control descriptor (contract.md §4)",
+  "description": "The render lane's PIXELS are binary (SceneFrame v1, §4.2) and never travel as JSON. What the control lane carries about the render lane is the screen.placement descriptor (§3.3, §4.4): which payload to read + generation to gate on. This schema validates that JSON descriptor plus the R0..R3 representation-rung tag. The binary SceneFrame v1 header layout is documented in scene_frame_v1.layout.json (structural, not JSON-Schema-checkable here).",
+  "type": "object",
+  "required": ["lens_id", "mode", "scene_url", "screen", "generation", "rung"],
+  "properties": {
+    "lens_id": {
+      "type": "string",
+      "description": "the lens this placement is for (screen.show reply, §3.3)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["server-composite", "client-composite"],
+      "description": "negotiated placement (§5.2). Chosen by CAPABILITY, never front-end type (invariant 8)."
+    },
+    "scene_url": {
+      "type": "string",
+      "description": "where the front-end reads the render payload: /scene.bin (R2 client-composite) or /frame.rgba | MJPEG (R3 server-composite) (§4.4)."
+    },
+    "screen": {
+      "type": "object",
+      "required": ["w", "h"],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "additionalProperties": false
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "X-Phantom-Gen generation to gate on; an unchanged screen is never re-serialized (§4.4 felt-latency)."
+    },
+    "rung": {
+      "type": "string",
+      "enum": ["R0", "R1", "R2", "R3"],
+      "description": "representation rung (§4.1): R0 semantic / R1 scene / R2 surface(SceneFrame v1) / R3 encoded. DEFAULT is R0; pixels last."
+    }
+  },
+  "additionalProperties": false
+}

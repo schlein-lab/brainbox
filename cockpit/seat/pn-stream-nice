@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set +e
+INTERVAL="${PN_STREAM_NICE_INTERVAL:-20}"
+DEV_NICE="${PN_STREAM_NICE_DEV:-15}"
+
+demote() {
+  for p in $(pgrep -u "$UID" -x code 2>/dev/null); do
+    renice "$DEV_NICE" -p "$p" >/dev/null 2>&1
+    ionice -c 3 -p "$p" >/dev/null 2>&1
+  done
+  for p in $(pgrep -u "$UID" -f 'firefox' 2>/dev/null); do
+    renice "$DEV_NICE" -p "$p" >/dev/null 2>&1
+    ionice -c 3 -p "$p" >/dev/null 2>&1
+  done
+}
+
+if [ "$1" = "--once" ]; then demote; exit 0; fi
+
+while :; do
+  demote
+  sleep "$INTERVAL"
+done

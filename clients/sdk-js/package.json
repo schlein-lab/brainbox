@@ -1,0 +1,12 @@
+{
+  "name": "@brainarbeit/connect-sdk",
+  "version": "0.1.0",
+  "description": "Thin JS/TS SDK for third-party Brainarbeit integrations — build your own client/integration on the SAME one client-core (connect-once per-device handshake + mandatory 2FA, single reality, the one-contract, voice/text/file/path intake, approve/reject/revise, bidirectional media).",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": { ".": { "types": "./index.d.ts", "default": "./index.js" } },
+  "files": ["index.js", "index.d.ts"],
+  "dependencies": { "@brainarbeit/connect-core": "file:../core" },
+  "license": "SEE LICENSE IN ../../LICENSE"
+}

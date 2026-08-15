@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+
+import os, sys, time, json, signal, argparse, socket
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import LOG_DIR, ipc
+from pnlib.ipc import send_request
+
+LLM_SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pn-llmd.sock")
+EXIT = {"done": None, "failed": None, "cancelled": 130, "timeout": 124, "rejected": 1}
+
+def _req(d, timeout=15):
+    try:
+        return send_request(d, timeout=timeout)
+    except FileNotFoundError:
+        sys.stderr.write("pn: daemon not running (no socket). Start: systemctl --user start pnd\n")
+        sys.exit(3)
+    except Exception as e:
+        sys.stderr.write(f"pn: cannot reach pnd: {e}\n")
+        sys.exit(3)
+
+def _req_soft(d, timeout=10):
+
+    try:
+        return send_request(d, timeout=timeout)
+    except Exception:
+        return None
+
+def _self_job_id():
+    v = os.environ.get("PN_JOB_ID", "")
+    return int(v) if v.isdigit() else None
+
+def _short_prog(j):
+    d, t = j.get("prog_done"), j.get("prog_total")
+    if d is not None and t:
+        return f"{int(100 * d / t)}%" if t else str(d)
+    if d is not None:
+        return str(d)
+    return "-"
+
+def _fmt_progress(job, now=None, stall_s=300):
+    d, t, m = job.get("prog_done"), job.get("prog_total"), job.get("prog_msg")
+    bits = []
+    if d is not None and t:
+        filled = int(20 * min(d, t) / t) if t else 0
+        bits.append("[" + "#" * filled + "." * (20 - filled) + f"] {d}/{t} ({int(100*d/t)}%)")
+    elif d is not None:
+        bits.append(f"{d} done")
+    if m:
+        bits.append(str(m))
+    if now and job.get("prog_at") and job.get("state") == "running" and (now - job["prog_at"]) > stall_s:
+        bits.append(f"STALLED {int(now - job['prog_at'])}s")
+    return "  ".join(bits)
+
+def _split_cmd(argv):
+    if "--" not in argv:
+        return argv, None
+    i = argv.index("--")
+    return argv[:i], argv[i + 1:]
+
+def _common_opts(p):
+    p.add_argument("--mem", type=int)
+    p.add_argument("--class", dest="klass")
+    p.add_argument("--prio", type=int)
+    p.add_argument("--detach", action="store_true",
+                   help="submit + Job-ID ausgeben, dann BEENDEN. `pn run` haelt sonst fuer die "
+                        "gesamte Warte- UND Laufzeit eine pnd-Verbindung offen (es streamt) — bei "
+                        "vielen Cron-Submits hinter einem langen Job legt das die Steuerebene lahm.")
+    p.add_argument("--latency", choices=("realtime", "deferrable", "filler"),
+                   help="Latenzklasse -> Scheduler-Bahn: realtime = interaktive Bahn "
+                        "(reservierter RAM + Slots), deferrable = Batch, filler = Backfill")
+    p.add_argument("--filler", action="store_true",
+                   help="submit as idle-only FILLER (source='filler'): runs ONLY when no real work is "
+                        "queued and is preemptible — yields to every real user's job. Needs an "
+                        "admin-capped caller (view:all/task_type:*), else the source is clamped to 'cli'.")
+    p.add_argument("--timeout", type=int)
+    p.add_argument("--tag")
+
+    p.add_argument("--kerne", type=int,
+                   help="Kerne BUCHEN: belegt Kern-Slots auf einem Node bis zum Job-Ende und "
+                        "wird als harte cpu.max-Quote durchgesetzt. Zu hohe Forderungen werden "
+                        "SOFORT ehrlich abgesagt (mit Alternativangebot je Kernzahl).")
+    p.add_argument("--dauer-s", dest="dauer_s", type=int,
+                   help="erwartete Dauer in Sekunden — NUR Planungsinput für die ETA anderer; "
+                        "NIE ein Limit (Überziehen ist erlaubt und erzeugt nur eine Notiz).")
+    p.add_argument("--flexibel", action="store_true", default=None,
+                   help="mit --kerne: nimmt auch weniger Kerne, wenn die dann SOFORT starten "
+                        "(nie 0; die Zuteilung wird im Job vermerkt und in der Antwort genannt).")
+    p.add_argument("--cpu-quota", dest="cpu_quota", type=int)
+    p.add_argument("--disk-min", dest="disk_min", type=int)
+    p.add_argument("--disk-max", dest="disk_max", type=int)
+    p.add_argument("--mem-max", dest="mem_max", type=int)
+    p.add_argument("--room")
+    p.add_argument("--reply-to", dest="reply_to", metavar="KANAL:ADRESSE",
+                   help="wohin Meldungen ZU DIESEM Job gehen (z.B. file:owner, telegram:<chat>). "
+                        "Ohne Angabe gilt die Route des Principals bzw. das Postfach. pnd traegt "
+                        "das Feld seit jeher — gesetzt hat es nur nie jemand (0 von 101.800).")
+    p.add_argument("--idempotent", dest="idempotent", action="store_const", const=True, default=None,
+                   help="safe to re-run from start -> auto-requeue after a crash")
+    p.add_argument("--no-idempotent", dest="idempotent", action="store_const", const=False)
+    p.add_argument("--task-type", dest="task_type",
+                   help="submit a vetted task-type by name (instead of a raw -- CMD)")
+    p.add_argument("--param", dest="params", action="append", default=[], metavar="k=v",
+                   help="task-type param (repeatable); principal comes from peercred, not flags")
+
+    p.add_argument("--deps", dest="deps", default=None,
+                   help="comma-separated upstream job ids this job waits on (-> starts `blocked`)")
+    p.add_argument("--group", dest="group_id", default=None,
+                   help="workflow group id (atomic pipeline); members share group status")
+    p.add_argument("--parent", dest="parent_job", type=int, default=None,
+                   help="parent job for an attenuated sub-task (child.caps must be ⊆ parent.caps)")
+
+def _params_dict(pairs):
+    d = {}
+    for kv in pairs or []:
+        if "=" not in kv:
+            sys.stderr.write(f"pn: bad --param '{kv}' (expected k=v)\n"); sys.exit(2)
+        k, v = kv.split("=", 1)
+        d[k] = v
+    return d
+
+def _submit_req(a, cmd, source="cli"):
+    src = "filler" if getattr(a, "filler", False) else source
+    req = {"verb": "submit", "cmd": cmd, "cwd": os.getcwd(),
+           "class": a.klass, "mem": a.mem, "prio": a.prio, "timeout": a.timeout,
+           "latency": getattr(a, "latency", None),
+           "tag": a.tag, "cpu_quota": a.cpu_quota, "disk_min": a.disk_min,
+           "disk_max": getattr(a, "disk_max", None),
+           "mem_max": a.mem_max, "room": a.room, "idempotent": a.idempotent,
+           "source": src, "env": {"PATH": os.environ.get("PATH", "")}}
+
+    if getattr(a, "kerne", None) is not None:
+        req["kerne"] = a.kerne
+    if getattr(a, "dauer_s", None) is not None:
+        req["dauer_s"] = a.dauer_s
+    if getattr(a, "flexibel", None):
+        req["flexibel"] = True
+    if getattr(a, "reply_to", None):
+        rt = str(a.reply_to)
+        if ":" not in rt:
+            sys.stderr.write("pn: --reply-to braucht die Form KANAL:ADRESSE (z.B. file:owner)\n")
+            sys.exit(2)
+        req["reply_to"] = rt
+    if getattr(a, "task_type", None):
+        req["task_type"] = a.task_type
+        req["params"] = _params_dict(getattr(a, "params", []))
+
+    if getattr(a, "deps", None):
+        try:
+            req["deps"] = [int(x) for x in a.deps.replace(",", " ").split()]
+        except ValueError:
+            sys.stderr.write(f"pn: bad --deps '{a.deps}' (comma-separated job ids)\n"); sys.exit(2)
+    if getattr(a, "group_id", None):
+        req["group_id"] = a.group_id
+    if getattr(a, "parent_job", None) is not None:
+        req["parent_job"] = a.parent_job
+    return _req(req)
+
+def _print_kerne(r):
+
+    kb = r.get("kerne")
+    if isinstance(kb, dict):
+        line = "[pn] %s Kern(e) gebucht" % kb.get("gebucht")
+        if kb.get("wunsch") and kb.get("wunsch") != kb.get("gebucht"):
+            line += " — flexibel heruntergestuft von %s gewünschten" % kb["wunsch"]
+        e = kb.get("eta") or {}
+        if e.get("human"):
+            line += " — Start: %s" % e["human"]
+        sys.stderr.write(line + "\n")
+    ang = r.get("angebot")
+    if isinstance(ang, list) and ang:
+        sys.stderr.write("[pn] Angebot je Kernzahl: " + "   ".join(
+            "%s Kern(e): %s" % (x.get("kerne"), x.get("human") or x.get("status"))
+            for x in ang) + "\n")
+    sys.stderr.flush()
+
+class Streamer:
+
+    def __init__(self, job_id):
+        self.out = os.path.join(LOG_DIR, f"job-{job_id}.out")
+        self.err = os.path.join(LOG_DIR, f"job-{job_id}.err")
+        self._fo = self._fe = None
+
+    def _pump(self, path, fh_attr, sink):
+        fh = getattr(self, fh_attr)
+        if fh is None:
+            if not os.path.exists(path):
+                return
+            try:
+                fh = open(path, "rb")
+                setattr(self, fh_attr, fh)
+            except Exception:
+                return
+        data = fh.read()
+        if data:
+            sink.write(data)
+            sink.flush()
+
+    def pump(self):
+        self._pump(self.out, "_fo", sys.stdout.buffer)
+        self._pump(self.err, "_fe", sys.stderr.buffer)
+
+def cmd_run(a, cmd):
+    if not cmd and not getattr(a, "task_type", None):
+        sys.stderr.write("pn run: missing -- CMD... (or --task-type NAME)\n"); sys.exit(2)
+    r = _submit_req(a, cmd)
+    if not r.get("ok"):
+        sys.stderr.write(f"pn run: submit failed: {r.get('error')}\n")
+        _print_kerne(r)
+        sys.exit(3)
+    jid, pos = r["id"], r.get("pos", 0)
+    _e = r.get("eta") or {}
+    _h = f", ETA {_e['human']}" if _e.get("human") else ""
+    sys.stderr.write(f"[pn] job {jid} queued (pos {pos}{_h})\n"); sys.stderr.flush()
+    _print_kerne(r)
+
+    if getattr(a, "detach", False):
+
+        print(jid)
+        return 0
+
+    cancelled = {"v": False}
+    def onsig(*_):
+        cancelled["v"] = True
+        _req({"verb": "cancel", "id": jid}, timeout=5)
+    signal.signal(signal.SIGTERM, onsig)
+    signal.signal(signal.SIGINT, onsig)
+
+    st = Streamer(jid)
+    started = False
+    lost_since = None
+    GRACE = 120.0
+    while True:
+        jr = _req_soft({"verb": "job", "id": jid})
+        if jr is None or not jr.get("ok"):
+            now = time.time()
+            lost_since = lost_since or now
+            if now - lost_since > GRACE:
+                sys.stderr.write(f"[pn] lost contact with pnd >{int(GRACE)}s; job {jid} may still "
+                                 f"be running — check `pn status` / `pn log {jid}`\n")
+                sys.exit(75)
+            st.pump(); time.sleep(1.0); continue
+        lost_since = None
+        job = jr["job"]; state = job["state"]
+        if state == "running" and not started:
+            started = True
+            sys.stderr.write(f"[pn] job {jid} started\n"); sys.stderr.flush()
+        if state in EXIT:
+            time.sleep(0.15); st.pump(); st.pump()
+            code = job["exit_code"]
+            if state == "done":
+                sys.exit(0 if code is None else code)
+            if state == "failed":
+                sys.exit(1 if code is None else code)
+            sys.exit(EXIT[state])
+        st.pump()
+        time.sleep(0.3)
+
+def cmd_submit(a, cmd):
+    if not cmd and not getattr(a, "task_type", None):
+        sys.stderr.write("pn submit: missing -- CMD... (or --task-type NAME)\n"); sys.exit(2)
+    r = _submit_req(a, cmd)
+    if not r.get("ok"):
+        sys.stderr.write(f"pn submit: {r.get('error')}\n")
+        _print_kerne(r)
+        sys.exit(3)
+    _print_kerne(r)
+
+    state = r.get("state")
+    if state in ("blocked", "staged"):
+        extra = f" deps={r.get('deps')}" if r.get("deps") else ""
+        if r.get("nonce"):
+            extra += f" nonce={r['nonce']}"
+        print(f"{r['id']} {state}{extra}")
+    else:
+        print(f"{r['id']} {r.get('pos',0)}")
+
+def cmd_status(a):
+    r = _req({"verb": "status"})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    s, c, cfg = r["snap"], r["counts"], r["cfg"]
+    print(f"portioneer {r.get('version')}  up {int(r.get('uptime',0))}s")
+    print(f"  RAM avail {s['mem_available']}/{s['mem_total']} MiB   "
+          f"swap {s['swap_used']}/{s['swap_total']} MiB   "
+          f"batch.current {s['batch_current']} MiB")
+    print(f"  PSI(mem) batch {s['psi_avg10']:.1f}  global {s['psi_global_avg10']:.1f}   "
+          f"load {s['load1']:.2f}/{s['cpu_count']}  disk_free {s['disk_free']} MiB")
+    print(f"  floor {cfg['mem_floor']}  batch_high {cfg['batch_high']}  "
+          f"max_conc {cfg['max_concurrent']}  pressure_blocked={r['pressure_blocked']}")
+    print(f"  jobs: " + "  ".join(f"{k}={v}" for k, v in sorted(c.items())) +
+          f"   reserved {r['reserved']} MiB   oldest_wait {int(r['oldest_wait'])}s")
+
+    _dpct = s.get("data_free_pct")
+    if _dpct is not None:
+        _marke = ("  <- unter dem Boden: es startet NICHTS mehr" if _dpct < 3.0 else
+                  "  <- gedrosselt: Massenarbeit wartet, latenzkritische laeuft" if _dpct < 8.0
+                  else "  <- Aufraeumen laeuft" if _dpct < 15.0 else "")
+        print(f"  DATA frei {_dpct:.1f}%{_marke}")
+    if r.get("wait_global"):
+        print(f"  ACHTUNG - es wird gar nichts zugelassen: {r['wait_global']}")
+    _wr = r.get("wait_reasons") or {}
+    if _wr:
+        _haeufig = {}
+        for _g in _wr.values():
+            _haeufig[_g] = _haeufig.get(_g, 0) + 1
+        _g, _n = max(_haeufig.items(), key=lambda kv: kv[1])
+        print(f"  {len(_wr)} Kopf/Koepfe warten, haeufigster Grund ({_n}x): {_g}")
+
+def cmd_eta(a):
+    r = _req({"verb": "eta", "id": a.id})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    e = r.get("eta") or {}
+    st = r.get("state") or "?"
+    pos = e.get("position", "?"); ahead = e.get("ahead", "?"); wait = e.get("waiting_on", "?")
+    h = e.get("human")
+    if h:
+        print(f"job {a.id}: {st}  pos {pos} ({ahead} ahead)  waiting_on={wait}  eta {h}")
+    else:
+        print(f"job {a.id}: {st}  pos {pos}  waiting_on={wait}")
+
+def cmd_list(a):
+    r = _req({"verb": "list", "limit": a.limit})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    print(f"{'ID':>5} {'STATE':<9} {'PRI':>4} {'MEM':>5} {'KERNE':>5} {'EXIT':>4} {'PROG':>6} {'ROOM':<12} {'WAIT':>6}  TAG/CMD")
+    now = time.time()
+    for j in r["jobs"]:
+        wait = int(now - j["submitted_at"])
+        cmd = (j.get("client_tag") or "") or " ".join(json.loads(j["cmd"]))[:40]
+        ex = "" if j["exit_code"] is None else j["exit_code"]
+        room = (j.get("room") or "")[:12]
+
+        kerne = "-"
+        if j.get("kerne"):
+            kerne = str(j["kerne"])
+            if j.get("kerne_wunsch"):
+                kerne += "<%d" % j["kerne_wunsch"]
+        print(f"{j['id']:>5} {j['state']:<9} {j['prio']:>4} {j['mem_estimate']:>5} {kerne:>5} {str(ex):>4} "
+              f"{_short_prog(j):>6} {room:<12} {wait:>5}s  {cmd[:40]}")
+
+def cmd_mine(a):
+    r = _req({"verb": "my-jobs", "state": a.state, "via": a.via, "limit": a.limit})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    print(f"{'ID':>5} {'STATE':<9} {'PRI':>4} {'TASK_TYPE':<14} {'VIA':<10} {'WAIT':>6}  TAG/CMD")
+    now = time.time()
+    for j in r["jobs"]:
+        wait = int(now - j["submitted_at"])
+        cmd = (j.get("client_tag") or "") or " ".join(json.loads(j["cmd"]))[:40]
+        tt = (j.get("task_type") or "-")[:14]
+        via = (j.get("via_device") or "-")[:10]
+        print(f"{j['id']:>5} {j['state']:<9} {j['prio']:>4} {tt:<14} {via:<10} {wait:>5}s  {cmd[:40]}")
+
+def cmd_history(a):
+    r = _req({"verb": "my-history", "id": a.id, "limit": a.limit})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    j = r["job"]
+    print(f"job {j['id']}  {j['state']}  task_type={j.get('task_type') or '-'}  "
+          f"submitter={j.get('submitter_principal') or '-'}  via={j.get('via_method') or '-'}")
+    for e in reversed(r.get("events", [])):
+        ts = time.strftime("%H:%M:%S", time.localtime(e["ts"]))
+        print(f"  {ts} [{e['kind']}] {e.get('data') or ''}")
+
+def cmd_outputs(a):
+    r = _req({"verb": "my-outputs", "since": a.since, "limit": a.limit})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    print(f"{'ID':>5} {'STATE':<9} {'TASK_TYPE':<14}  RESULT")
+    for o in r["outputs"]:
+        uri = o.get("result_uri") or "-"
+        print(f"{o['id']:>5} {o['state']:<9} {(o.get('task_type') or '-'):<14}  {uri}")
+
+def cmd_whereis(a):
+
+    r = _req({"verb": "whereis", "id": a.id})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    w = r["whereis"]
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(w["when"])) if w.get("when") else "-"
+    print(f"job {w['id']}")
+    print(f"  status     {w['status']}")
+    print(f"  what       {w['what']}")
+    print(f"  when       {when}")
+    print(f"  who        {w['who'] or '-'}")
+    print(f"  record_ok  {w['record_ok']}  commit={w.get('record_commit') or '-'}")
+    print(f"  replicated {w['replicated']}")
+    print(f"  bytes      {w['bytes_status']}" + (f"  ({w['bytes']})" if w.get("bytes") else ""))
+
+def cmd_group(a):
+
+    r = _req({"verb": "group", "group_id": a.group_id})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn group: {r.get('error')}\n"); sys.exit(3)
+    g = r["group"]
+    print(f"group {g['group_id']}  overall={g['overall']}  {g['done']}/{g['total']} done"
+          f"  ({'  '.join(f'{k}={v}' for k, v in sorted(g['counts'].items()))})")
+    print(f"{'ID':>5} {'STATE':<14} {'TASK_TYPE':<16} DEPS")
+    for m in g["members"]:
+        print(f"{m['id']:>5} {m['state']:<14} {(m.get('task_type') or '(raw)'):<16} "
+              f"{m.get('deps') or []}")
+
+def cmd_result(a):
+
+    r = _req({"verb": "result", "id": a.id})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn result: {r.get('error')}\n"); sys.exit(3)
+    print(json.dumps(r["result"], indent=2))
+
+def cmd_workorder(a):
+
+    try:
+        with open(a.file) as f:
+            spec = json.load(f)
+    except Exception as e:
+        sys.stderr.write(f"pn workorder: cannot read {a.file}: {e}\n"); sys.exit(2)
+    req = {"verb": "submit-dag", "nodes": spec.get("nodes"),
+           "group_id": spec.get("group_id"), "parent_job": spec.get("parent_job"),
+           "source": "cli"}
+    r = _req(req, timeout=60)
+    if not r.get("ok"):
+        sys.stderr.write(f"pn workorder: {r.get('error')}\n"); sys.exit(3)
+    print(f"workflow {r['group_id']} submitted: {len(r['job_ids'])} nodes -> job ids {r['job_ids']}")
+    g = r.get("group") or {}
+    if g:
+        print(f"  overall={g.get('overall')}  {g.get('done')}/{g.get('total')} done")
+
+def cmd_cancel(a):
+    r = _req({"verb": "cancel", "id": a.id})
+    if not r.get("ok"):
+
+        sys.stderr.write(f"pn cancel: {r.get('error')}\n"); sys.exit(3)
+    print("cancelled")
+
+def cmd_extend(a):
+    r = _req({"verb": "extend", "id": a.id, "seconds": a.seconds})
+    if r.get("ok"):
+        print(f"extended job {a.id} by {r.get('granted_s')}s "
+              f"(new walltime {r.get('new_walltime_s')}s, total extra {r.get('total_extra_s')}s)")
+    else:
+
+        sys.stderr.write(f"pn extend: {r.get('error')}\n"); sys.exit(3)
+
+def cmd_log(a):
+    r = _req({"verb": "log", "id": a.id, "bytes": a.bytes})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    if r.get("stdout"):
+        sys.stdout.write(r["stdout"])
+    if r.get("stderr"):
+        sys.stderr.write("\n--- stderr ---\n" + r["stderr"])
+
+def cmd_llm(a):
+    req = {"verb": "ask", "prompt": a.prompt, "model": a.model,
+           "kind": ("dedicated" if a.dedicated else ("loose" if a.loose else None))}
+    try:
+        resp = send_request(req, timeout=a.timeout or 300, path=LLM_SOCK)
+    except FileNotFoundError:
+        sys.stderr.write("pn llm: pn-llmd not running\n"); sys.exit(3)
+    except Exception as e:
+        sys.stderr.write(f"pn llm: {e}\n"); sys.exit(3)
+    if not resp.get("ok") and resp.get("error") == "empty":
+
+        sys.stderr.write("pn llm: empty reply from pn-llmd\n"); sys.exit(3)
+    if resp.get("ok"):
+        sys.stdout.write(resp.get("text", ""))
+        if not resp.get("text", "").endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        sys.stderr.write(f"pn llm error: {resp.get('error')}\n"); sys.exit(1)
+
+def cmd_progress(a):
+    jid = a.id if a.id is not None else _self_job_id()
+    if jid is None:
+        sys.stderr.write("pn progress: no job id (run inside a pn job, or pass --id)\n"); sys.exit(2)
+    req = {"verb": "progress", "id": jid}
+    if a.done is not None: req["done"] = a.done
+    if a.total is not None: req["total"] = a.total
+    if a.msg is not None: req["msg"] = a.msg
+    r = _req(req)
+    if not r.get("ok"):
+        sys.stderr.write(f"pn progress: {r.get('error')}\n"); sys.exit(3)
+
+def cmd_checkpoint(a):
+    jid = a.id if a.id is not None else _self_job_id()
+    if jid is None:
+        sys.stderr.write("pn checkpoint: no job id (run inside a pn job, or pass --id)\n"); sys.exit(2)
+    r = _req({"verb": "checkpoint", "id": jid, "kind": a.kind, "data": a.data})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn checkpoint: {r.get('error')}\n"); sys.exit(3)
+
+def cmd_events(a):
+    r = _req({"verb": "events", "id": a.id, "limit": a.limit})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn: {r.get('error')}\n"); sys.exit(3)
+    for e in reversed(r["events"]):
+        ts = time.strftime("%H:%M:%S", time.localtime(e["ts"]))
+        print(f"{ts} [{e['kind']}] {e.get('data') or ''}")
+
+def cmd_watch(a):
+    jid = a.id
+    st = Streamer(jid)
+    lastline = None
+    lost_since = None
+    GRACE = 120.0
+    while True:
+        jr = _req_soft({"verb": "job", "id": jid})
+        if jr is None:
+            now = time.time(); lost_since = lost_since or now
+            if now - lost_since > GRACE:
+                sys.stderr.write(f"pn watch: lost contact with pnd >{int(GRACE)}s\n"); sys.exit(3)
+            time.sleep(1.0); continue
+        lost_since = None
+        if not jr.get("ok"):
+            sys.stderr.write(f"pn watch: {jr.get('error')}\n"); sys.exit(3)
+        job = jr["job"]
+        line = _fmt_progress(job, jr.get("now"), jr.get("stall_s", 300))
+        if line and line != lastline:
+            sys.stderr.write(f"[pn {jid}] {job['state']}  {line}\n"); sys.stderr.flush()
+            lastline = line
+        st.pump()
+        if job["state"] in EXIT:
+            st.pump()
+            sys.stderr.write(f"[pn {jid}] {job['state']} (exit {job['exit_code']})\n")
+            sys.exit(0 if job["state"] == "done" and (job["exit_code"] in (0, None)) else 1)
+        time.sleep(0.5)
+
+def cmd_steer(a):
+
+    inp = a.input
+    try:
+        inp = json.loads(a.input)
+    except Exception:
+        pass
+    r = _req({"verb": "steer", "id": a.id, "input": inp})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn steer: {r.get('error')}\n"); sys.exit(3)
+    print(f"steered job {a.id} (seq {r.get('seq')})")
+
+def cmd_approve(a):
+    r = _req({"verb": "approve", "nonce": a.nonce})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn approve: {r.get('error')}\n"); sys.exit(3)
+    print(f"approved -> job {r.get('id')} {r.get('state')}"
+          + ("  (already approved)" if r.get("idempotent") else ""))
+
+def cmd_deny(a):
+    r = _req({"verb": "deny", "nonce": a.nonce})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn deny: {r.get('error')}\n"); sys.exit(3)
+    print(f"denied -> job {r.get('id')} {r.get('state')}"
+          + ("  (already denied)" if r.get("idempotent") else ""))
+
+def cmd_reject(a):
+
+    r = _req({"verb": "reject", "nonce": a.nonce})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn reject: {r.get('error')}\n"); sys.exit(3)
+    print(f"rejected -> job {r.get('id')} {r.get('state')}"
+          + ("  (already rejected)" if r.get("idempotent") else ""))
+
+def cmd_revise(a):
+
+    r = _req({"verb": "revise", "nonce": a.nonce, "feedback": a.feedback})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn revise: {r.get('error')}\n"); sys.exit(3)
+    print(f"revising -> job {r.get('id')} {r.get('state')} "
+          f"(revise {r.get('revise_count')}/{r.get('revise_max')})")
+
+def cmd_pending(a):
+
+    r = _req({"verb": "pending", "limit": a.limit})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn pending: {r.get('error')}\n"); sys.exit(3)
+    items = r.get("pending", [])
+    if not items:
+        print("(no pending approvals)"); return
+    print(f"{'ID':>5} {'STATE':<18} {'GATE':<11} {'TASK_TYPE':<16} NONCE")
+    for p in items:
+        print(f"{p['id']:>5} {p['state']:<18} {(p.get('approval_kind') or '-'):<11} "
+              f"{(p.get('task_type') or '(raw)'):<16} {p.get('approval_nonce') or '-'}")
+        rq = p.get("approval_request") or {}
+        summ = rq.get("summary")
+        if summ:
+            print(f"        summary: {summ}")
+        res = rq.get("result") or {}
+        if res.get("result_hash"):
+            print(f"        result : hash={res.get('result_hash')[:16]}  "
+                  f"commit={(res.get('record_commit') or '-')[:12]}")
+        act = rq.get("action") or {}
+        if act.get("argv"):
+            print(f"        action : {' '.join(act['argv'])[:70]}"
+                  + ("  (SIDE-EFFECTING)" if act.get("side_effecting") else ""))
+
+def cmd_cvm(a):
+
+    r = _req({"verb": "cvm", "id": a.id})
+    if not r.get("ok"):
+        sys.stderr.write(f"pn cvm: {r.get('error')}\n"); sys.exit(3)
+    print(json.dumps(r["cvm"], indent=2))
+
+def cmd_subscribe(a):
+
+    topics = a.topics if a.topics else ([f"job/{a.id}"] if a.id is not None else [f"user/me"])
+    req = {"verb": "subscribe", "topics": topics}
+    if a.replay is not None:
+        req["after_id"] = a.replay
+    p = ipc.sock_path()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(p)
+    except Exception as e:
+        sys.stderr.write(f"pn subscribe: cannot reach pnd: {e}\n"); sys.exit(3)
+    s.sendall((json.dumps(req) + "\n").encode())
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                msg = json.loads(line.decode())
+                if msg.get("type") == "ping":
+                    continue
+                print(json.dumps(msg))
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        s.close()
+
+def cmd_ping(a):
+    r = _req({"verb": "ping"})
+    print(json.dumps(r))
+
+def main():
+    argv = sys.argv[1:]
+    pre, cmd = _split_cmd(argv)
+    p = argparse.ArgumentParser(prog="pn")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name in ("run", "submit"):
+        sp = sub.add_parser(name); _common_opts(sp)
+    sp = sub.add_parser("list"); sp.add_argument("--limit", type=int, default=50)
+    sub.add_parser("status")
+    sp = sub.add_parser("mine"); sp.add_argument("--state"); sp.add_argument("--via")
+    sp.add_argument("--limit", type=int, default=50)
+    sp = sub.add_parser("history"); sp.add_argument("id", type=int)
+    sp.add_argument("--limit", type=int, default=200)
+    sp = sub.add_parser("outputs"); sp.add_argument("--since", type=float)
+    sp.add_argument("--limit", type=int, default=200)
+    sp = sub.add_parser("whereis"); sp.add_argument("id", type=int)
+    sp = sub.add_parser("group"); sp.add_argument("group_id")
+    sp = sub.add_parser("result"); sp.add_argument("id", type=int)
+    sp = sub.add_parser("eta"); sp.add_argument("id", type=int)
+    sp = sub.add_parser("workorder"); sp.add_argument("file",
+        help="JSON work-order DAG spec {nodes:[...]} to submit atomically")
+    sp = sub.add_parser("cancel"); sp.add_argument("id", type=int)
+    sp = sub.add_parser("extend"); sp.add_argument("id", type=int); sp.add_argument("seconds", type=int)
+    sp = sub.add_parser("log"); sp.add_argument("id", type=int); sp.add_argument("--bytes", type=int, default=8000)
+    sp = sub.add_parser("llm"); sp.add_argument("prompt"); sp.add_argument("--model")
+    sp.add_argument("--dedicated", action="store_true"); sp.add_argument("--loose", action="store_true")
+    sp.add_argument("--timeout", type=int)
+    sp = sub.add_parser("progress")
+    sp.add_argument("done", type=int, nargs="?"); sp.add_argument("total", type=int, nargs="?")
+    sp.add_argument("--msg"); sp.add_argument("--id", type=int)
+    sp = sub.add_parser("checkpoint")
+    sp.add_argument("data"); sp.add_argument("--kind", default="checkpoint"); sp.add_argument("--id", type=int)
+    sp = sub.add_parser("events"); sp.add_argument("id", type=int); sp.add_argument("--limit", type=int, default=200)
+    sp = sub.add_parser("watch"); sp.add_argument("id", type=int)
+    sp = sub.add_parser("steer"); sp.add_argument("id", type=int); sp.add_argument("input")
+    sp = sub.add_parser("approve"); sp.add_argument("nonce")
+    sp = sub.add_parser("deny"); sp.add_argument("nonce")
+    sp = sub.add_parser("reject"); sp.add_argument("nonce")
+    sp = sub.add_parser("revise"); sp.add_argument("nonce"); sp.add_argument("feedback")
+    sp = sub.add_parser("pending"); sp.add_argument("--limit", type=int, default=100)
+    sp = sub.add_parser("cvm"); sp.add_argument("id", type=int)
+    sp = sub.add_parser("subscribe")
+    sp.add_argument("--id", type=int); sp.add_argument("--topics", nargs="+")
+    sp.add_argument("--replay", type=int, help="reconnect from this last_event_id")
+    sub.add_parser("ping")
+    a = p.parse_args(pre)
+    if a.cmd == "run": cmd_run(a, cmd)
+    elif a.cmd == "submit": cmd_submit(a, cmd)
+    elif a.cmd == "status": cmd_status(a)
+    elif a.cmd == "list": cmd_list(a)
+    elif a.cmd == "mine": cmd_mine(a)
+    elif a.cmd == "history": cmd_history(a)
+    elif a.cmd == "outputs": cmd_outputs(a)
+    elif a.cmd == "whereis": cmd_whereis(a)
+    elif a.cmd == "eta": cmd_eta(a)
+    elif a.cmd == "group": cmd_group(a)
+    elif a.cmd == "result": cmd_result(a)
+    elif a.cmd == "workorder": cmd_workorder(a)
+    elif a.cmd == "cancel": cmd_cancel(a)
+    elif a.cmd == "extend": cmd_extend(a)
+    elif a.cmd == "log": cmd_log(a)
+    elif a.cmd == "llm": cmd_llm(a)
+    elif a.cmd == "progress": cmd_progress(a)
+    elif a.cmd == "checkpoint": cmd_checkpoint(a)
+    elif a.cmd == "events": cmd_events(a)
+    elif a.cmd == "watch": cmd_watch(a)
+    elif a.cmd == "steer": cmd_steer(a)
+    elif a.cmd == "approve": cmd_approve(a)
+    elif a.cmd == "deny": cmd_deny(a)
+    elif a.cmd == "reject": cmd_reject(a)
+    elif a.cmd == "revise": cmd_revise(a)
+    elif a.cmd == "pending": cmd_pending(a)
+    elif a.cmd == "cvm": cmd_cvm(a)
+    elif a.cmd == "subscribe": cmd_subscribe(a)
+    elif a.cmd == "ping": cmd_ping(a)
+
+if __name__ == "__main__":
+    main()

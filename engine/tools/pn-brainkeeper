@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+
+import os, sys, time, signal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import db, brain as B, VERSION, DB_PATH
+from pnlib import ctxpressure, ipc
+
+class Keeper:
+
+    def __init__(self, cx, *, principal=None, ping_fn=None, kill_fn=None, record_note=None,
+                 max_age_s=None, max_tasks=None, stuck_s=None, meter=None, model=None):
+        self.cx = cx
+        self.principal = principal or os.environ.get("PN_BRAIN_PRINCIPAL", "brain")
+        self.ping_fn = ping_fn or (lambda: True)
+        self.kill_fn = kill_fn or (lambda sess, **kw: None)
+        self.record_note = record_note or (lambda principal, digest: None)
+        self.max_age_s = (float(max_age_s) if max_age_s is not None
+                          else float(os.environ.get("PN_KEEPER_MAX_AGE_S", B.ROTATE_MAX_AGE_S)))
+        self.max_tasks = (int(max_tasks) if max_tasks is not None
+                          else int(os.environ.get("PN_KEEPER_MAX_TASKS", B.ROTATE_MAX_TASKS)))
+        self.stuck_s = (float(stuck_s) if stuck_s is not None
+                        else float(os.environ.get("PN_KEEPER_STUCK_S", B.ROTATE_STUCK_S)))
+
+        self.meter = meter or ctxpressure.build_meter(
+            model or os.environ.get("PN_LLM_PIN_MODEL")
+            or os.environ.get("PN_LLM_MODEL", "sonnet"))
+        self.rotations = 0
+
+    def measure_pressure(self, *, now=None):
+
+        digest = B.get_state(self.cx, self.principal, "digest", default="")
+        intents = B.get_state(self.cx, self.principal, "intents", default=[])
+        inflight = [r["id"] for r in self.cx.execute(
+            "SELECT id FROM jobs WHERE submitter_principal=? AND state IN "
+            "('queued','blocked','running','staged','awaiting_approval') ORDER BY id LIMIT 200",
+            (self.principal,)).fetchall()]
+        system = ctxpressure.build_system_contract(
+            task_type_allowlist=B.DEFAULT_TASK_TYPE_ALLOWLIST, allowed_ops=B.ALLOWED_OPS)
+        return self.meter.observe({"system": system, "digest": digest,
+                                   "intents": intents, "inflight": inflight,
+                                   "instruction": "emit one closed-world action as JSON"})
+
+    def maybe_rotate(self, *, now=None, context_pressure=None):
+
+        now = B._now(now)
+        alive = bool(self.ping_fn())
+        sess = B.get_session(self.cx, self.principal)
+        pressure_info = None
+        if context_pressure is None:
+            pressure_info = self.measure_pressure(now=now)
+            context_pressure = pressure_info["pressure"]
+        rotate, reason = B.should_rotate(
+            sess, now=now, max_age_s=self.max_age_s, max_tasks=self.max_tasks,
+            stuck_s=self.stuck_s, context_pressure=context_pressure)
+        if not rotate and not alive:
+            rotate, reason = True, "dead-session"
+        if not rotate:
+            return {"rotated": False, "reason": None, "alive": alive,
+                    "session": (sess or {}).get("session_id")}
+
+        intents = B.get_state(self.cx, self.principal, "intents", default=[])
+        recent = self._recent_jobs()
+        digest = B.rotation_checkpoint(self.cx, self.principal, sess, recent, intents,
+                                       reason=reason, now=now)
+        try:
+            self.record_note(self.principal, digest)
+        except Exception as e:
+            sys.stderr.write(f"pn-brainkeeper record snapshot failed: {e}\n")
+        try:
+
+            self.kill_fn(sess, digest=digest)
+        except TypeError:
+            self.kill_fn(sess)
+        except Exception as e:
+            sys.stderr.write(f"pn-brainkeeper kill failed: {e}\n")
+        fresh = B.new_session(self.cx, self.principal, digest=digest, now=now)
+        self.rotations += 1
+        sys.stderr.write(f"pn-brainkeeper rotated {self.principal}: {reason} "
+                         f"{(sess or {}).get('session_id')} -> {fresh['session_id']} "
+                         f"(digest {len(digest)}B)\n")
+        sys.stderr.flush()
+        return {"rotated": True, "reason": reason, "alive": alive,
+                "prev_session": (sess or {}).get("session_id"),
+                "new_session": fresh["session_id"], "digest_bytes": len(digest)}
+
+    def _recent_jobs(self, limit=50):
+
+        return [dict(r) for r in self.cx.execute(
+            "SELECT id, task_type, client_tag, state FROM jobs WHERE submitter_principal=? "
+            "ORDER BY id DESC LIMIT ?", (self.principal, limit)).fetchall()]
+
+def _llm_call(llm_sock, req, timeout=10):
+    return ipc.send_request(req, timeout=timeout, path=llm_sock)
+
+def _live_ping_fn(llm_sock):
+
+    def ping():
+        try:
+            r = _llm_call(llm_sock, {"verb": "pin-health"}, timeout=8)
+            return bool(r.get("ok") and r.get("alive"))
+        except Exception:
+            return False
+    return ping
+
+def _live_kill_fn(llm_sock):
+
+    def kill(sess, *, digest=None):
+        try:
+            r = _llm_call(llm_sock, {"verb": "pin-rotate", "digest": (digest or "")[:8000]},
+                          timeout=30)
+            if not r.get("ok"):
+
+                _llm_call(llm_sock, {"verb": "pin-retire"}, timeout=15)
+        except Exception as e:
+            sys.stderr.write(f"pn-brainkeeper pin-rotate failed ({e}); attempting pin-retire\n")
+            try:
+                _llm_call(llm_sock, {"verb": "pin-retire"}, timeout=15)
+            except Exception:
+                pass
+    return kill
+
+def _live_record_note(cx):
+
+    def note(principal, digest):
+        db.add_event(cx, 0, "note",
+                     {"brain": principal, "rotation_digest": digest[:4000]},
+                     topic=f"user/{principal}")
+    return note
+
+def main():
+    principal = os.environ.get("PN_BRAIN_PRINCIPAL", "brain")
+    llm_sock = os.environ.get("PN_LLM_SOCK") or os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pn-llmd.sock")
+    cx = db.connect(DB_PATH)
+    kp = Keeper(cx, principal=principal, ping_fn=_live_ping_fn(llm_sock),
+                kill_fn=_live_kill_fn(llm_sock), record_note=_live_record_note(cx))
+    stop = {"v": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(v=True))
+    signal.signal(signal.SIGINT, lambda *_: stop.update(v=True))
+    sys.stderr.write(f"pn-brainkeeper {VERSION} up: principal={principal} (liveness/rotation only)\n")
+    sys.stderr.flush()
+    tick = float(os.environ.get("PN_KEEPER_TICK_S", "30"))
+    while not stop["v"]:
+        try:
+            kp.maybe_rotate()
+        except Exception as e:
+            sys.stderr.write(f"pn-brainkeeper error: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+        time.sleep(tick)
+
+if __name__ == "__main__":
+    main()

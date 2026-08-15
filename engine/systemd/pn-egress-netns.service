@@ -1,0 +1,12 @@
+[Unit]
+Description=portioneer egress netns default-deny setup (PRIVILEGED — rootless --user cannot do this)
+Before=pn-egress.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/env pn-egress --setup-netns untrusted --apply
+ExecStart=/usr/bin/env pn-egress --setup-netns semi --apply
+
+[Install]
+WantedBy=multi-user.target

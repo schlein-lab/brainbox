@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+import json
+import signal
+import argparse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+
+from pnlib import governor as G
+from pnlib import ipc
+
+def log(msg):
+    sys.stderr.write(f"[pn-governord] {msg}\n")
+    sys.stderr.flush()
+
+def _pnd_sock():
+    return os.environ.get("PND_SOCK") or os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pnd.sock")
+
+def _pnd_submit(req, timeout=3.0):
+    try:
+        return ipc.send_request(req, timeout=timeout, path=_pnd_sock())
+    except (ConnectionError, FileNotFoundError, TimeoutError, PermissionError) as e:
+
+        return {"ok": False, "error": f"pnd unreachable: {type(e).__name__}: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+def _llm_sock():
+    return os.environ.get("PN_LLM_SOCK") or os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pn-llmd.sock")
+
+def _llm_headroom(timeout=0.5):
+
+    try:
+        r = ipc.send_request({"verb": "llm.headroom"}, timeout=timeout, path=_llm_sock())
+    except Exception:
+        return None
+    return r if isinstance(r, dict) and r.get("ok") else None
+
+def make_klaviatur_submit_fn():
+
+    def submit_fn(prog, n: int) -> dict:
+        queued = []
+        for _ in range(int(n)):
+            r = _pnd_submit({"verb": "submit", "task_type": "service.start",
+                             "params": {"svc": prog.name}, "source": "klaviatur",
+                             "tag": f"klaviatur:on:{prog.name}"})
+            if r.get("ok") and r.get("id") is not None:
+                queued.append(r["id"])
+            else:
+                log(f"klaviatur->pnd submit for {prog.name} failed: {r.get('error') or r}")
+                break
+        return {"ok": bool(queued) or n == 0, "queued": queued}
+    return submit_fn
+
+def read_baseline(cg: G.CgLayout) -> G.Invariant:
+
+    mi = G.meminfo()
+    mem_total = mi["total"]
+    crit = cg.tier_dir(G.TIER_CRITICAL)
+    batch = cg.tier_dir(G.TIER_BATCH)
+    misc = cg.tier_dir(G.TIER_MISC)
+
+    crit_min_raw = G.read_cap(os.path.join(crit, "memory.min"))
+    crit_max_raw = G.read_cap(os.path.join(crit, "memory.max"))
+    batch_raw = G.read_cap(os.path.join(batch, "memory.max"))
+    misc_raw = G.read_cap(os.path.join(misc, "memory.max"))
+    batch_swap = G.read_int(os.path.join(batch, "memory.swap.max")) or 0
+    misc_swap = G.read_int(os.path.join(misc, "memory.swap.max")) or 0
+
+    if isinstance(crit_min_raw, int):
+        crit_min = crit_min_raw
+    else:
+        crit_min = int(mem_total * 0.20)
+        log(f"baseline: pn-critical memory.min {crit_min_raw} -> conservative {crit_min // G.MIB} MiB (assumed)")
+
+    if isinstance(crit_max_raw, int):
+        crit_max = crit_max_raw
+    else:
+        crit_max = max(int(mem_total * 0.30), crit_min)
+        log(f"baseline: pn-critical memory.max {crit_max_raw} -> conservative {crit_max // G.MIB} MiB (assumed)")
+
+    def _workload_cap(raw, frac, label):
+        if isinstance(raw, int):
+            return raw
+        if raw == G.CAP_UNCAPPED:
+            log(f"baseline: {label} memory.max=UNCAPPED -> None (Invariant treats unbounded tier as "
+                f"unprovable -> soft RAISES refused; PID1's caps still in force)")
+            return None
+        val = int(mem_total * frac)
+        log(f"baseline: {label} memory.max absent/denied -> conservative {val // G.MIB} MiB")
+        return val
+
+    batch_max = _workload_cap(batch_raw, 0.40, "pn-batch")
+    misc_max = _workload_cap(misc_raw, 0.22, "pn-misc")
+
+    reserve = int(mem_total * 0.12)
+    inv = G.Invariant(mem_total=mem_total, swap_usable=batch_swap + misc_swap,
+                      crit_min=crit_min, crit_max=crit_max, batch_max=batch_max,
+                      misc_max=misc_max, reserve=reserve)
+    if not inv.capacity_known():
+        log("baseline: MemTotal unknown (/proc/meminfo unreadable) -> soft RAISES will fail CLOSED; "
+            "PID1's static hard caps remain in force")
+    holds = inv.holds()
+    bstr = "UNCAPPED" if batch_max is None else f"{batch_max // G.MIB}"
+    mstr = "UNCAPPED" if misc_max is None else f"{misc_max // G.MIB}"
+    part_a = inv.crit_fits_ram()
+    log(f"baseline: MemTotal={mem_total // G.MIB}MiB crit.min={crit_min // G.MIB} "
+        f"crit.max={crit_max // G.MIB} batch.max={bstr} misc.max={mstr} "
+        f"swap_usable={(batch_swap + misc_swap) // G.MIB} reserve={reserve // G.MIB} "
+        f"-> part(a)crit-fits-RAM={'OK' if part_a else 'FAIL'} "
+        f"INVARIANT={'OK' if holds else 'WARN(overcommit/uncapped; refining read-only)'}")
+    return inv
+
+def discover_programs(klav: G.Klaviatur):
+
+    klav.register(G.Program("sshd", tier=G.TIER_CRITICAL, sacred=True))
+    klav.register(G.Program("pnd", tier=G.TIER_CRITICAL, sacred=True))
+    klav.register(G.Program("pn-llmd", tier=G.TIER_CRITICAL, sacred=True))
+    klav.register(G.Program("portal", tier=G.TIER_CRITICAL, sacred=True))
+    klav.register(G.Program("pn-governord", tier=G.TIER_CRITICAL, sacred=True))
+    extra = os.environ.get("PN_GOV_PROGRAMS", "").strip()
+    if extra:
+        try:
+            for d in json.loads(extra):
+                name = d.get("name")
+                if not G.valid_name(name):
+                    log(f"discover: skipping invalid program name {name!r}")
+                    continue
+                klav.register(G.Program(name, tier=d.get("tier", G.TIER_MISC),
+                                        sacred=bool(d.get("sacred"))))
+        except Exception as e:
+            log(f"discover: PN_GOV_PROGRAMS ignored ({type(e).__name__}: {e})")
+
+def drop_rt_scheduling():
+
+    try:
+
+        cur = os.sched_getscheduler(0)
+        if cur in (getattr(os, "SCHED_FIFO", 1), getattr(os, "SCHED_RR", 2)):
+            os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
+            log("sched: dropped inherited SCHED_FIFO -> SCHED_OTHER (CFS); PID1 keeps the RT band "
+                "for its watchdog pet (NEW-2)")
+    except (AttributeError, PermissionError, OSError) as e:
+        log(f"sched: could not drop RT scheduling ({type(e).__name__}: {e}); continuing")
+
+    try:
+        cur_nice = os.getpriority(os.PRIO_PROCESS, 0)
+        if cur_nice < 0:
+            os.setpriority(os.PRIO_PROCESS, 0, 0)
+    except (AttributeError, PermissionError, OSError):
+        pass
+
+def ping_watchdog(path, degraded=0):
+
+    if path:
+        try:
+            with open(path, "w") as f:
+                f.write(str(time.time()))
+        except OSError:
+            pass
+    sd = os.environ.get("NOTIFY_SOCKET")
+    if sd:
+        try:
+            import socket as _s
+            addr = sd if not sd.startswith("@") else "\0" + sd[1:]
+            status = (f"STATUS=DEGRADED: enforcing nothing ({degraded} passes)\n".encode()
+                      if degraded else b"STATUS=refining\n")
+            with _s.socket(_s.AF_UNIX, _s.SOCK_DGRAM) as ns:
+                ns.sendto(b"WATCHDOG=1\n" + status, addr)
+        except OSError:
+            pass
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-governord")
+    ap.add_argument("--cg-root", default=G.CG_ROOT, help="cgroup v2 root (tests point this at a scratch subtree)")
+    ap.add_argument("--socket", default=G.CTRL_SOCK, help="control socket path")
+    ap.add_argument("--allow-uid", type=int, action="append", default=None,
+                    help="uid allowed on the control socket (repeatable; default: 0 + invoking uid)")
+    ap.add_argument("--group", default=None, help="group to own the socket (0660) for an unprivileged cockpit uid")
+    ap.add_argument("--interval", type=float, default=5.0, help="fair-share refinement interval (s)")
+    ap.add_argument("--watchdog-file", default=os.environ.get("PN_GOV_WATCHDOG", ""),
+                    help="touch-file PID1 stats for liveness")
+    ap.add_argument("--once", action="store_true", help="run one refinement pass and exit (diagnostics)")
+    ap.add_argument("--db", default=None, help="queue.db path (default: pnlib.DB_PATH)")
+    ap.add_argument("--acct-db", default=None,
+                    help="acct.db path for the STEP 6 per-type svc EWMA (default: pnlib.acct.default_path)")
+    ap.add_argument("--keep-rt", action="store_true",
+                    help="do NOT drop inherited SCHED_FIFO (default: drop to CFS so we never contend "
+                         "with PID1's watchdog pet — NEW-2)")
+    a = ap.parse_args()
+
+    if not a.keep_rt:
+        drop_rt_scheduling()
+
+    cg = G.CgLayout(root=a.cg_root)
+    inv = read_baseline(cg)
+    fair = G.FairShare(cg, inv, log=log)
+
+    eta = None
+    acct_reader = None
+    try:
+        from pnlib import acct as _acct
+        acct_reader = _acct.AcctReader(a.acct_db)
+    except Exception as e:
+        log(f"acct: reader unavailable ({type(e).__name__}: {e}); ETA on global svc seed")
+    try:
+        eta = G.EtaService(db_path=a.db, fairshare=fair, log=log,
+                           acct_reader=acct_reader, llm_headroom_fn=_llm_headroom)
+    except Exception as e:
+        log(f"eta: unavailable ({type(e).__name__}: {e}); queue surface degraded")
+
+    submit_fn = None
+    if os.environ.get("PN_GOV_GOVERNED_LIFECYCLE", "").strip() not in ("", "0", "false", "no"):
+        submit_fn = make_klaviatur_submit_fn()
+        log("klaviatur: GOVERNED lifecycle ENABLED (on/scale-N -> pnd submit, source='klaviatur')")
+    klav = G.Klaviatur(cg, invariant=inv, log=log, submit_fn=submit_fn)
+    discover_programs(klav)
+
+    try:
+        gc = klav.gc_stale_leaves()
+        if gc["removed"]:
+            log(f"startup: GC'd {len(gc['removed'])} stale leaf cgroup(s)")
+    except Exception as e:
+        log(f"startup: leaf GC skipped ({type(e).__name__}: {e})")
+
+    if a.once:
+        rep = fair.apply()
+        print(json.dumps({"baseline_holds": inv.holds(), "capacity_known": inv.capacity_known(),
+                          "fairshare": rep, "headroom": fair.headroom()}, indent=2))
+        return 0
+
+    last_apply = {"v": None}
+
+    allow = set(a.allow_uid) if a.allow_uid else None
+    server = G.ControlServer(klav, eta, fair, path=a.socket, allow_uids=allow,
+                             group=a.group, log=log, last_apply=lambda: last_apply["v"])
+
+    import threading
+
+    def _serve():
+        try:
+            server.serve_forever()
+        except G.SocketInUse as e:
+            log(f"control plane FATAL: {e}; another Governor owns the socket -> exiting (no steal)")
+            os._exit(71)
+        except BaseException as e:
+            log(f"control plane FATAL: {type(e).__name__}: {e}; exiting so PID1 restarts")
+            os._exit(70)
+    threading.Thread(target=_serve, daemon=True).start()
+
+    stopping = {"v": False}
+
+    def _term(signum, _frame):
+        stopping["v"] = True
+        log(f"signal {signum} -> draining + exit (PID1 keeps the box safe on its baseline)")
+
+    signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGINT, _term)
+
+    log(f"up: refining every {a.interval}s; control at {a.socket}; "
+        f"sacred={sorted(n for n in klav.sacred_names)}")
+    consec_fail = 0
+    FAIL_BUDGET = 5
+    degraded_passes = 0
+    ZERO_ENFORCE_WARN = (1, 12)
+    while not stopping["v"]:
+        ok = False
+        rep = None
+        try:
+            rep = fair.apply()
+            last_apply["v"] = rep
+            if rep["refused"]:
+                log(f"fairshare: refused {len(rep['refused'])} change(s): {rep['refused']}")
+            ok = True
+        except Exception as e:
+            log(f"fairshare pass raised {type(e).__name__}: {e}; skipping (box safe on baseline)")
+        consec_fail = 0 if ok else consec_fail + 1
+
+        if rep is not None and rep.get("zero_enforcement"):
+            degraded_passes += 1
+            if degraded_passes in ZERO_ENFORCE_WARN:
+                log(f"WARN fairshare: ENFORCING NOTHING for {degraded_passes} pass(es) "
+                    f"({rep['write_failures']} write failures) -- tiers/controllers missing? "
+                    f"(box safe on PID1 baseline; soft fair-share NOT being applied)")
+        else:
+            if degraded_passes:
+                log(f"fairshare: recovered after {degraded_passes} degraded pass(es)")
+            degraded_passes = 0
+
+        if consec_fail < FAIL_BUDGET:
+            ping_watchdog(a.watchdog_file, degraded=degraded_passes)
+        else:
+            log(f"fairshare WEDGED: {consec_fail} consecutive EXCEPTIONS; withholding watchdog pet "
+                f"so PID1 can restart (box safe on PID1 baseline)")
+
+        end = time.monotonic() + a.interval
+        while not stopping["v"] and time.monotonic() < end:
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+
+    server.stop()
+
+    try:
+        fair.restore_baseline()
+    except Exception as e:
+        log(f"shutdown: baseline restore skipped ({type(e).__name__}: {e})")
+    log("stopped")
+    return 0
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

@@ -1,0 +1,12 @@
+[Unit]
+Description=phantom — always-on kernel inject actuator (uinput, below the compositor)
+Documentation=https://github.com/schlein-lab/phantom
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/phantom-inject
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

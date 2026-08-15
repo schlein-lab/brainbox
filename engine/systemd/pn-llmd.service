@@ -1,0 +1,18 @@
+[Unit]
+Description=portioneer LLM core (pn-llmd)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/portioneer/tools/pn-llmd
+Slice=pn-interactive.slice
+OOMScoreAdjust=-700
+Restart=always
+RestartSec=3
+MemoryAccounting=yes
+Environment=PN_LLM_POOL=2
+Environment=PN_LLM_MODEL=sonnet
+Environment=PN_LLM_CMD=claude -p --model {model}
+
+[Install]
+WantedBy=default.target

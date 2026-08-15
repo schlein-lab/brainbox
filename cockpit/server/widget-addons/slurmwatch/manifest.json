@@ -1,0 +1,15 @@
+{
+  "id": "slurmwatch",
+  "title": "🧮 SlurmWatch",
+  "version": "1.0.0",
+  "description": "Laufende Jobs und andere Aktivitäten auf einem Slurm-HPC-Cluster: squeue-Jobs und Login-Knoten-Prozesse mit Filter (Alle | Slurm | Andere) und Klick-Detail je Job (scontrol/sacct). Verbindung über die Account-VPN-HPC-Lane der Box oder plain SSH — pro Box konfigurierbar, kein Cluster fest verdrahtet.",
+  "widget": "widget.js",
+  "backend": "backend.py",
+  "config_hint": {
+    "lane": "hpc (Account-VPN-Lane der Box) oder ssh (direkt)",
+    "principal": "Portal-Principal für die HPC-Lane (leer = Aufrufer)",
+    "ssh_host": "nur bei lane:ssh",
+    "ssh_user": "nur bei lane:ssh",
+    "cluster_label": "Anzeigename, z.B. Uni-HPC"
+  }
+}

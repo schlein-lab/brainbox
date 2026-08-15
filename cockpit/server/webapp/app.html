@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>brainarbeit</title>
+<meta name="description" content="Brainarbeit — jede Computer-Aufgabe. Eine Box.">
+<meta name="theme-color" id="themeColor" content="#f8fafc">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8fafc">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#020617">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="/favicon-32.png" sizes="32x32">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/favicon-512.png">
+<link rel="manifest" href="/app/manifest.webmanifest">
+<link rel="stylesheet" href="/static/xterm.css">
+<link rel="stylesheet" href="/app/app.css">
+<!-- The server injects window.PP_WSTOKEN + window.PP_USER + window.PP_ROLE just before the closing head tag.
+     This fallback runs AFTER that injection (|| keeps injected values). -->
+<script>
+  window.PP_WSTOKEN = window.PP_WSTOKEN || "";
+  window.PP_USER    = window.PP_USER    || "";
+  window.PP_ROLE    = window.PP_ROLE    || "";
+  window.PP_VOICE   = (typeof window.PP_VOICE === "boolean") ? window.PP_VOICE : true;
+</script>
+<!-- xterm loaded the SAME way the current UI does (from /static/). defer preserves order. -->
+<script defer src="/static/xterm.js"></script>
+<script defer src="/static/addon-fit.js"></script>
+<!-- zero-knowledge vault crypto — MUST load before app.js (defer preserves order) so `VaultCrypto` is defined. -->
+<script defer src="/app/vaultcrypto.js"></script>
+<!-- app.js ist in Module geteilt (app-01-kern.js … app-11-messenger-notify-boot.js). Der Lader
+     holt die Teile in fester Reihenfolge und führt sie als EIN Skript aus — die Konkatenation
+     ist byte-gleich zur alten app.js (ganze Datei = EINE IIFE, darum keine einzelnen Tags).
+     Die alte /app/app.js bleibt als Fallback liegen (und für noch offene alte SPA-Instanzen). -->
+<script defer src="/app/app-lader.js"></script>
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="topbar">
+    <span class="brand"><img class="brand-logo" src="/brand/lockup.png" alt="brainarbeit" width="81" height="20"></span>
+    <span class="lens-title" id="lensTitle">Start</span>
+    <span class="spacer"></span>
+    <span class="voicebar" id="voiceBar" title="Spracheingabe · Ziel wählen, halten zum Sprechen (Strg+Leertaste), 🎧 für ein Live-Gespräch">
+      <select class="voice-target" id="voiceTarget" aria-label="Ziel für die Spracheingabe"></select>
+      <button class="icon-btn voice-ptt" id="navPtt" title="Halten und sprechen — Text geht an das gewählte Ziel. Tastenkürzel: Strg+Leertaste halten." aria-label="Sprechen (halten)">🎙</button>
+      <button class="icon-btn voice-live" id="navLive" title="Live-Gespräch: freihändig sprechen, Antworten werden vorgelesen. Erneut klicken oder Esc beendet." aria-label="Live-Gespräch">🎧</button>
+    </span>
+    <span class="userchip" id="userChip" role="button" tabindex="0" title="Angemeldet — klicken für Konto &amp; Abmelden"></span>
+    <div class="usermenu" id="userMenu" hidden role="menu" aria-label="Konto"></div>
+    <button class="icon-btn" id="paletteBtn" title="Befehle (Strg/Cmd-K)" aria-label="Befehlspalette">⌘K</button>
+    <button class="icon-btn" id="themeBtn" title="Thema wechseln" aria-label="Hell/Dunkel">◐</button>
+    <span class="lan" id="lanStamp"></span>
+  </header>
+
+  <nav class="nav" aria-label="Hauptnavigation">
+    <a class="nav-item active" data-lens="start"   href="#start">
+      <span class="ico">🏠</span><span class="nav-label">Start</span></a>
+    <a class="nav-item" data-lens="sessions" href="#sessions">
+      <span class="ico">🗂</span><span class="nav-label">Sessions</span><span class="nav-badge" id="sessBadge">0</span></a>
+    <!-- Messenger als EIGENER Reiter — nur auf dem Handy (<=640px), Owner 2026-08-01.
+         Vorher hing er als dritte Spalte (#startSide) unter dem Start-Reiter: dort scrollte er
+         mit dem Cockpit mit, und eintreffende Nachrichten poppten quer ueber die anderen Reiter.
+         Ab 641px bleibt alles wie gehabt (App-Rail ab 1101px, sonst Start-Spalte) — das
+         nav-item ist dort per CSS ausgeblendet und die Lens per Router unerreichbar. -->
+    <a class="nav-item nav-mobile" data-lens="msgr" href="#msgr">
+      <span class="ico">💬</span><span class="nav-label">Messenger</span><span class="nav-badge" id="msgrNavBadge">0</span></a>
+    <!-- Screen-Reiter stillgelegt (Owner-Entscheidung 2026-07-21): geht in "Sessions" auf — jede
+         Session bekommt bei Bedarf ihre eigene on-demand-GUI. Inhalte auf den Fernseher laufen über
+         den Medienserver (DLNA/SMB, Pull-Modell). Das nav-item ist entfernt; Router.go fängt
+         "screen" ab und landet ehrlich in "Sessions". Der Lens-Code bleibt vorerst als Fundament
+         für die Office-microVM liegen (Link-Chips/Cast referenzieren ihn noch). -->
+
+    <a class="nav-item" data-lens="work" href="#work">
+      <span class="ico">📋</span><span class="nav-label">Work</span><span class="nav-badge" id="workBadge">0</span></a>
+    <a class="nav-item" data-lens="software" href="#software">
+      <span class="ico">📦</span><span class="nav-label">Software</span></a>
+    <!-- Postfach (Owner 2026-07-22): NICHT in der Nav (schlank halten!) — erreichbar über
+         den eigenen Namen oben rechts (User-Menü → Nachrichten, mit Zahl-Badge am Namen).
+         Deep-Link #mail funktioniert weiter. -->
+    <span id="mailBadge" hidden></span>
+    <!-- Geräte-Reiter aufgelöst 2026-07-21 (Owner: Nav = Start·Sessions·Work·Einstellungen).
+         Die Geräte-Übersicht lebt als Karte im ⚙️-Reiter (Box-Bereich). -->
+    <a class="nav-item" data-lens="settings" href="#settings">
+      <span class="ico">⚙️</span><span class="nav-label">Einstellungen</span></a>
+    <a class="nav-item" data-lens="admin" id="navAdmin" href="#admin" hidden>
+      <span class="ico">🛡</span><span class="nav-label">Admin</span><span class="nav-badge" id="admBadge" title="Konten warten auf Freischaltung">0</span></a>
+    <a class="nav-item" data-lens="stats" id="navStats" href="#stats" hidden>
+      <span class="ico">📊</span><span class="nav-label">Statistik</span></a>
+    <!-- Console + VPN sind jetzt SESSION-zentrisch: der Chat/Terminal lebt pro Session in „Sessions",
+         VPN wird pro Session dort vergeben. Beide Lenses bleiben im DOM (Start-Buttons/Deep-Link),
+         nur aus der Hauptnavigation entfernt (2026-07-12 Redesign). -->
+  </nav>
+
+  <main class="main" id="main">
+
+    <!-- ============================ START ============================ -->
+    <section class="lens active" id="lens-start">
+      <div class="lens-pad">
+       <div class="start-cols">
+        <div class="start-main">
+          <div class="card" id="biGreeting" hidden></div>
+
+          <!-- Cockpit (Vision 3, 2026-07-24): der Startreiter IST die uebergeordnete
+               Bedieneinheit. Panels ziehbar/skalierbar/ausblendbar (Cockpit-Modul in app.js). -->
+          <div id="cockpitHost" class="cockpit"></div>
+
+          <!-- Alt-Karten bleiben (versteckt) im DOM, damit loadOverview-Referenzen
+               (#ovStats/#continueList) nie ins Leere greifen. Der Cockpit-Fleet/Queue-
+               Panel loesen ihren Inhalt ab. -->
+          <div class="grid-cards" id="startLegacyCards" hidden>
+          <div class="card">
+            <h3>Weitermachen</h3>
+            <div class="row">
+              <button class="btn sm" data-go="work">📋 Work</button>
+            </div>
+            <div class="ov-stats" id="ovStats"><div class="empty">…</div></div>
+            <div class="subhead">Letzte Arbeit</div>
+            <div class="list" id="continueList"><div class="empty">…</div></div>
+          </div>
+          </div>
+        </div><!-- /start-main -->
+        <aside class="start-side" id="startSide">
+          <div class="msgr" id="msgrHost"></div>
+        </aside>
+       </div><!-- /start-cols -->
+      </div>
+    </section>
+
+    <!-- ========================= MESSENGER (Handy) ========================= -->
+    <!-- Eigener Reiter fuer den Quick-Reply-Messenger. Fuellt die ganze Lens (Liste ODER
+         Thread, wie im Start-Fallback) — LENSES.msgr in app.js montiert hier hinein. -->
+    <section class="lens msgr-lens" id="lens-msgr">
+      <div class="msgr" id="msgrTabHost"></div>
+    </section>
+
+    <!-- ============================ SCREEN ============================ -->
+    <section class="lens screen-lens" id="lens-screen">
+      <div class="scbar">
+        <select class="btn sm" id="scTarget" title="Welchen Bildschirm dieser Reiter zeigt"><option value="">🖥 Box-Browser (geteilt)</option></select>
+        <button class="btn sm" id="scApps">⊞ Apps</button>
+        <button class="btn sm" data-app="BROWSER">🦊 Browser</button>
+        <button class="btn sm" data-app="TERMINAL">▟ Terminal</button>
+        <button class="btn sm" data-app="FILES">🗂 Files</button>
+        <span class="spacer"></span>
+        <div class="segmented" id="laneSeg" role="tablist" aria-label="Ansicht">
+          <button data-lane="vnc" class="on">VNC</button>
+          <button data-lane="mjpeg">MJPEG</button>
+        </div>
+        <button class="btn sm" id="scTrackpad" title="Trackpad-Modus (mobil)">✥ Trackpad</button>
+        <a class="btn sm" id="scVnc" href="/vnc3" target="_blank" rel="noopener">↗ Vollbild</a>
+        <select class="btn sm" id="scCastTarget" title="Diesen Bildschirm auf ein Gerät (TV/Nest) spiegeln"><option value="">📺 Auf Gerät spiegeln…</option></select>
+        <button class="btn sm danger" id="scCastStop" hidden title="Spiegeln beenden">⏹ Cast</button>
+        <button class="btn sm" id="scRemote" title="Fremdgerät (Laptop) auf TV spiegeln + per Agent steuern">💻 Fremdgerät</button>
+        <button class="btn sm" id="scFfx" title="Firefox neu starten">⟳ Firefox</button>
+        <button class="btn sm danger" id="scStop">⏻ Bildschirm beenden</button>
+      </div>
+      <div id="remoteDlg" class="remote-dlg" hidden>
+        <div class="remote-card">
+          <div class="remote-head"><b>💻 Fremdgerät → TV &amp; Steuerung</b><button class="btn sm" id="remoteClose">✕</button></div>
+          <p class="remote-sub">Den Bildschirm eines anderen Geräts (z. B. Windows-Laptop) auf einen Fernseher spiegeln — und es per Eingabe-Agent fernsteuern. Der Agent &amp; der Push laufen auf dem Gerät (siehe <code>clients/win-agent/README</code>).</p>
+          <div class="remote-sec"><label>Laptop-Bildschirm auf TV spiegeln</label>
+            <div class="remote-row"><select id="riDevice"><option value="">Ziel-Fernseher…</option></select><input id="riName" placeholder="Name des Geräts" value="Laptop"><button class="btn sm primary" id="riStart">▶ Ingest starten</button></div>
+            <div id="riOut" class="remote-out" hidden><div class="remote-hint">Diesen Befehl auf dem Laptop ausführen (ffmpeg nötig):</div><textarea id="riCmd" readonly rows="3"></textarea><button class="btn sm" id="riCopy">⧉ Kopieren</button><button class="btn sm danger" id="riStop">⏹ Ingest stoppen</button></div>
+          </div>
+          <div class="remote-sec"><label>Verbundene Eingabe-Agenten <button class="btn sm" id="raRefresh" title="Aktualisieren">⟳</button></label>
+            <div id="raList" class="remote-agents"><span class="remote-hint">—</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="sctype">
+        <input id="scLocal" placeholder="Adresse oder Suche — Enter öffnet im Screen" autocomplete="off" autocapitalize="none" autocorrect="off">
+        <button class="btn sm" id="scAddr" title="Adressleiste fokussieren">⌘L</button>
+        <button class="btn sm" id="scType" title="In fokussiertes Feld tippen">↳ Feld</button>
+        <button class="btn sm primary" id="scGo">→ Öffnen</button>
+      </div>
+      <div class="sc-status" id="scStatus"></div>
+      <div class="stage" id="scStage">
+        <img id="scImg" alt="Bildschirm" tabindex="0" hidden>
+        <canvas id="scCanvas" tabindex="0" hidden></canvas>
+        <iframe id="scFrame" title="Bildschirm — direkt steuern (VNC)" allow="fullscreen" hidden></iframe>
+        <div class="stage-hint" id="scHint">Screen öffnen: die Arbeitsfläche startet, dann eine App über die Leiste starten. Klicken + tippen steuert sie.</div>
+        <div class="tp-overlay" id="tpOverlay"><div class="tp-cursor" id="tpCursor"></div><div class="tp-help">Ziehen = Cursor · Tippen = Klick · 2 Finger tippen = Rechtsklick · 2 Finger ziehen = Scroll</div></div>
+        <div class="apps-drawer" id="appsDrawer" hidden>
+          <div class="apps-head">
+            <input id="appsQ" type="search" placeholder="App suchen … (alles Installierte)" autocomplete="off">
+            <button class="icon-btn" id="appsClose">✕</button>
+          </div>
+          <div class="apps-grid" id="appsGrid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ CONSOLE ============================ -->
+    <section class="lens console-lens" id="lens-console">
+      <div class="console-bar">
+        <div class="segmented" id="consoleSeg" role="tablist" aria-label="Sitzung">
+          <!-- Host-Shell RETIRED: the ▟ Shell segment opened /ws/term?target=shell = a login shell
+               on the HOST. Removed with the lane; the Console is the session cell only. -->
+          <button data-target="cockpit" class="on">💬 Chat</button>
+        </div>
+        <div class="sess-ctrl" id="sessCtrl">
+          <button class="btn sm" id="sessNew" title="Neue Session">＋ Neu</button>
+          <div class="sess-hist-wrap">
+            <button class="btn sm" id="sessHist" title="Verlauf">🕐 Verlauf</button>
+            <div class="sess-menu" id="sessMenu" hidden></div>
+          </div>
+          <span class="pill" id="sessName"></span>
+        </div>
+        <span class="spacer"></span>
+        <span class="pill" id="consoleState">verbinde…</span>
+      </div>
+      <div class="term-wrap" id="termWrap"><div id="term"></div></div>
+      <!-- sendline row removed 2026-07-21: it POSTed to the RETIRED /api/term/send (410) and silently
+           did nothing — the xterm itself is the input (types directly over /ws/term). -->
+    </section>
+
+    <!-- ============================ WORK ============================ -->
+    <section class="lens" id="lens-software">
+      <style>
+        .sw-wrap{max-width:1100px;margin:0 auto;padding:6px 4px 40px}
+        .sw-head{margin:2px 0 10px}
+        .sw-head h2{margin:0 0 2px;font-size:19px}
+        .sw-sub{opacity:.62;font-size:13px}
+        .sw-warden{margin:8px 0 2px;font-size:12.5px;border:1px solid rgba(140,150,170,.25);border-radius:8px;padding:6px 10px;opacity:.9}
+        .sw-search{width:100%;box-sizing:border-box;margin:10px 0 2px;padding:8px 12px;border-radius:10px;border:1px solid rgba(140,150,170,.3);background:rgba(140,150,170,.05);color:inherit;font:inherit;font-size:14px}
+        .sw-search:focus{outline:none;border-color:rgba(120,150,220,.6)}
+        .sw-sec{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600;margin:20px 0 2px}
+        .sw-count{font-size:11px;font-weight:400;border:1px solid rgba(140,150,170,.35);border-radius:999px;padding:0 7px;opacity:.7}
+        .sw-secsub{font-size:12px;opacity:.62;margin:2px 0 4px}
+        .sw-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:12px}
+        .sw-card{border:1px solid rgba(140,150,170,.25);border-radius:12px;padding:12px 14px;background:rgba(140,150,170,.04);cursor:pointer;transition:border-color .15s}
+        .sw-card:hover{border-color:rgba(120,150,220,.55)}
+        .sw-card h3{margin:0 0 3px;font-size:15px;display:flex;align-items:center;gap:7px}
+        .sw-kind{font-size:10.5px;border:1px solid rgba(140,150,170,.35);border-radius:999px;padding:0 6px;opacity:.7;font-weight:400}
+        .sw-purpose{font-size:12.5px;opacity:.72;margin:2px 0 8px;min-height:32px}
+        .sw-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11.5px;opacity:.65}
+        .sw-chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid rgba(140,150,170,.35)}
+        .sw-chip.ok{color:#22c55e;border-color:rgba(34,197,94,.4)}
+        .sw-chip.run{color:#eab308;border-color:rgba(234,179,8,.4)}
+        .sw-chip.inst{color:#60a5fa;border-color:rgba(96,165,250,.4)}
+        .sw-detail{margin-top:12px;border-top:1px solid rgba(140,150,170,.2);padding-top:10px}
+        .sw-prog{margin:8px 0;padding:7px 10px;border-radius:8px;background:rgba(140,150,170,.06)}
+        .sw-prog h4{margin:0 0 2px;font-size:13.5px}
+        .sw-prog .pm{font-size:10px;opacity:.6;border:1px solid rgba(140,150,170,.3);border-radius:4px;padding:0 4px;margin-left:6px}
+        .sw-prog p{margin:2px 0;font-size:12px;opacity:.78}
+        .sw-recipe{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:rgba(0,0,0,.22);border-radius:6px;padding:4px 7px;margin:3px 0;overflow-x:auto;white-space:pre}
+        .sw-prov{font-size:11.5px;opacity:.6;margin-top:8px}
+        .sw-btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+        .sw-empty{opacity:.6;padding:20px 4px}
+      </style>
+      <div class="sw-wrap" id="swMount"><div class="sw-empty">lädt…</div></div>
+    </section>
+    <section class="lens" id="lens-work">
+      <div class="work-pad">
+        <div class="work-main">
+          <div class="needs-you" id="needsYou" hidden>
+            <h3>⚠ Braucht dich</h3>
+            <div id="needsYouBody"></div>
+          </div>
+          <div class="headroom" id="headroom">…</div>
+          <!-- Owner 2026-07-22: Sicht-Filter — Job-Kategorien ausblendbar (z. B. Gerätesuche) -->
+          <div class="wfilter" id="workFilter"></div>
+          <div class="q-note">Aufträge entstehen in den <b>Sessions</b> — dieser Reiter dient nur der Verwaltung der Warteschlange (Prioritäten, Eingriff, Status).</div>
+          <style>
+          .dj-section{margin:8px 0 14px;padding:10px 12px;border:1px solid rgba(140,150,170,.25);border-radius:12px}
+          .dj-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+          .dj-bar h4{margin:0;font-size:14px}
+          .dj-list{display:flex;flex-direction:column;gap:8px}
+          .dj-card{border:1px solid rgba(140,150,170,.25);border-radius:10px;padding:8px 10px}
+          .dj-head{display:flex;align-items:center;gap:8px;justify-content:space-between}
+          .dj-name{font-weight:600}
+          .dj-state{font-size:12px;opacity:.65}
+          .dj-state.on{color:#22c55e;opacity:1}
+          .dj-meta{font-size:12px;opacity:.8;display:flex;flex-wrap:wrap;gap:8px;margin:4px 0}
+          .dj-vpn{color:#60a5fa}
+          .dj-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+          .dj-form.stack,.dj-detail.stack{display:flex;flex-direction:column;gap:6px}
+          .dj-lab{font-size:12px;font-weight:600;opacity:.8;margin-top:4px}
+          .dj-in,.dj-ta{width:100%;padding:6px 8px;border-radius:8px;border:1px solid rgba(140,150,170,.3);background:transparent;color:inherit;font:inherit;box-sizing:border-box}
+          .dj-hint{font-size:11.5px}
+          .dj-row{display:flex;align-items:center;gap:8px}
+          .dj-warn{font-size:12px;color:#eab308;margin-top:4px}
+          .dj-bind{margin-top:6px}
+          .dj-del{color:#f87171}
+          .dj-task{display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0;border-top:1px solid rgba(140,150,170,.12)}
+          .dj-task-state{min-width:64px;opacity:.7}
+          .dj-task.error .dj-task-state{color:#f87171}
+          .dj-task.done .dj-task-state{color:#22c55e}
+          .dj-task.run .dj-task-state{color:#60a5fa}
+          </style>
+          <div class="dj-section" id="fleetPanel" hidden></div>
+          <!-- Handy (Owner 2026-08-02): drei Spuren nebeneinander sind auf 390px unlesbar, und
+               untereinander werden sie ein endloser Scroll. Deshalb ein Umschalter — er zeigt ALLE
+               drei Zahlen und blendet genau EINE Spur ein. Ab 641px ist er per CSS weg und die
+               Spuren stehen wie gehabt nebeneinander (data-lane wird dort ignoriert). -->
+          <div class="q-switch" id="qSwitch" role="tablist" aria-label="Spur der Warteschlange">
+            <button type="button" class="q-sw on" data-lane="wait" role="tab" aria-selected="true">Wartet <span class="n" id="qswqn">0</span></button>
+            <button type="button" class="q-sw" data-lane="run" role="tab" aria-selected="false">Läuft <span class="n" id="qswrn">0</span></button>
+            <button type="button" class="q-sw" data-lane="done" role="tab" aria-selected="false">Fertig <span class="n" id="qswdn">0</span></button>
+          </div>
+          <div class="q-lanes" id="qLanes" data-lane="wait">
+            <div class="q-lane"><h4>Wartet <span class="n" id="qqn">0</span></h4><div class="q-col" id="qq"></div></div>
+            <div class="q-lane"><h4>Läuft <span class="n" id="qrn">0</span></h4><div class="q-col" id="qr"></div></div>
+            <div class="q-lane"><h4>Fertig <span class="n" id="qdn">0</span></h4><div class="q-col" id="qd"></div></div>
+          </div>
+        </div>
+        <aside class="work-side">
+          <div class="work-comment" id="workComment" hidden></div>
+          <div class="active-sessions" id="activeSessions" hidden></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============================ ADMIN ============================ -->
+    <section class="lens" id="lens-sessions">
+      <iframe id="sessFrame" title="Laufende Sessions" loading="lazy"
+              style="width:100%;height:82vh;border:0;display:block"></iframe>
+    </section>
+    <section class="lens" id="lens-vpn">
+      <iframe id="vpnFrame" title="VPN" loading="lazy"
+              style="width:100%;height:82vh;border:0;display:block"></iframe>
+    </section>
+    <section class="lens" id="lens-admin">
+      <div class="lens-pad">
+        <div class="admin-wrap">
+
+          <div class="adm-tabs" role="tablist" aria-label="Admin-Bereiche">
+            <button class="adm-tab on" data-atab="overview">Überblick</button>
+            <button class="adm-tab" data-atab="users">Nutzer &amp; Fairshare</button>
+            <button class="adm-tab" data-atab="llm">LLM &amp; E-Mail</button>
+            <button class="adm-tab" data-atab="access">Zugänge &amp; System</button>
+          </div>
+
+          <div class="adm-panel" data-apanel="overview">
+
+          <div class="card admin-overview">
+            <h3>Kontroll-Ebene <span class="card-hint">globale Governance · Nutzer-Kapazität</span></h3>
+            <div class="adm-stats" id="admStats"><div class="empty">…</div></div>
+            <div class="adm-psi" id="admPsi"></div>
+            <div class="adm-stepper">
+              <span class="adm-step-label">Reservierte Kerne <span class="card-hint">für die Kontroll-Ebene</span></span>
+              <div class="stepper" role="group" aria-label="Reservierte Kerne">
+                <button class="btn sm" id="admResMinus" aria-label="weniger">−</button>
+                <span class="stepper-n tnum" id="admResN">–</span>
+                <button class="btn sm" id="admResPlus" aria-label="mehr">+</button>
+              </div>
+              <span class="adm-step-cap muted tnum" id="admResCap"></span>
+            </div>
+          </div>
+
+          <div class="card admin-vms">
+            <h3>Nested VMs · RAM-Budget <span class="card-hint">laufende Sitzungs-/GUI-VMs · bei vollem Budget hier eine stoppen, um Platz zu schaffen</span>
+              <button class="btn sm ghost" id="admVmsReload">Neu laden</button></h3>
+            <div class="adm-vms" id="admVms"><div class="empty">…</div></div>
+          </div>
+
+          </div><!-- /overview panel -->
+
+          <div class="adm-panel" data-apanel="llm" hidden>
+
+          <div class="card admin-mail">
+            <h3>E-Mail-Versand <span class="card-hint">zentrales Mailjet-Konto · System-Mails an Nutzer</span></h3>
+            <div class="adm-mail-status" id="admMailStatus"><div class="empty">…</div></div>
+            <div class="adm-mail-test">
+              <input type="email" id="admMailTo" placeholder="Test-E-Mail an…" autocomplete="off">
+              <button class="btn sm" id="admMailSend">Test senden</button>
+            </div>
+          </div>
+
+          <div class="card admin-llm">
+            <h3>LLM-Pool <span class="card-hint">Claude-Max-Konten · Usage · Erneuerung · OAuth</span>
+              <button class="btn sm ghost adm-pool-add" id="admPoolAdd">+ Konto</button>
+              <button class="btn sm ghost" id="admCodexConnect" title="OpenAI-Codex-Konto der Box verbinden (Device-Code, Terminal-Anzeige) — Schritt 1 der LLM-Agnostik">🧩 Codex verbinden</button>
+              <button class="btn sm ghost adm-pool-reload" id="admPoolReload">Neu laden</button></h3>
+            <div class="adm-pool-body" id="admPoolBody"><div class="empty">…</div></div>
+            <div class="adm-oauth" id="admOauthPanel" hidden></div>
+          </div>
+
+          <div class="card admin-advisor">
+            <h3>Prio-Advisor <span class="card-hint">autonome, geführte Warteschlangen-Priorisierung (LLM berät, blockiert nie)</span></h3>
+            <div class="adm-advisor" id="admAdvisor"><div class="empty">…</div></div>
+          </div>
+
+          </div><!-- /llm panel -->
+
+          <div class="adm-panel" data-apanel="access" hidden>
+
+          <div class="card admin-vpn">
+            <h3>VPN-Zugänge <span class="card-hint">welche eingerichtet · welche aktiv — Verbinden ist Operator-only (2FA am Handy)</span>
+              <button class="btn sm ghost" id="admVpnReload">Neu laden</button></h3>
+            <div class="adm-vpn" id="admVpn"><div class="empty">…</div></div>
+          </div>
+
+          <div class="card admin-power">
+            <h3>Ein/Aus <span class="card-hint">geordnetes Herunterfahren — Dienste rückwärts stoppen, Daten sichern, dann aus</span></h3>
+            <div class="adm-power-btns">
+              <button class="btn sm danger" id="admShutdown">⏻ Herunterfahren</button>
+              <button class="btn sm" id="admReboot">⟳ Neu starten</button>
+            </div>
+            <div class="adm-power-status muted" id="admPowerStatus"></div>
+          </div>
+
+          <div class="card admin-idkeys">
+            <h3>Geräteschlüssel <span class="card-hint">wer darf herein — wartende Geräte freigeben, widerrufen; und wer nur gekoppelt ist, ohne Schlüssel</span>
+              <button class="btn sm" id="admIdPair">➕ Neues Gerät koppeln</button>
+              <button class="btn sm ghost" id="admIdReload">Neu laden</button></h3>
+            <div class="adm-id-state" id="admIdState"></div>
+            <div class="adm-id-pair" id="admIdPairBox" hidden></div>
+            <div class="adm-id-cer" id="admIdCer" hidden></div>
+            <label class="adm-keys-showrev"><input type="checkbox" id="admIdShowRev"> widerrufene anzeigen</label>
+            <div class="adm-id" id="admId"><div class="empty">…</div></div>
+          </div>
+
+          <div class="card admin-keys">
+            <h3>Schlüssel-Manager <span class="card-hint">Maschinen-API-Keys · scopen · widerrufen · rotieren — live, ohne Neustart</span>
+              <button class="btn sm ghost" id="admKeyNew">+ Neuer Schlüssel</button>
+              <button class="btn sm ghost" id="admKeysReload">Neu laden</button></h3>
+            <label class="adm-keys-showrev"><input type="checkbox" id="admKeysShowRev"> widerrufene anzeigen</label>
+            <div class="adm-key-editor" id="admKeyEditor" hidden></div>
+            <div class="adm-keys" id="admKeys"><div class="empty">…</div></div>
+          </div>
+
+          </div><!-- /access panel -->
+
+          <div class="adm-panel" data-apanel="users" hidden>
+
+          <div class="card admin-fairshare">
+            <h3>Fairshare &amp; Nutzer <span class="card-hint">Rechen-Anteil pro Konto · Gewicht/Profil/Sessions/Sperre per Dropdown — wie ein HPC-Scheduler</span>
+              <button class="btn sm ghost" id="admFsReload">Neu laden</button></h3>
+            <div class="adm-fs-kpi" id="admFsKpi"></div>
+            <div class="adm-fs-table" id="admFsTable"><div class="empty">…</div></div>
+          </div>
+
+          <!-- echte Nutzerverwaltung (Owner 2026-07-22): Konten anlegen/sperren/Rolle/PW/löschen +
+               Nachricht an einen oder alle (optional als E-Mail, Opt-out-fähig). JS: Admin.renderAccounts -->
+          <div class="card admin-accounts" id="admAccounts">
+            <h3>👥 Konten <span class="card-hint">anlegen · Rolle · sperren · Passwort · Nachricht</span>
+              <span style="margin-left:auto;display:inline-flex;gap:6px">
+                <button class="btn sm" id="acctNewBtn">➕ Konto anlegen</button>
+                <button class="btn sm" id="acctInviteBtn">✉️ Per E-Mail einladen</button>
+                <button class="btn sm ghost" id="acctMsgAllBtn">📢 Nachricht an alle</button>
+              </span></h3>
+            <form class="acct-new" id="acctNewForm" hidden>
+              <input id="acctNuid" placeholder="kontoname (a-z, 0-9)" autocomplete="off" spellcheck="false">
+              <input id="acctNname" placeholder="Anzeigename" autocomplete="off">
+              <input id="acctNemail" type="email" placeholder="E-Mail (optional)" autocomplete="off">
+              <select id="acctNrole"><option value="user">Nutzer</option><option value="guest">Gast</option><option value="admin">Admin</option></select>
+              <input id="acctNpw" type="password" placeholder="Start-Passwort (min. 8)" autocomplete="new-password">
+              <button class="btn sm" type="submit">Anlegen</button>
+            </form>
+            <div class="acct-table" id="acctTable"><div class="empty">…</div></div>
+          </div>
+          <div class="admin-users" id="admUsers"><div class="empty">…</div></div>
+
+          </div><!-- /users panel -->
+
+        </div>
+      </div>
+    </section>
+
+    <section class="lens" id="lens-stats">
+      <div class="lens-pad">
+        <div class="stats-wrap">
+          <div class="stats-summary" id="statSummary"><div class="empty">…</div></div>
+          <div class="card stats-chart">
+            <h3>Aktivität <span class="card-hint">letzte 14 Tage · LLM-Aufrufe pro Tag</span></h3>
+            <div class="stat-chart" id="statChart"></div>
+          </div>
+          <div class="card stats-users">
+            <h3>Pro Nutzer <span class="card-hint">letzte 7 Tage · LLM-Aufrufe &amp; Token-Schätzung</span></h3>
+            <div class="stat-users" id="statUsers"><div class="empty">…</div></div>
+          </div>
+          <div class="card stats-usage">
+            <h3>Rechenzeit pro Nutzer <span class="card-hint">letzte 7 Tage · Wall-Zeit · Jobs · LLM · CPU/RAM (best-effort)</span></h3>
+            <div class="stat-users" id="statUsage"><div class="empty">…</div></div>
+          </div>
+          <div class="card stats-reschart">
+            <h3>Ressourcen-Verbrauch <span class="card-hint" id="statResNote">letzte 14 Tage</span></h3>
+            <div class="stat-chart" id="statResChart"></div>
+          </div>
+          <div class="card stats-res">
+            <h3>Ressourcen &amp; Aktivität <span class="card-hint">aktuell · Box</span></h3>
+            <div class="stat-res" id="statRes"></div>
+            <div class="stat-verbs" id="statVerbs"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= EINSTELLUNGEN ======================= -->
+    <!-- ==================== 📨 NACHRICHTEN (3-Pane-Postfach) ====================
+         Roundcube-Elastic-Geometrie (Research 2026-07-22): Ordner | Liste | Lesebereich.
+         Threads flach (thread_id), Klick = lesen + gelesen-markieren, Markdown-Subset. -->
+    <section class="lens" id="lens-mail">
+      <div class="mail3" id="mail3">
+        <div class="mail-folders">
+          <button class="btn sm mail-compose-btn" id="mailComposeBtn">✏️ Neue Nachricht</button>
+          <button class="mf-item on" data-mf="inbox">📥 Posteingang <span class="mf-n" id="mfInboxN" hidden></span></button>
+          <button class="mf-item" data-mf="sent">📤 Gesendet</button>
+          <div class="mf-hint card-hint">Nachrichten gehen zusätzlich per E-Mail an die Empfänger —
+            abstellbar pro Konto unter Einstellungen → Konto.</div>
+        </div>
+        <div class="mail-list" id="mailList"><div class="empty">…</div></div>
+        <div class="mail-read" id="mailRead"><div class="empty">Nachricht auswählen</div></div>
+      </div>
+    </section>
+
+    <section class="lens" id="lens-settings">
+      <div class="lens-pad">
+        <div class="stg-wrap">
+
+          <!-- Owner 2026-07-22: kein Endlos-Scroll-Spaghetti mehr — die Einstellungen sind in
+               Sub-Reiter aufgeteilt (gleiches Muster wie die Admin-IA). Deep-Link: #settings:ki -->
+          <div class="stg-tabs" role="tablist" aria-label="Einstellungs-Bereiche">
+            <button class="stg-tab on" data-stab="konto"    role="tab">👤 Konto</button>
+            <button class="stg-tab" data-stab="ansicht"     role="tab">🎨 Ansicht &amp; Meldungen</button>
+            <button class="stg-tab" data-stab="zugaenge"    role="tab">🔑 Zugänge &amp; Schlüssel</button>
+            <button class="stg-tab" data-stab="ki"          role="tab">🧠 KI &amp; Anbieter</button>
+            <button class="stg-tab" data-stab="box" id="stgTabBox" role="tab" hidden>🖧 Box <span class="card-hint">Admin</span></button>
+          </div>
+
+          <!-- ============ 👤 Konto ============ -->
+          <div class="stg-panel" data-spanel="konto">
+          <div class="card">
+            <h3>Konto &amp; Tresor <span class="card-hint">Zugangsdaten · Abmelden</span></h3>
+            <div class="row">
+              <button class="btn sm" id="stVault" title="Optional: Zugangsdaten verschlüsselt hinterlegen, damit die Box sie für Aufträge nutzen kann">🔐 Tresor <span class="card-hint">optional</span></button>
+              <button class="btn sm ghost" id="stLogout">↪ Abmelden</button>
+            </div>
+            <div class="vault-panel" id="vaultPanel" hidden></div>
+            <div class="set-status" id="stWhoami"></div>
+            <!-- Profil-Selbstverwaltung (Owner 2026-07-22): jeder Nutzer pflegt Name + E-Mail selbst;
+                 die E-Mail ist der Kanal für Box-Nachrichten (Opt-out) und Passwort-Reset. -->
+            <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+              <input id="meName" placeholder="Anzeigename" autocomplete="off" style="min-width:150px">
+              <input id="meEmail" type="email" placeholder="meine@email.de" autocomplete="off" style="flex:1;min-width:200px">
+              <button class="btn sm" id="meSave">Speichern</button>
+            </div>
+            <label style="display:block;margin-top:8px"><input type="checkbox" id="meMailCopy"> 📨 Box-Nachrichten zusätzlich per E-Mail erhalten</label>
+            <div class="set-status" id="meStatus"></div>
+            <!-- Passwort ändern (Owner 09.08.2026): Selbstbedienung — altes verifizieren, neues gegen
+                 die zentralen Regeln (portal_pwpolicy) über /api/user/password. -->
+            <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+              <div class="card-hint" style="margin-bottom:6px">🔑 Passwort ändern</div>
+              <div class="row" style="flex-wrap:wrap;gap:8px">
+                <input id="pwOld" type="password" placeholder="Aktuelles Passwort" autocomplete="current-password" style="min-width:150px">
+                <input id="pwNew" type="password" placeholder="Neues Passwort" autocomplete="new-password" style="min-width:150px">
+                <input id="pwNew2" type="password" placeholder="Neu wiederholen" autocomplete="new-password" style="min-width:150px">
+                <button class="btn sm" id="pwChange">Ändern</button>
+              </div>
+              <div class="card-hint" style="margin-top:4px">Mind. 8 Zeichen, mind. eine Zahl und ein Sonderzeichen; keine sehr häufigen Passwörter.</div>
+              <div class="set-status" id="pwStatus"></div>
+            </div>
+          </div>
+          <!-- Feine Freigaben je Aktions-Art (Eigner 08.08.2026): Schnellwahl-Preset + je Art eine
+               Stufe (Keine / Bestaetigung / 2FA). Loeschen/aussen bleiben immer >= 2FA. -->
+          <div class="card" id="stApprovalCard">
+            <h3>✅ Freigaben <span class="card-hint">was darf die Box allein — und was fragt vorher nach?</span></h3>
+            <div class="set-status">Schnellwahl setzt den Grundton; darunter stellst du jede Art einzeln feiner. „Löschen" und „nach außen" bleiben immer mindestens 2FA.</div>
+            <div id="stFreigabenPreset" class="row" style="flex-wrap:wrap;gap:8px;margin:10px 0"></div>
+            <div id="stFreigabenMatrix"></div>
+          </div>
+
+          <!-- Passkey / Biometrie (opt-in, additiv — Passwort+TOTP bleiben immer der Rückweg). -->
+          <!-- Gerät koppeln (app.brainarbeit.com) über den Relay — Selbstbedienung per QR (Default), Tippen als Rückfall. -->
+          <div class="card" id="stAppPairCard">
+            <h3>📱 Gerät koppeln <span class="card-hint">Handy mit der App app.brainarbeit.com verbinden — per QR, ohne Tippen</span></h3>
+            <div class="set-status">Scanne diesen QR mit der Handy-Kamera — die App koppelt sich automatisch mit deiner Box. Der Code hält sich selbst aktuell. Keine Kamera? Der Code steht darunter zum Abtippen.</div>
+            <div id="stAppPairHost"></div>
+          </div>
+
+          <div class="card" id="stPasskeyCard" hidden>
+            <h3>🔐 Passkey &amp; Biometrie <span class="card-hint">mit Fingerabdruck anmelden &amp; bestätigen — statt Code tippen</span></h3>
+            <div class="set-status">Optional: hinterlege einen Passkey (Handy-/Laptop-Biometrie). Danach kannst du dich per Fingerabdruck anmelden und — wenn du magst — auch Bestätigungen per Fingerabdruck geben statt einen Handy-Code zu tippen. Passwort und 2FA-Code bleiben immer als Rückweg.</div>
+            <div id="stPasskeyHost"></div>
+          </div>
+          </div>
+
+          <!-- ============ 🎨 Ansicht & Meldungen ============ -->
+          <div class="stg-panel" data-spanel="ansicht" hidden>
+          <div class="card">
+            <h3>🎨 Ansicht <span class="card-hint">wie das Portal für dich aussieht — pro Gerät gespeichert</span></h3>
+            <div class="row" style="flex-wrap:wrap;gap:10px 18px">
+              <label title="Zeigt den Messenger dauerhaft in der rechten Leiste — in allen Reitern (Desktop)."><input type="checkbox" id="uiMsgrStart"> 💬 Messenger-Leiste rechts (alle Reiter)</label>
+              <label title="Engere Abstände und kleinere Karten — mehr Inhalt pro Bildschirm."><input type="checkbox" id="uiCompact"> ▤ kompakte Ansicht</label>
+            </div>
+            <div class="set-status">Hell/Dunkel wechselst du oben rechts mit ◐ · Änderungen wirken sofort.</div>
+          </div>
+          <div class="card">
+            <h3>🔔 Benachrichtigungen <span class="card-hint">Sessions melden neue Nachrichten</span></h3>
+            <div class="row" style="flex-wrap:wrap;gap:10px 18px">
+              <label><input type="checkbox" id="nfOn"> Benachrichtigungen</label>
+              <label><input type="checkbox" id="nfToast"> Vorschau-Popups unten rechts</label>
+              <label title="Standard ist stumm — auch bei hunderten Nachrichten nervt nichts."><input type="checkbox" id="nfSound"> 🔈 sanfter Ton</label>
+              <label title="Zeigt Benachrichtigungen auch, wenn der Browser im Hintergrund ist."><input type="checkbox" id="nfSys"> über anderen Anwendungen</label>
+              <button class="btn sm ghost" id="nfSysPerm" hidden>Berechtigung erteilen</button>
+            </div>
+            <div class="set-status" id="nfStatus"></div>
+            <div class="row" style="flex-wrap:wrap;gap:10px 18px;margin-top:8px;border-top:1px solid var(--line);padding-top:10px">
+              <span class="card-hint" style="width:100%">Assistenz-Panels (kleine KI-Hinweise):</span>
+              <label title="Kurz-Zusammenfassung beim Überfahren einer Session"><input type="checkbox" id="biHover"> Session-Vorschau (Hover)</label>
+              <label title="Begrüßung + „wo waren wir" auf Start"><input type="checkbox" id="biOverview"> Überblick auf Start</label>
+              <label title="Auslastungs-Kommentar im Work-Reiter"><input type="checkbox" id="biWorkload"> Work-Kommentar</label>
+            </div>
+          </div>
+          </div>
+
+          <!-- ============ 🧠 KI & Anbieter ============ -->
+          <div class="stg-panel" data-spanel="ki" hidden>
+          <div class="card">
+            <h3>🤖 Mein LLM-Konto <span class="card-hint">eigenes Claude-Konto verbinden (statt des zentralen)</span></h3>
+            <!-- BYO-LLM: JEDER angemeldete Nutzer darf sein eigenes Claude-Konto verbinden/erneuern —
+                 gleiche Anmelde-Maschinerie wie das zentrale Box-Gehirn und der Einrichtungs-Assistent,
+                 aber strikt auf das EIGENE Konto begrenzt (Server erzwingt das Konto, nie der Client). -->
+            <div id="stMyLlm" class="stbrain">
+              <div class="stbrain-head">
+                <div><div class="stbrain-status" id="myLlmStatus">Status wird geprüft …</div></div>
+                <button class="btn sm" id="myLlmRenew" title="Eigenes Claude-Konto verbinden, erneuern oder wechseln.">🔑 Verbinden / erneuern</button>
+                <button class="btn sm ghost" id="myLlmLogout" title="Das verbundene Claude-Konto von der Box trennen (Credentials werden archiviert)." hidden>🚪 Konto trennen</button>
+              </div>
+              <div id="myLlmFlow" class="stbrain-flow" hidden>
+                <pre id="myLlmTerm" style="max-height:240px;overflow:auto;background:#0b0e12;color:#b7f5c2;padding:10px;border-radius:10px;font:11px/1.4 ui-monospace,monospace;white-space:pre-wrap;word-break:break-all" hidden></pre>
+                <ol class="stbrain-steps">
+                  <li><b>1.</b> Diesen Link im Browser öffnen, wo du in <b>deinem</b> Claude-Konto angemeldet bist (oder privates Fenster):
+                    <div class="stbrain-url">
+                      <span id="myLlmUrlWait">🔄 Anmelde-Link wird abgerufen …</span>
+                      <a id="myLlmUrl" href="#" target="_blank" rel="noopener" hidden>Anmelde-Link öffnen</a>
+                      <button class="btn sm" id="myLlmCopy" type="button" hidden>Link kopieren</button></div>
+                  </li>
+                  <li><b>2.</b> Den angezeigten <b>Code</b> hier einfügen:
+                    <div class="stbrain-code"><input id="myLlmCode" type="text" autocomplete="off" spellcheck="false" placeholder="Code aus dem Anmelde-Fenster">
+                      <button class="btn sm" id="myLlmSubmit" type="button">Bestätigen</button></div>
+                  </li>
+                </ol>
+                <div class="stbrain-msg" id="myLlmMsg"></div>
+                <button class="btn sm ghost" id="myLlmCancel" type="button">Abbrechen</button>
+              </div>
+            </div>
+          </div>
+          <!-- Weitere KI-Anbieter (Codex/Gemini/Ollama) — die Karte füllt Settings.renderProviders,
+               sobald das Backend Provider meldet; bis dahin ehrlich als „in Arbeit" gekennzeichnet. -->
+          <div class="card" id="stProvidersCard" hidden>
+            <h3>🧩 KI-Anbieter <span class="card-hint">welches Gehirn die Box nutzt — pro Nutzer umschaltbar</span></h3>
+            <div id="stProviders"><div class="empty">…</div></div>
+          </div>
+          </div>
+
+          <!-- ============ 🔑 Zugänge & Schlüssel ============ -->
+          <div class="stg-panel" data-spanel="zugaenge" hidden>
+          <div class="card">
+            <h3>🔑 Schlüssel &amp; Geheimnisse <span class="card-hint">für deine Sitzungen · SSH-Keys · Tokens</span></h3>
+            <div class="card-hint">Hier abgelegte Werte kann die Box <b>in deine Sitzungs-microVM einschleusen</b> — als Umgebungsvariable oder als Datei nach <code>/root/.ssh</code> (SSH-Keys). Pro Sitzung wird jeder Name <b>einzeln</b> unter „Berechtigungen" freigegeben (nie der ganze Tresor). Verschlüsselt gespeichert. <b>Anders</b> als der Zero-Knowledge-Tresor oben (den die Box nie lesen kann) — dieser hier ist bewusst box-lesbar, damit Sitzungen die Zugänge nutzen können.</div>
+            <div class="secrets-list" id="secretsList"><div class="empty">…</div></div>
+            <details class="secrets-add">
+              <summary>＋ Geheimnis / Schlüssel hinzufügen</summary>
+              <div class="secrets-form">
+                <label>Name <input id="secName" type="text" autocomplete="off" spellcheck="false" placeholder="z. B. id_rsa oder OPENAI_API_KEY"></label>
+                <label>Art
+                  <select id="secKind">
+                    <option value="env">Text / Token (Umgebungsvariable)</option>
+                    <option value="password">Passwort / Passphrase</option>
+                    <option value="app_password">App-Passwort (E-Mail / Apps)</option>
+                    <option value="api_key">API-Schlüssel</option>
+                    <option value="license">Lizenzschlüssel (Programme)</option>
+                    <option value="bot_token">Bot-Token (Telegram u. a.)</option>
+                    <option value="ssh_key">SSH-Schlüssel (privat) → /root/.ssh/&lt;name&gt;</option>
+                    <option value="ssh_config">SSH-Config → /root/.ssh/config</option>
+                  </select>
+                </label>
+                <label>Wert
+                  <textarea id="secValue" rows="3" spellcheck="false" placeholder="Wert einfügen — oder eine Datei laden"></textarea>
+                </label>
+                <label id="secPubWrap" hidden>Öffentlicher Schlüssel (optional, wird als &lt;name&gt;.pub gespeichert)
+                  <textarea id="secPub" rows="2" spellcheck="false" placeholder="ssh-ed25519 … / ssh-rsa …"></textarea>
+                </label>
+                <div class="row">
+                  <input id="secFile" type="file" hidden>
+                  <button class="btn sm ghost" id="secFileBtn" type="button" title="Eine Schlüssel-/Zugangsdatei laden — der Inhalt landet im Wertfeld, die Art wird erkannt">📎 Aus Datei laden</button>
+                  <button class="btn sm" id="secAdd" type="button">Speichern</button>
+                </div>
+                <div class="set-status" id="secMsg"></div>
+              </div>
+            </details>
+          </div>
+
+          <div class="card">
+            <h3>📨 Telegram-Bot <span class="card-hint">Sessions aufs Handy — dein eigener Bot, Token nur im RAM</span></h3>
+            <div class="set-status" id="tgStatus">…</div>
+            <div class="row" style="flex-wrap:wrap;gap:8px">
+              <input id="tgToken" type="password" placeholder="Bot-Token von @BotFather" autocomplete="off" spellcheck="false" style="flex:1;min-width:220px">
+              <button class="btn sm" id="tgEnroll">Verbinden</button>
+              <button class="btn sm ghost" id="tgDisable" hidden>Trennen</button>
+            </div>
+            <div class="card-hint">So geht's: In Telegram <b>@BotFather</b> öffnen → <code>/newbot</code> → den Token hier einfügen.
+              Danach deinem Bot eine Nachricht schicken — er verbindet deinen Chat und leitet Session-Meldungen weiter;
+              Antworten aus Telegram landen in der Session. Der Token bleibt im Arbeitsspeicher der Box (nie auf Platte)
+              und muss nach einem Box-Neustart neu verbunden werden.</div>
+          </div>
+
+          <div class="card">
+            <h3>VPN-Zugänge <span class="card-hint">welche es gibt · wohin · welcher Login · gespeichert oder 2FA</span>
+              <button class="btn sm ghost" id="stVpnReload">Neu laden</button></h3>
+            <div class="stvpn" id="stVpn"><div class="empty">…</div></div>
+            <div class="stvpn-model">
+              <b>Wie läuft der Login?</b>
+              <ul>
+                <li><b>VPNs mit 2FA/Single-Sign-on</b> (z. B. Cisco AnyConnect): der Login läuft <b>interaktiv über 2FA am Handy</b>. Zugangsdaten werden <b>nicht dauerhaft gespeichert</b> — bei jeder Verbindung neu bestätigen. Verbinden ist <b>Operator/Owner-gesteuert</b>.</li>
+                <li><b>Einfache VPNs</b> (Nutzer/Passwort · Zertifikat): Zugangsdaten liegen im <b>client-seitigen Tresor</b> (Ende-zu-Ende verschlüsselt · WebAuthn) und werden nur <b>zur Laufzeit injiziert</b> — die Box speichert nichts im Klartext.</li>
+                <li>Die Box hält <b>keine Nutzer-Geheimnisse im Ruhezustand</b>. Jeder Tunnel läuft isoliert in einem eigenen, abgeschotteten Netzbereich pro Nutzer/Session; ein VPN wird pro Session unter <b>Sessions → Ausstattung</b> zugewiesen.</li>
+              </ul>
+            </div>
+            <div class="stvpn-mine" id="stVpnMine"></div>
+          </div>
+          </div>
+
+          <!-- ============ 🖧 box-weit (nur Admin/Owner sichtbar) ============ -->
+          <div class="stg-panel" data-spanel="box" hidden>
+          <div class="stg-scope" id="stgBoxHead" hidden><h2>🖧 Diese Brainbox <span class="card-hint">Admin</span></h2>
+            <div class="card-hint">gelten für die ganze Box und alle Nutzer</div></div>
+
+          <div class="card" id="stgBoxCard" hidden>
+            <h3>Box &amp; Nutzer <span class="card-hint">Rechte · Zertifikat · zentrales Gehirn im LLM-Pool</span></h3>
+
+            <div class="row">
+              <button class="btn sm" onclick="location.href='/policy'" title="Was jede Session darf — Freigaben pro Session">🛡 Berechtigungen</button>
+              <button class="btn sm" onclick="location.href='/settings'" title="Sprache mit Session verbinden · Terminals benennen · Nutzerrechte">⚙️ Sprache, Terminals &amp; Rechte</button>
+              <button class="btn sm" onclick="location.href='/trust'" title="Diese Box als vertrauenswürdig einrichten — Zertifikat installieren">🔒 Zertifikat / Box vertrauen</button>
+            </div>
+            <div class="set-status">Zentrales Gehirn &amp; alle KI-Konten: Admin → LLM-Pool. Eigenes Modell mitbringen: Einstellungen → KI &amp; Anbieter. Nutzerverwaltung: Admin.</div>
+          </div>
+
+          <div class="card" id="stShellCard" hidden>
+            <h3>🚪 Shell-Zugang zur Box <span class="card-hint">wer per SSH auf DIESE Maschine darf</span></h3>
+            <div class="card-hint">Ein Schlüssel hier ist eine <b>Kommandozeile als Dienstbenutzer</b> — und der darf <code>sudo</code>.
+              Das ist die ganze Box, dauerhaft. Nicht zu verwechseln mit „Schlüssel &amp; Geheimnisse" unter
+              <b>Zugänge</b>: dort liegen <b>private</b> Schlüssel, mit denen sich <i>Sitzungen bei anderen Rechnern</i>
+              anmelden. Hier geht es um die Gegenrichtung.</div>
+            <div class="set-status" id="shellState">…</div>
+            <div class="shell-keys" id="shellKeys"><div class="empty">…</div></div>
+            <details class="secrets-add">
+              <summary>＋ Öffentlichen Schlüssel hinzufügen</summary>
+              <div class="secrets-form">
+                <label>Öffentlicher Schlüssel — eine Zeile je Schlüssel
+                  <textarea id="shellNew" rows="3" spellcheck="false" autocapitalize="off"
+                            placeholder="ssh-ed25519 AAAAC3Nza… name@laptop"></textarea>
+                </label>
+                <div class="card-hint">Das ist der Inhalt von <code>~/.ssh/id_ed25519.pub</code> — die Datei mit
+                  <b>.pub</b> am Ende. Die andere, <b>ohne</b> .pub, ist der geheime Teil und bleibt bei dir.</div>
+                <div class="card-hint">Ein- und Austragen verlangen eine <b>frische Bestätigung</b> — den 2FA-Code, sobald ein zweiter Faktor scharfgeschaltet ist, sonst das eigene Portal-Passwort. Eine offene Browser-Sitzung allein reicht dafür nicht.</div>
+                <div class="row" style="flex-wrap:wrap;gap:8px">
+                  <input id="shellTotp" placeholder="Bestätigung" autocomplete="off"
+                         style="flex:0 1 210px;min-width:150px">
+                  <button class="btn sm" id="shellAdd" type="button">Schlüssel eintragen</button>
+                </div>
+                <div class="set-status" id="shellMsg"></div>
+              </div>
+            </details>
+            <div class="card-hint" style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+              <b>Passwort und der SSH-Schalter stehen hier absichtlich nicht.</b> Beides braucht <code>root</code>,
+              und das Portal hat bewusst keines — es schreibt nur in sein eigenes Verzeichnis. Konsolen-/sudo-Passwort
+              ändern: am Bildschirm mit <code>passwd</code>. Passwortanmeldung über SSH: im Ersteinrichtungs-Assistenten.</div>
+          </div>
+
+          <div class="card" id="stRightsCard">
+            <h3>🤝 Mehr dürfen? <span class="card-hint">boxweite Rechte fragst du hier an — der Besitzer entscheidet</span></h3>
+            <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
+              <textarea id="rightsReqText" rows="2" placeholder="Was möchtest du dürfen, und wofür? (z. B. „Drucker benutzen für Schulzeug“)" style="flex:1;min-width:240px;padding:8px 10px;border-radius:10px;border:1px solid rgba(140,150,170,.3);background:transparent;color:inherit;font:inherit"></textarea>
+              <button class="btn sm primary" id="rightsReqSend">Anfrage senden</button>
+            </div>
+            <div class="card-hint" style="margin-top:8px">Die Anfrage erscheint beim Besitzer unter „Braucht dich“. Er setzt das Recht danach in der Verwaltung — du bekommst die Antwort als Nachricht.</div>
+          </div>
+
+          <div class="card" id="stDevCard" hidden>
+            <h3>🔌 Geräte im Netzwerk <span class="card-hint">was die Box im LAN findet · Drucker · TVs · Lautsprecher</span></h3>
+            <div id="devScanCfg" style="display:flex;gap:10px;align-items:center;margin:6px 0 10px;flex-wrap:wrap">
+              <label style="display:flex;gap:6px;align-items:center" title="Aus: die Box antwortet nur, wenn sie gefragt wird, und liest still die Nachbartabelle mit — sie sendet nichts. An: sie fragt im Takt selbst ins Netz (Multicast und Port-Prüfung); in überwachten Netzen fällt das als Scanner auf.">
+                <input id="devScanAktiv" type="checkbox"> von selbst nach Geräten suchen</label>
+              <label style="display:flex;gap:6px;align-items:center">Scan-Takt
+                <input id="devScanIv" type="number" min="1" max="1440" style="width:80px;padding:5px 8px;border-radius:8px;border:1px solid rgba(140,150,170,.3);background:transparent;color:inherit;font:inherit"> min</label>
+              <button class="btn sm" id="devScanSave">Übernehmen</button>
+              <button class="btn sm" id="devScanPause2">⏸ 2 h Pause</button>
+              <button class="btn sm" id="devScanPause24">⏸ 24 h Pause</button>
+              <button class="btn sm" id="devScanResume">▶ Pause aufheben</button>
+              <span class="card-hint" id="devScanState"></span>
+              <span class="card-hint" style="flex-basis:100%">Ab Werk sucht die Box <b>nicht</b> von selbst. Sie
+                antwortet, wenn sie gefragt wird, und hält die Liste aus dem stillen Mitlesen frisch — so fällt
+                sie in keinem Netz als Scanner auf. Was fehlt, holt der Knopf <b>Geräte suchen</b>.</span>
+            </div>
+            <iframe id="devFrame" title="Geräte im Netzwerk" loading="lazy" style="width:100%;height:560px;border:0;border-radius:12px;display:block;background:var(--bg-elevated,#0b0e12)"></iframe>
+          </div>
+
+          <div class="card" id="stFrgCard" hidden>
+            <h3>📡 Fernzugriff (Relay) <span class="card-hint">Zustand · Scharfschalten mit 2FA · Handy für 2FA koppeln</span></h3>
+            <!-- Owner 09.08.2026: der alte /freigaben-iframe war nicht ausgeliefert (leer) und mobil
+                 unsichtbar. Ersetzt durch die funktionierende, mobil-sichtbare Relay-Kachel (ckFillRelay). -->
+            <div id="stRelayHost" class="set-status">Lade …</div>
+          </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ==================== APP-RAIL (Owner 2026-07-22) ====================
+       Die rechte Leiste ist FESTER Desktop-Bestandteil in ALLEN Reitern:
+       oben ein Widget-Host (wächst mit künftigen Widgets), unten IMMER der
+       Messenger (Default: Übersicht aller Sessions). Unter 1100px übernimmt
+       der Start-Reiter den Messenger (Mobil-Fallback, #startSide). -->
+  <aside class="apprail" id="appRail" aria-label="Seitenleiste">
+    <div class="rail-widgets" id="railWidgets"></div>
+    <div class="rail-msgr" id="railMsgr"></div>
+  </aside>
+
+  <!-- ==================== CONVERSATION LAYER (persistent) ==================== -->
+  <div class="convo" id="convo">
+    <div class="link-chips" id="linkChips" hidden></div>
+    <div class="transcript" id="transcript"></div>
+  </div>
+
+</div>
+
+<!-- ==================== overlays ==================== -->
+<div class="palette" id="palette">
+  <div class="palette-box">
+    <input id="paletteInput" placeholder="Befehl … (z. B. Screen öffnen, Abmelden)" autocomplete="off">
+    <div class="palette-list" id="paletteList"></div>
+  </div>
+</div>
+
+<div class="backdrop" id="sheetBackdrop"></div>
+<aside class="sheet" id="sheet" aria-hidden="true">
+  <div class="sheet-head"><h3 id="sheetTitle">Detail</h3><button class="icon-btn" id="sheetClose">✕</button></div>
+  <div class="sheet-body" id="sheetBody"></div>
+</aside>
+
+<div class="drop-veil" id="dropVeil">📎 Dateien hier ablegen — landen im NAS-Anhang</div>
+<div class="toast-host" id="toastHost"></div>
+<!-- Unread-Overlay (Notify-Modul): fixe Ecke unten rechts, liegt ueber ALLEN Lenses inkl.
+     Sessions-iframe. Inhalt/Verhalten: app.js Notify. -->
+
+</body>
+</html>

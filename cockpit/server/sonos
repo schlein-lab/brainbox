@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+
+"""sonos — control the house Sonos speakers from INSIDE a net-isolated cell, reliably, by speaking UPnP
+through the governed SOCKS lane (127.0.0.1:8888) instead of raw sockets (which the isolated cell can't
+route -> the old hand-rolled UPnP failed silently). net_internal must be granted (LAN), which the voice
+session has. Reads by Content-Length (the net lane doesn't propagate upstream EOF).
+
+Usage:
+  sonos play [room] ["<favorite/playlist name>"]   # resume, or start a Sonos favorite/playlist by name
+  sonos pause|stop|next|prev [room]
+  sonos volume <0-100> [room]
+  sonos favorites [room]                            # list Sonos favorites (playlists/stations)
+  sonos status [room]
+  sonos rooms
+Room defaults to '$PN_SONOS_ROOM'. Override any room with an IP directly (e.g. `sonos play 192.0.2.137`)."""
+import sys, os, socket, struct, re, html
+
+SOCKS = ("127.0.0.1", 8888)
+
+def _rooms_from_env():
+    rooms = {}
+    for part in os.environ.get("PN_SONOS_ROOMS", "").split(","):
+        k, _, v = part.partition("=")
+        if k.strip() and v.strip():
+            rooms[k.strip().lower()] = v.strip()
+    return rooms
+
+def _rooms_from_file():
+
+    import json
+    for path in ("/etc/pn/sonos_rooms.json",
+                 os.path.expanduser("~/.local/share/brainbox-portal/sonos_rooms.json")):
+        try:
+            m = json.load(open(path))
+            if isinstance(m, dict) and m:
+                return {str(k).lower(): str(v) for k, v in m.items()}
+        except Exception:
+            pass
+    return {}
+
+ROOMS = _rooms_from_env() or _rooms_from_file()
+DEFAULT_ROOM = ""
+PORT = 1400
+
+def _resolve(room):
+    r = (room or DEFAULT_ROOM).strip().lower()
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", r):
+        return r
+    return ROOMS.get(r)
+
+def _socks(host, port, timeout=12):
+    if os.environ.get("PN_SONOS_NO_PROXY"):
+        c = socket.create_connection((host, port), timeout); c.settimeout(timeout); return c
+    s = socket.create_connection(SOCKS, timeout); s.settimeout(timeout)
+    s.sendall(b"\x05\x01\x00")
+    if s.recv(2) != b"\x05\x00":
+        raise RuntimeError("net lane SOCKS handshake failed (is network granted?)")
+    hb = host.encode()
+    s.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack("!H", port))
+    r = s.recv(10)
+    if len(r) < 2 or r[1] != 0x00:
+        raise RuntimeError("cannot reach %s:%d through the net lane (LAN/net_internal granted?)" % (host, port))
+    return s
+
+def _http(ip, method, path, headers, body=b"", timeout=12):
+    s = _socks(ip, PORT, timeout)
+    hdr = "%s %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n" % (method, path, ip, PORT)
+    for k, v in headers.items():
+        hdr += "%s: %s\r\n" % (k, v)
+    hdr += "Content-Length: %d\r\n\r\n" % len(body)
+    s.sendall(hdr.encode("utf-8") + body)
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        c = s.recv(4096)
+        if not c:
+            break
+        buf += c
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    status = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
+    m = re.search(rb"content-length:\s*(\d+)", head, re.I)
+    data = rest
+    if m:
+        need = int(m.group(1))
+        while len(data) < need:
+            c = s.recv(4096)
+            if not c:
+                break
+            data += c
+    else:
+        try:
+            while True:
+                c = s.recv(4096)
+                if not c:
+                    break
+                data += c
+        except socket.timeout:
+            pass
+    try:
+        s.close()
+    except OSError:
+        pass
+    return status, data.decode("utf-8", "replace")
+
+SVC = {"AVTransport": ("/MediaRenderer/AVTransport/Control", "urn:schemas-upnp-org:service:AVTransport:1"),
+       "RenderingControl": ("/MediaRenderer/RenderingControl/Control", "urn:schemas-upnp-org:service:RenderingControl:1"),
+       "ContentDirectory": ("/MediaServer/ContentDirectory/Control", "urn:schemas-upnp-org:service:ContentDirectory:1")}
+
+def soap(ip, svc, action, args_xml):
+    path, urn = SVC[svc]
+    env = ('<?xml version="1.0"?>'
+           '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+           's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+           '<u:%s xmlns:u="%s">%s</u:%s></s:Body></s:Envelope>') % (action, urn, args_xml, action)
+    st, body = _http(ip, "POST", path, {"Content-Type": 'text/xml; charset="utf-8"',
+                                        "SOAPACTION": '"%s#%s"' % (urn, action)}, env.encode("utf-8"))
+    if " 200 " not in st:
+        fault = re.search(r"<errorCode>(\d+)</errorCode>", body)
+        raise RuntimeError("Sonos %s.%s -> %s%s" % (svc, action, st, (" errorCode=" + fault.group(1)) if fault else ""))
+    return body
+
+def _esc(s):
+    return html.escape(s or "", quote=True)
+
+def get_uuid(ip):
+    _, xml = _http(ip, "GET", "/xml/device_description.xml", {})
+    m = re.search(r"<UDN>uuid:(RINCON_[0-9A-Fa-f]+)</UDN>", xml)
+    return m.group(1) if m else None
+
+def browse_favorites(ip):
+    r = soap(ip, "ContentDirectory", "Browse",
+             "<ObjectID>FV:2</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>"
+             "<Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>200</RequestedCount>"
+             "<SortCriteria></SortCriteria>")
+    m = re.search(r"<Result>(.*?)</Result>", r, re.S)
+    didl = html.unescape(m.group(1)) if m else ""
+    favs = []
+    for item in re.findall(r"<item\b.*?</item>", didl, re.S):
+        t = re.search(r"<dc:title>(.*?)</dc:title>", item, re.S)
+        res = re.search(r"<res[^>]*>(.*?)</res>", item, re.S)
+        md = re.search(r"<r:resMD>(.*?)</r:resMD>", item, re.S)
+        if t and res:
+            favs.append({"title": html.unescape(t.group(1)).strip(),
+                         "res": html.unescape(res.group(1)).strip(),
+                         "meta": html.unescape(md.group(1)).strip() if md else ""})
+    return favs
+
+def play_favorite(ip, name):
+    favs = browse_favorites(ip)
+    if not favs:
+        raise RuntimeError("keine Sonos-Favoriten gefunden")
+    nl = name.strip().lower()
+    match = next((f for f in favs if f["title"].lower() == nl), None) \
+        or next((f for f in favs if nl in f["title"].lower()), None)
+    if not match:
+        raise RuntimeError("Favorit %r nicht gefunden. Verfügbar: %s" % (name, ", ".join(f["title"] for f in favs)))
+    res, meta = match["res"], match["meta"]
+
+    if res.startswith("x-rincon-cpcontainer") or res.startswith("x-rincon-playlist") or ":#" in res:
+        uuid = get_uuid(ip)
+        if not uuid:
+            raise RuntimeError("konnte Speaker-UUID nicht lesen (für Playlist-Queue)")
+        soap(ip, "AVTransport", "RemoveAllTracksFromQueue", "<InstanceID>0</InstanceID>")
+        soap(ip, "AVTransport", "AddURIToQueue",
+             "<InstanceID>0</InstanceID><EnqueuedURI>%s</EnqueuedURI>"
+             "<EnqueuedURIMetaData>%s</EnqueuedURIMetaData><DesiredFirstTrackNumberEnqueued>0</DesiredFirstTrackNumberEnqueued>"
+             "<EnqueueAsNext>1</EnqueueAsNext>" % (_esc(res), _esc(meta)))
+        soap(ip, "AVTransport", "SetAVTransportURI",
+             "<InstanceID>0</InstanceID><CurrentURI>x-rincon-queue:%s#0</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>" % uuid)
+    else:
+        soap(ip, "AVTransport", "SetAVTransportURI",
+             "<InstanceID>0</InstanceID><CurrentURI>%s</CurrentURI><CurrentURIMetaData>%s</CurrentURIMetaData>" % (_esc(res), _esc(meta)))
+    soap(ip, "AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+    return match["title"]
+
+def main(argv):
+    if not argv:
+        print(__doc__); return 2
+    cmd = argv[0].lower()
+    if cmd == "rooms":
+        print("\n".join("%-8s %s" % (k, v) for k, v in ROOMS.items())); return 0
+    rest = argv[1:]
+
+    room = DEFAULT_ROOM
+    if rest and (rest[0].lower() in ROOMS or re.match(r"^\d+\.\d+\.\d+\.\d+$", rest[0])):
+        room = rest.pop(0)
+    ip = _resolve(room)
+    if not ip:
+        print("unbekannter Raum %r (bekannt: %s, oder IP angeben)" % (room, ", ".join(ROOMS))); return 2
+    try:
+        if cmd == "play":
+            if rest:
+                title = play_favorite(ip, " ".join(rest))
+                print("▶ spiele „%s“ in %s" % (title, room))
+            else:
+                soap(ip, "AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+                print("▶ Wiedergabe in %s" % room)
+        elif cmd == "pause":
+            soap(ip, "AVTransport", "Pause", "<InstanceID>0</InstanceID>"); print("⏸ pausiert (%s)" % room)
+        elif cmd == "stop":
+            soap(ip, "AVTransport", "Stop", "<InstanceID>0</InstanceID>"); print("⏹ gestoppt (%s)" % room)
+        elif cmd == "next":
+            soap(ip, "AVTransport", "Next", "<InstanceID>0</InstanceID>"); print("⏭ (%s)" % room)
+        elif cmd == "prev":
+            soap(ip, "AVTransport", "Previous", "<InstanceID>0</InstanceID>"); print("⏮ (%s)" % room)
+        elif cmd == "volume":
+            if not rest or not rest[0].isdigit():
+                print("volume <0-100>"); return 2
+            v = max(0, min(100, int(rest[0])))
+            soap(ip, "RenderingControl", "SetVolume",
+                 "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>%d</DesiredVolume>" % v)
+            print("🔊 Lautstärke %d%% (%s)" % (v, room))
+        elif cmd == "favorites" or cmd == "favs":
+            favs = browse_favorites(ip)
+            print("\n".join("• %s" % f["title"] for f in favs) if favs else "(keine Favoriten)")
+        elif cmd == "status":
+            r = soap(ip, "AVTransport", "GetTransportInfo", "<InstanceID>0</InstanceID>")
+            st = re.search(r"<CurrentTransportState>(.*?)</CurrentTransportState>", r)
+            print("Status %s: %s" % (room, st.group(1) if st else "?"))
+        else:
+            print(__doc__); return 2
+    except Exception as e:
+        print("Sonos-Fehler (%s): %s" % (room, e)); return 1
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

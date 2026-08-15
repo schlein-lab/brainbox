@@ -1,0 +1,164 @@
+#!/bin/sh
+set -u
+[ -f /etc/brainbox/service.env ] && . /etc/brainbox/service.env
+SH="${SERVICE_HOME:-/home/brainbox}"
+SVC="${SERVICE_USER:-$(basename "$SH")}"
+STATUSF=/run/brainbox/boot-status
+
+initial_pw_block() {
+  f=/etc/brainbox/initial-console-password
+  [ -r "$f" ] || return 0
+  [ -f /var/lib/brainbox/firstboot.done ] || return 0
+  lastchg=$(getent shadow "$SVC" 2>/dev/null | cut -d: -f3)
+  if [ -n "$lastchg" ] && [ "$lastchg" != "0" ]; then
+    rm -f "$f" 2>/dev/null
+    return 0
+  fi
+  pw=$(cat "$f" 2>/dev/null)
+  [ -n "$pw" ] || return 0
+  printf '  Nur zum direkten Anmelden an DIESER Konsole (NICHT der Setup-Code oben):\n'
+  printf '  For logging in directly at THIS console only (NOT the setup code above):\n'
+  printf '      Benutzer / user : %s\n' "$SVC"
+  printf '      Passwort / pass : %s\n' "$pw"
+  printf '      SSH geht nur mit Schluessel -- im Assistenten hinterlegen.\n'
+}
+
+qr() {
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t UTF8 -m 1 "$1" 2>/dev/null
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$1" 2>/dev/null <<'PY'
+import sys
+try:
+    import segno
+    segno.make(sys.argv[1], error="m").terminal(compact=True, border=1)
+except Exception:
+    pass
+PY
+  fi
+}
+
+horcht() {
+  ss -H -ltn 2>/dev/null | awk '{print $4}' | sed 's/.*[:.]//' | grep -qx "$1"
+}
+
+laufzeit() {
+  u=$(cut -d. -f1 /proc/uptime 2>/dev/null); u=${u:-0}
+  printf '%d:%02d' $((u / 60)) $((u % 60))
+}
+
+tick=0
+letzt_issue=""
+letzt_qrurl=""
+QR=""
+
+while :; do
+  tick=$((tick + 1))
+  case $((tick % 4)) in
+    0) zeiger='|' ;; 1) zeiger='/' ;; 2) zeiger='-' ;; *) zeiger='\' ;;
+  esac
+
+  hostlocal="$(hostname 2>/dev/null).local"; [ "$hostlocal" = ".local" ] && hostlocal=brainbox.local
+  ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p'); ip=${ip%% *}
+  [ -n "$ip" ] || ip=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+
+  if [ -f /etc/brainbox/setup-complete ]; then
+    port=$(sed -n 's/.*"port"[^0-9]*\([0-9]\{2,5\}\).*/\1/p' "$SH/.config/brainbox-portal/config.json" 2>/dev/null | head -1)
+    port=${port:-8076}
+    horcht "$port" && bereit=1 || bereit=0
+    urln="https://$hostlocal:$port/"
+    urli="https://${ip:-<IP>}:$port/"
+    kopf="Ihre Brainbox laeuft / your box is ready:"
+  else
+    if horcht 80; then bereit=1; port=80
+    elif horcht 8099; then bereit=1; port=8099
+    else bereit=0; port=80
+    fi
+    if [ "$port" = 80 ]; then
+      urln="http://$hostlocal/"; urli="http://${ip:-<IP>}/"
+    else
+      urln="http://$hostlocal:$port/"; urli="http://${ip:-<IP>}:$port/"
+    fi
+    kopf="Einrichten im Browser / set up in your browser:"
+  fi
+
+  if [ "$bereit" = 0 ]; then
+    schritt=$(cat "$STATUSF" 2>/dev/null | tail -1)
+    [ -n "$schritt" ] || schritt="Dienste werden gestartet"
+    text=$(
+      printf '\n  ============  B R A I N B O X  ============\n\n'
+      printf '  Die Box startet.   %s   Laufzeit %s\n\n' "$zeiger" "$(laufzeit)"
+      printf '  Gerade laeuft: %s\n\n' "$schritt"
+      printf '  Der erste Start dauert 1 bis 3 Minuten -- das ist normal.\n'
+      printf '  Solange sich das Zeichen oben dreht, arbeitet die Box.\n'
+      printf '  First boot takes 1-3 minutes. The spinner above means it is working.\n\n'
+      printf '  Gleich steht hier die Adresse fuer die Einrichtung.\n'
+      printf '  ==========================================\n'
+    )
+  else
+    qrurl="$urli"; [ -n "$ip" ] || qrurl="$urln"
+    scode=""
+    if [ ! -f /etc/brainbox/setup-complete ] && [ -f /var/lib/brainbox/firstboot.done ]; then
+      scode=$(tr -dc '0-9' < /etc/brainbox/setup-code 2>/dev/null)
+    fi
+    qrtarget="$qrurl"; [ -n "$scode" ] && qrtarget="${qrurl}?claim=${scode}"
+    if [ "$qrtarget" != "$letzt_qrurl" ]; then QR=$(qr "$qrtarget"); letzt_qrurl="$qrtarget"; fi
+    text=$(
+      printf '\n  ============  B R A I N B O X  ============\n\n'
+      printf '  %s\n\n' "$kopf"
+      printf '      %s\n'   "$urln"
+      printf '      %s\n\n' "$urli"
+      if [ ! -f /etc/brainbox/setup-complete ]; then
+        printf '  QR-Code scannen = fertig: der Setup-Code steckt darin, Sie muessen\n'
+        printf '  nichts abtippen. Oder die Adresse oben im Browser oeffnen (Handy oder\n'
+        printf '  Laptop im selben Netz) und den Setup-Code von Hand eingeben.\n'
+        printf '  Scan the QR code and you are in -- it already carries the setup code,\n'
+        printf '  nothing to type. Or open the address above in a browser instead.\n\n'
+      fi
+      [ -n "$QR" ] && printf '%s\n' "$QR"
+      if [ ! -f /etc/brainbox/setup-complete ] && [ -n "$scode" ]; then
+        printf '\n  Setup-Code (falls von Hand) / setup code (if typing):  %s\n' "$scode"
+      fi
+      printf '  ==========================================\n'
+    )
+    if [ -z "$ip" ]; then
+      text="$text
+  Noch keine IP-Adresse -- Netzwerkkabel pruefen oder WLAN einrichten.
+  No IP address yet -- check the network cable.
+"
+    fi
+  fi
+
+  if [ "$bereit" = 0 ]; then
+    issue='
+  ============  B R A I N B O X  ============
+
+  Die Box startet gerade. Der Bildschirm der Box zeigt den Fortschritt.
+  The box is still starting up. Watch its screen for progress.
+  ==========================================
+'
+  else
+    issue="$text
+"
+  fi
+  issue="$issue
+  \\n \\l
+
+"
+  if [ "$issue" != "$letzt_issue" ]; then
+    printf '%s' "$issue" > /etc/issue.new 2>/dev/null && mv /etc/issue.new /etc/issue 2>/dev/null
+    letzt_issue="$issue"
+  fi
+
+  neu=0
+  [ -f /etc/brainbox/setup-complete ] || neu=1
+  [ "$text" != "${letzt_text:-}" ] && neu=1
+  if [ "$neu" = 1 ]; then
+    for dev in /dev/tty1 /dev/console; do
+      { printf '\033c'; printf '%s\n' "$text"; initial_pw_block; } > "$dev" 2>/dev/null
+    done
+    letzt_text="$text"
+  fi
+
+  if [ -f /etc/brainbox/setup-complete ]; then sleep 30; else sleep 4; fi
+done

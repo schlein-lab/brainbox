@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+"""pnctl — control pn-init services by NAME, never by a guessed PID.
+
+WHY: pn-init (/etc/pn-init.conf) supervises each service under a UNIQUE NAME with an exact
+argv. Operators (and agents) that restart a service by `pgrep -f <substring> | kill` hit the
+WRONG process — the pattern also matches the caller's own shell / SSH command, so the real
+service keeps running stale code while you think you restarted it. (That exact mistake left
+brainbox-portal running hours-old code.)
+
+FIX (name<->PID interlock): a service is addressed by its config NAME, and we only act on a pid
+for which we hold POSITIVE, WHOLE-VALUE identity evidence that it IS that name. Never a
+substring, never the caller. Two independent kinds of evidence are accepted:
+
+  [S] SUPERVISOR evidence (strongest; kernel-held, established by PID 1 at spawn time)
+      ppid == 1  AND  session leader (sid == pid)  AND  cgroup-v2 leaf name == <name>.
+      pn-init forks each service itself, calls setsid() in the child before exec, and then
+      calls cg_place() to drop that exact child into a per-service leaf literally NAMED after
+      the service (`<tier>.slice/<name>`). All three facts are established by PID 1 at fork
+      time and maintained by the KERNEL; a process cannot rewrite any of them the way it can
+      rewrite its own cmdline. ALL THREE are required, and none is a heuristic — see
+      is_supervised() for why each one is load-bearing. Empirically, on a live appliance the
+      three together select exactly one pid per service, and reject: the operator's own shell
+      (same leaf, ppid!=1), a service's forked helper (same leaf+session, not leader), and a
+      helper orphaned into the leaf and reparented to PID 1 (ppid==1 but not a leader).
+
+  [A] ARGV evidence (the original check): the FULL /proc/<pid>/cmdline EXACTLY equals the argv
+      the named entry declares. Still exact and whole-argv. Kept as an independent corroborator
+      and as the fallback where supervisor evidence is unavailable (no cgroup-v2, nested/test
+      pn-init that is not PID 1, a service left in the tier root because its leaf join failed).
+
+WHY [S] WAS NEEDED: argv evidence alone reported RUNNING services as DOWN, because a daemon may
+legitimately rewrite its own argv after exec — `sshd` becomes "sshd: /usr/sbin/sshd -D -e
+[listener] ...", `avahi-daemon` becomes "avahi-daemon: running [brainbox.local]" — and a
+#!/bin/sh script is exec'd by the kernel as "/bin/sh <script>". A stale "DOWN" is not cosmetic:
+an agent that believes a live service is down will "restart" it and can take the box off the net.
+The cure is NOT to loosen the match to a substring (that is exactly how you signal the wrong
+process); it is to stop asking the process to describe itself and ask the kernel + PID 1 instead.
+
+Evidence is RANKED, and we act only on the strongest tier present: [A]+[S] > [S] > [A]. When the
+selected tier is [S] and it yields more than one candidate (possible only if a service grandchild
+was orphaned INTO the leaf and reparented to PID 1), that is AMBIGUOUS and we REFUSE to signal.
+Fail closed: an unresolved name is never a licence to guess.
+
+Die tiefere Haelfte ist seit 07.08.2026 GEBAUT: pn-init schreibt seine eigene name->pid-Tabelle
+nach /run/pn-init/services (publish_state()). Damit ist die Aufloesung eine Abfrage statt einer
+Rueckrechnung — und Dienste, deren Starter `exec` benutzt (die Kommandozeile stimmt danach nicht
+mehr mit der deklarierten argv ueberein, z. B. homeassistant ueber run-hass.sh), sind ueberhaupt
+erst auffindbar. Die kernelgehaltenen Belege bleiben als Rueckfallweg fuer eine Box mit aelterem
+PID 1; siehe _supervisor_table() und scan().
+
+⚠️ PID 1 wurde dafuer NICHT im Laufen getauscht: das neue Binaerbild wurde per rename eingeschwenkt
+(die laufende Datei ist ETXTBSY und behaelt ihren Inode), mit der alten Fassung unter
+/sbin/pn-init.vorher als GRUB-Rueckweg, und vorher in einer Wegwerf-VM gebootet (os/init/runtest.sh).
+
+Usage:
+  pnctl list                     # every configured service -> pid, uptime, state, evidence
+  pnctl status <name>            # one service (shows which evidence resolved it)
+  pnctl pid <name>               # just the pid (scriptable; exit 1 if not running)
+  pnctl verify <name> <pid>      # assert <pid> IS <name> (name<->PID interlock check)
+  pnctl restart <name>           # SIGTERM the resolved pid; wait for pn-init to respawn; print old->new
+  pnctl stop <name>              # SIGTERM (sacred services are respawned by pn-init — it will come back)
+  pnctl reload                   # SIGHUP PID1 -> re-read /etc/pn-init.conf (no reboot)
+  pnctl add <name> <flags> <argv...>   # append a service to the conf + reload (idempotent)
+  pnctl rm <name>                # remove a service from the conf + reload (it is stopped)
+"""
+import sys, os, time, signal, re
+
+CONF = os.environ.get("PN_INIT_CONF", "/etc/pn-init.conf")
+
+PNRUN = os.environ.get("PN_INIT_RUN", "/run/pn-init")
+
+def load_services(conf=CONF):
+
+    svc = {}
+    order = []
+    try:
+        for ln in open(conf, encoding="utf-8", errors="replace"):
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split("|", 2)
+            if len(parts) < 3:
+                continue
+            name, flags, argv = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            svc[name] = {"argv": argv, "flags": flags}
+            order.append(name)
+    except FileNotFoundError:
+        die(f"no pn-init config at {conf}")
+    return svc, order
+
+def read_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    args = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a != b""]
+    return " ".join(args)
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+def proc_start(pid):
+
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            fields = f.read().split(b") ")[1].split()
+        starttime = int(fields[19])
+        hz = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as f:
+            up = float(f.read().split()[0])
+        secs = int(up - starttime / hz)
+        if secs < 0:
+            return "?"
+        d, r = divmod(secs, 86400); h, r = divmod(r, 3600); m, s = divmod(r, 60)
+        return (f"{d}d" if d else "") + (f"{h}h" if (h or d) else "") + f"{m}m{s}s"
+    except Exception:
+        return "?"
+
+def _cmdline_matches(cmdline, argv):
+
+    if cmdline == argv:
+        return True
+    for interp in ("python3", "python", "/usr/bin/python3", "/usr/bin/python",
+                   "/usr/bin/env python3", "/usr/bin/env python"):
+        if cmdline == interp + " " + argv:
+            return True
+    return False
+
+def _stat_fields(pid):
+
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            return f.read().split(b") ")[1].split()
+    except Exception:
+        return None
+
+def read_ppid(pid):
+
+    f = _stat_fields(pid)
+    return int(f[1]) if f else None
+
+def read_sid(pid):
+
+    f = _stat_fields(pid)
+    return int(f[3]) if f else None
+
+def read_cgroup_leaf(pid):
+
+    try:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                if ln.startswith("0::"):
+                    path = ln.strip()[3:]
+                    if not path or path == "/":
+                        return None
+                    return path.rstrip("/").rsplit("/", 1)[-1]
+    except Exception:
+        return None
+    return None
+
+def _supervisor_table():
+
+    tbl = {}
+    try:
+        with open(PNRUN + "/services", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                p = ln.split()
+                if len(p) >= 2 and p[1].lstrip("-").isdigit():
+                    tbl[p[0]] = int(p[1])
+    except Exception:
+        return {}
+    return tbl
+
+def supervisor_state():
+
+    st = {}
+    try:
+        with open(PNRUN + "/services", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                p = ln.split()
+                if len(p) >= 5:
+                    st[p[0]] = p[4]
+    except Exception:
+        return {}
+    return st
+
+def supervisor_config():
+
+    cfg = {}
+    try:
+        with open(PNRUN + "/config", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                p = ln.split()
+                if len(p) == 2 and p[1].lstrip("-").isdigit():
+                    cfg[p[0]] = int(p[1])
+    except Exception:
+        return {}
+    return cfg
+
+def deckel_warnungen(svc):
+
+    cfg = supervisor_config()
+    if not cfg:
+        return []
+    w = []
+    ign, cap = cfg.get("ignored", 0), cfg.get("cap", 0)
+    if ign:
+        w.append(f"⛔ {ign} Dienst(e) stehen in {CONF}, werden von PID 1 aber NICHT gefahren: "
+                 f"der einkompilierte Deckel liegt bei {cap}. "
+                 f"Sie laufen nicht und werden auch nach einem Neustart nicht laufen.")
+    if cfg.get("truncated"):
+        w.append(f"⛔ {CONF} ist groesser als der Lesepuffer von PID 1 "
+                 f"({cfg.get('bufcap', 0)} Bytes) — das ENDE der Datei fehlt. "
+                 f"Die zuletzt eingetragenen Dienste existieren fuer PID 1 nicht.")
+    bekannt = set(supervisor_state())
+    if bekannt:
+        fehlt = [n for n in svc if n not in bekannt]
+        if fehlt:
+            w.append("⛔ in der conf, aber PID 1 kennt sie nicht: " + ", ".join(fehlt)
+                     + "  (nicht dasselbe wie DOWN — sie sind PID 1 gar nicht bekannt)")
+    return w
+
+EV_ARGV = "argv"
+EV_SUP = "supervisor"
+
+def is_supervised(pid, name):
+
+    return (read_ppid(pid) == 1
+            and read_sid(pid) == pid
+            and read_cgroup_leaf(pid) == name)
+
+def _release_abbild_matches(cmdline, argv):
+
+    if not cmdline or not argv:
+        return False
+    dek = argv.split()
+    lauf = cmdline.split()
+    if len(dek) < 2 or len(lauf) != len(dek):
+        return False
+    if lauf[0] != dek[0] or lauf[2:] != dek[2:]:
+        return False
+    m = re.match(r"^(/home/[^/]+)/", dek[1])
+    if not m:
+        return False
+    try:
+        dek_real = os.path.realpath(dek[1])
+    except Exception:
+        return False
+    if not dek_real.endswith("/cockpit/server/brainbox-portal"):
+        return False
+    muster = (re.escape(m.group(1))
+              + r"/\.local/lib/brainbox-portal/releases/[^/]+/cockpit/server/brainbox-portal$")
+    return re.match(muster, lauf[1]) is not None
+
+def evidence_for(pid, name, argv):
+
+    ev = set()
+    _cl = read_cmdline(pid)
+    if _cmdline_matches(_cl, argv) or _release_abbild_matches(_cl, argv):
+        ev.add(EV_ARGV)
+    if is_supervised(pid, name):
+        ev.add(EV_SUP)
+    return ev
+
+def scan(name, svc, exclude_self=True):
+
+    argv = svc[name]["argv"]
+    exclude = {1}
+    if exclude_self:
+        exclude.add(os.getpid()); exclude.add(os.getppid())
+
+    tafel = _supervisor_table()
+    p1 = tafel.get(name, 0)
+    if p1 > 0 and p1 not in exclude and pid_alive(p1):
+
+        return [p1], ("argv+supervisor" if is_supervised(p1, name) else "pid1"), []
+    both, sup_only, argv_only = [], [], []
+    for e in os.listdir("/proc"):
+        if not e.isdigit():
+            continue
+        pid = int(e)
+        if pid in exclude:
+            continue
+        ev = evidence_for(pid, name, argv)
+        if EV_ARGV in ev and EV_SUP in ev:
+            both.append(pid)
+        elif EV_SUP in ev:
+            sup_only.append(pid)
+        elif EV_ARGV in ev:
+            argv_only.append(pid)
+    if both:
+        return sorted(both), "argv+supervisor", sorted(sup_only + argv_only)
+    if sup_only:
+        return sorted(sup_only), "supervisor", sorted(argv_only)
+    if argv_only:
+        return sorted(argv_only), "argv", []
+    return [], None, []
+
+def resolve(name, svc, exclude_self=True):
+
+    return scan(name, svc, exclude_self)[0]
+
+def die(msg, code=1):
+    print(f"pnctl: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def need(name, svc):
+    if name not in svc:
+        die(f"unknown service {name!r} (see: pnctl list)")
+
+TIER_TAG = {"argv+supervisor": "argv+sup", "supervisor": "sup", "argv": "argv", "pid1": "pid1"}
+TIER_RANK = {"argv+supervisor": 3, "supervisor": 2, "argv": 1}
+
+def cmd_list(svc, order):
+    bekannt = set(supervisor_state())
+    for name in order:
+        pids, tier, extras = scan(name, svc)
+        if pids:
+            st = ",".join(f"{p} (up {proc_start(p)})" for p in pids)
+            mark = "  DUP!" if len(pids) > 1 else ""
+
+            if bekannt and supervisor_state().get(name) != "running":
+                mark += "  ⛔ FREMDSTART (PID 1 fuehrt hier keinen Prozess)"
+            print(f"{name:18} RUNNING  {st}  [{TIER_TAG[tier]}]{mark}")
+        else:
+            flags = svc[name]["flags"]
+            if bekannt and name not in bekannt:
+
+                state = "⛔ UNBEKANNT (PID 1 hat diesen Dienst nie geladen)"
+            else:
+                state = "oneshot/done" if "oneshot" in flags else ("disabled" if "disabled" in flags else "DOWN")
+            print(f"{name:18} {state}")
+        if extras:
+            print(f"{'':18} WARN weaker-evidence match(es) NOT acted on: {extras}", file=sys.stderr)
+
+    sys.stdout.flush()
+    for w in deckel_warnungen(svc):
+        print("\n" + w, file=sys.stderr)
+
+def cmd_status(name, svc):
+    need(name, svc)
+    pids, tier, extras = scan(name, svc)
+    print(f"name : {name}")
+    print(f"argv : {svc[name]['argv']}")
+    print(f"flags: {svc[name]['flags']}")
+    if pids:
+        for p in pids:
+            print(f"pid  : {p}  (up {proc_start(p)})")
+            print(f"       cmdline: {read_cmdline(p)}")
+            print(f"       ppid={read_ppid(p)} sid={read_sid(p)} "
+                  f"session-leader={read_sid(p) == p} cgroup-leaf={read_cgroup_leaf(p)!r}")
+        print(f"evid : {tier}")
+        if len(pids) > 1:
+            print("WARN : more than one process carries this name's evidence — see 'DUP!' in list")
+    else:
+        print("pid  : (not running)")
+    zust = supervisor_state()
+    if zust:
+        if name in zust:
+            print(f"pid1 : {zust[name]}          (Auskunft von PID 1 selbst, nicht erschlossen)")
+            if pids and zust[name] != "running":
+                print("WARN : ⛔ Es laeuft ein Prozess mit dieser argv, aber PID 1 fuehrt ihn NICHT.")
+                print("       Ihn hat jemand anderes gestartet — er traegt dessen cgroup und dessen")
+                print("       Speicherbudget, und PID 1 startet ihn nach einem Absturz NICHT neu.")
+        else:
+            print("pid1 : ⛔ UNBEKANNT — PID 1 hat diesen Dienst nie geladen.")
+            for w in deckel_warnungen(svc):
+                print("       " + w.replace("\n", "\n       "))
+    if extras:
+        print(f"WARN : weaker-evidence matches NOT acted on (not this name): {extras}")
+
+def cmd_pid(name, svc):
+    need(name, svc)
+    pids = resolve(name, svc)
+    if not pids:
+        sys.exit(1)
+    print(" ".join(str(p) for p in pids))
+
+def cmd_verify(name, pid, svc):
+
+    need(name, svc)
+    try:
+        pid = int(pid)
+    except ValueError:
+        die(f"bad pid {pid!r}")
+    cl = read_cmdline(pid)
+    if cl is None and read_ppid(pid) is None:
+        die(f"pid {pid} not running", 2)
+    ev = evidence_for(pid, name, svc[name]["argv"])
+    if ev:
+        print(f"OK: pid {pid} IS {name}  (evidence: {'+'.join(sorted(ev))})")
+        sys.exit(0)
+    die(f"MISMATCH: pid {pid} is NOT {name}\n"
+        f"  expected argv : {svc[name]['argv']}\n"
+        f"  actual   argv : {cl}\n"
+        f"  supervisor    : ppid={read_ppid(pid)} (need 1), "
+        f"session-leader={read_sid(pid) == pid} (need True; sid={read_sid(pid)}), "
+        f"cgroup-leaf={read_cgroup_leaf(pid)!r} (need {name!r})", 3)
+
+def cmd_restart(name, svc):
+    need(name, svc)
+    argv = svc[name]["argv"]
+    pids, tier, extras = scan(name, svc)
+    old = set(pids)
+    if not old:
+        die(f"{name}: not running (nothing to restart)\n  argv: {argv}", 2)
+    if len(old) > 1 and tier == "supervisor":
+
+        die(f"{name}: AMBIGUOUS — {len(old)} pids {sorted(old)} carry supervisor evidence and none "
+            f"matches the declared argv. REFUSING to signal.\n"
+            f"  argv: {argv}\n"
+            f"  inspect with: pnctl status {name}", 3)
+    if extras:
+        print(f"pnctl: WARN {name}: not acting on weaker-evidence match(es) {extras}", file=sys.stderr)
+    if len(old) > 1:
+        print(f"pnctl: WARN {name}: {len(old)} matching pids {sorted(old)} — terminating all", file=sys.stderr)
+    for p in old:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+
+            die(f"{name}: pid {p} belongs to another user (a root service) — this tool cannot "
+                f"signal it.\n  restart it with: sudo kill {p}   (pn-init respawns it fresh)", 4)
+
+    t0 = time.time()
+    while time.time() - t0 < 8 and any(pid_alive(p) for p in old):
+        time.sleep(0.2)
+    for p in old:
+        if pid_alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    pre_existing = old | set(extras)
+    t0 = time.time()
+    new = []
+    while time.time() - t0 < 15:
+        cur_pids, cur_tier, _ = scan(name, svc)
+        if TIER_RANK.get(cur_tier, 0) >= TIER_RANK.get(tier, 0):
+            new = sorted(set(cur_pids) - pre_existing)
+            if new:
+                break
+        time.sleep(0.3)
+    if new:
+        print(f"restarted {name}: {sorted(old)} -> {new}")
+        sys.exit(0)
+    die(f"{name}: terminated {sorted(old)} but pn-init did not respawn within 15s "
+        f"(disabled/oneshot, or supervisor down?)", 2)
+
+def cmd_stop(name, svc):
+    need(name, svc)
+    pids, tier, extras = scan(name, svc)
+    if not pids:
+        print(f"{name}: already down")
+        return
+    if len(pids) > 1 and tier == "supervisor":
+        die(f"{name}: AMBIGUOUS — {len(pids)} pids {sorted(pids)} carry supervisor evidence and none "
+            f"matches the declared argv. REFUSING to signal.\n"
+            f"  inspect with: pnctl status {name}", 3)
+    if extras:
+        print(f"pnctl: WARN {name}: not acting on weaker-evidence match(es) {extras}", file=sys.stderr)
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            die(f"{name}: pid {p} belongs to another user (a root service) — this tool cannot "
+                f"signal it.\n  stop it with: sudo kill {p}", 4)
+    print(f"sent SIGTERM to {name}: {pids}")
+    if "sacred" in svc[name]["flags"]:
+        print(f"note: {name} is 'sacred' — pn-init will respawn it. Use 'disabled' in the conf to keep it down.")
+
+def cmd_reload():
+
+    try:
+        os.kill(1, signal.SIGHUP)
+    except PermissionError:
+        die("reload braucht root (SIGHUP an PID 1)")
+    except ProcessLookupError:
+        die("kein PID 1?!")
+    print("reload: SIGHUP an pn-init geschickt — Ergebnis steht auf der Konsole "
+          "(+/~/- je Dienst). 'pnctl list' zeigt den neuen Stand.")
+
+def _conf_lines(conf=CONF):
+    try:
+        return open(conf, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError as e:
+        die(f"conf nicht lesbar: {e}")
+
+def _conf_write(lines, conf=CONF):
+
+    body = "\n".join(lines).rstrip("\n") + "\n"
+    tmp = conf + ".pnctl.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, conf)
+    except OSError as e:
+        try: os.unlink(tmp)
+        except OSError: pass
+        die(f"conf nicht schreibbar (root noetig?): {e}")
+
+def _publish_stand():
+
+    try:
+        s = os.stat(PNRUN + "/services")
+        return (s.st_mtime_ns, s.st_size)
+    except OSError:
+        return None
+
+def _nachweis_dass_pid1_es_kennt(name, vorher):
+
+    if vorher is None:
+        return
+    for _ in range(60):
+        if _publish_stand() != vorher:
+            break
+        time.sleep(0.25)
+    else:
+        print(f"WARN : PID 1 hat seine Tabelle nach dem SIGHUP nicht neu geschrieben.\n"
+              f"       Ob '{name}' wirklich geladen wurde, ist damit UNGEPRUEFT — "
+              f"'pnctl list' zeigt den tatsaechlichen Stand.", file=sys.stderr)
+        return
+    zust = supervisor_state()
+    if name in zust:
+        print(f"PID 1 kennt '{name}' jetzt (Zustand: {zust[name]}).")
+    else:
+        die(f"⛔ '{name}' steht in {CONF}, aber PID 1 hat ihn NICHT geladen.\n"
+            f"       Der Eintrag existiert und der Dienst wird trotzdem nie starten.\n"
+            f"       'pnctl list' nennt den Grund (Deckel / abgeschnittene conf).", code=5)
+
+def cmd_add(name, flags, argv):
+
+    if "|" in name or not name.strip():
+        die("Name darf kein '|' enthalten und nicht leer sein")
+    if not argv or not argv[0].startswith("/"):
+        die("argv0 muss ein absoluter Pfad sein")
+    line = f"{name}|{flags}|{' '.join(argv)}"
+    lines = _conf_lines()
+
+    cfg = supervisor_config()
+    if cfg.get("cap"):
+        vorhanden = {ln.split("|", 1)[0].strip() for ln in lines
+                     if ln.strip() and not ln.strip().startswith("#") and "|" in ln}
+        if name not in vorhanden and len(vorhanden) >= cfg["cap"]:
+            die(f"NICHT aufgenommen: {CONF} enthaelt bereits {len(vorhanden)} Dienste und der "
+                f"einkompilierte Deckel von PID 1 liegt bei {cfg['cap']}.\n"
+                f"       Ein {len(vorhanden) + 1}. Dienst wuerde in der Datei stehen und trotzdem "
+                f"NIE laufen — auch nach einem Neustart nicht.\n"
+                f"       Abhilfe: einen nicht mehr gebrauchten Dienst mit 'pnctl rm' entfernen, "
+                f"oder CONF_MAX_SVC in os/init/pn-init.c anheben und PID 1 neu bauen.", code=4)
+    out, replaced = [], False
+    for ln in lines:
+        s = ln.strip()
+        if s and not s.startswith("#") and s.split("|", 1)[0].strip() == name:
+            out.append(line); replaced = True
+        else:
+            out.append(ln)
+    if not replaced:
+        out.append(line)
+    _conf_write(out)
+    print(("ersetzt: " if replaced else "aufgenommen: ") + line)
+    vorher = _publish_stand()
+    cmd_reload()
+    _nachweis_dass_pid1_es_kennt(name, vorher)
+
+def cmd_rm(name):
+    lines = _conf_lines()
+    out = [ln for ln in lines
+           if not (ln.strip() and not ln.strip().startswith("#")
+                   and ln.strip().split("|", 1)[0].strip() == name)]
+    if len(out) == len(lines):
+        die(f"kein Dienst '{name}' in {CONF}")
+    _conf_write(out)
+    print(f"entfernt: {name}")
+    cmd_reload()
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    svc, order = load_services()
+    cmd = a[0]
+    if cmd == "list":
+        cmd_list(svc, order)
+    elif cmd == "status" and len(a) == 2:
+        cmd_status(a[1], svc)
+    elif cmd == "pid" and len(a) == 2:
+        cmd_pid(a[1], svc)
+    elif cmd == "verify" and len(a) == 3:
+        cmd_verify(a[1], a[2], svc)
+    elif cmd == "restart" and len(a) == 2:
+        cmd_restart(a[1], svc)
+    elif cmd == "stop" and len(a) == 2:
+        cmd_stop(a[1], svc)
+    elif cmd == "reload" and len(a) == 1:
+        cmd_reload()
+    elif cmd == "add" and len(a) >= 4:
+        cmd_add(a[1], a[2], a[3:])
+    elif cmd == "rm" and len(a) == 2:
+        cmd_rm(a[1])
+    else:
+        die(f"bad usage: {' '.join(a)}\n{__doc__}")
+
+if __name__ == "__main__":
+    main()

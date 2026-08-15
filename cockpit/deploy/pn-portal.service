@@ -1,0 +1,25 @@
+[Unit]
+Description=pn-portal — the Brainarbeit cockpit contract adapter (live approval inbox over the one bus)
+Documentation=https://github.com/schlein-lab/brainarbeit/tree/main/cockpit
+After=pnd.service network-online.target
+Wants=pnd.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/brainarbeit/cockpit
+EnvironmentFile=-%h/brainarbeit/cockpit/.env
+Environment=PN_PORTAL_HOST=127.0.0.1
+Environment=PN_PORTAL_PORT=8800
+ExecStart=/bin/sh -c 'exec python3 server/pn_portal.py \
+    --host "$PN_PORTAL_HOST" --port "$PN_PORTAL_PORT" \
+    ${PN_SOCK:+--sock "$PN_SOCK"} \
+    ${PN_PORTAL_CERT:+--cert "$PN_PORTAL_CERT"} ${PN_PORTAL_KEY:+--key "$PN_PORTAL_KEY"}'
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

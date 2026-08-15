@@ -1,0 +1,68 @@
+<!doctype html><html lang=de><head><meta charset=utf-8>
+<title>Brainbox · Zertifikat installieren</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#eef1f7;--panel:#fff;--bd:#d9e0ec;--ink:#182031;--mut:#5f6d87;--acc:#2f6df6;--acc-ink:#fff;--ok:#1c8a5c;--code:#eef2fb;--codeink:#274690}
+@media (prefers-color-scheme:dark){:root{--bg:#0c111b;--panel:#151d2c;--bd:#28344c;--ink:#e8eef8;--mut:#93a0b8;--acc:#6e93ff;--acc-ink:#0c111b;--ok:#48c78a;--code:#101a2b;--codeink:#8fb6ff}}
+:root[data-theme=dark]{--bg:#0c111b;--panel:#151d2c;--bd:#28344c;--ink:#e8eef8;--mut:#93a0b8;--acc:#6e93ff;--acc-ink:#0c111b;--ok:#48c78a;--code:#101a2b;--codeink:#8fb6ff}
+:root[data-theme=light]{--bg:#eef1f7;--panel:#fff;--bd:#d9e0ec;--ink:#182031;--mut:#5f6d87;--acc:#2f6df6;--acc-ink:#fff;--ok:#1c8a5c;--code:#eef2fb;--codeink:#274690}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:760px;margin:0 auto;padding:30px 20px 70px}
+.eyebrow{font:600 11.5px/1 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--acc)}
+h1{font-size:26px;margin:.3em 0 .15em;letter-spacing:-.01em}
+.sub{color:var(--mut);margin:0 0 22px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;margin:0 0 16px;box-shadow:0 1px 2px rgba(20,30,55,.05),0 10px 26px rgba(20,30,55,.05)}
+.dl{display:inline-flex;align-items:center;gap:10px;background:var(--acc);color:var(--acc-ink);text-decoration:none;font-weight:650;padding:12px 20px;border-radius:11px;font-size:15.5px}
+.dl:active{transform:translateY(1px)}
+.fp{font:12.5px/1.5 ui-monospace,monospace;color:var(--codeink);background:var(--code);border:1px solid var(--bd);border-radius:9px;padding:9px 12px;word-break:break-all;margin-top:12px}
+h2{font-size:16px;margin:20px 0 8px;display:flex;align-items:center;gap:9px}
+h2 .os{font-size:20px}
+ol{margin:.2em 0 .2em;padding-left:1.3em}li{margin:.28em 0}
+code{font:12.5px ui-monospace,monospace;background:var(--code);color:var(--codeink);padding:1px 6px;border-radius:5px}
+.note{color:var(--mut);font-size:13.5px;margin-top:8px}
+.ok{color:var(--ok);font-weight:600}
+</style><script src="/portal-nav.js" defer></script></head><body>
+<div class=wrap>
+  <div class=eyebrow>Brainbox · Sicheres Zertifikat</div>
+  <h1>Diese Brainbox als vertrauenswürdig einrichten</h1>
+  <p class=sub>Deine Brainbox verschlüsselt alles mit HTTPS — nur kennt dein Gerät die <b>hauseigene Zertifizierungsstelle</b> der Box noch nicht, deshalb die Warnung „nicht sicher“. Einmal das Box-Zertifikat installieren, und die Warnung ist auf diesem Gerät für immer weg — komplett offline, ohne fremde Dienste.</p>
+
+  <div class=card>
+    <a class=dl href="/brainbox-ca.crt" download="brainbox-ca.crt">⬇ Box-Zertifikat herunterladen</a>
+    <div class=note>Fingerabdruck (zur Kontrolle, dass es wirklich <b>deine</b> Box ist):</div>
+    <div class=fp id=fp>%FINGERPRINT%</div>
+  </div>
+
+  <div class=card>
+    <h2><span class=os>🤖</span> Android</h2>
+    <ol>
+      <li>Datei oben herunterladen.</li>
+      <li><b>Einstellungen → Sicherheit → Mehr → Verschlüsselung &amp; Anmeldedaten → Zertifikat installieren → CA-Zertifikat</b>.</li>
+      <li>Die Datei <code>brainbox-ca.crt</code> auswählen, Warnung bestätigen.</li>
+    </ol>
+    <h2><span class=os></span> iPhone / iPad</h2>
+    <ol>
+      <li>Datei in <b>Safari</b> öffnen → „Profil laden erlauben“.</li>
+      <li><b>Einstellungen → Allgemein → VPN &amp; Geräteverwaltung</b> → Profil „Brainbox Root CA“ → <b>Installieren</b>.</li>
+      <li><b>Einstellungen → Allgemein → Info → Zertifikatvertrauens­einstellungen</b> → „Brainbox Root CA“ <b>einschalten</b>.</li>
+    </ol>
+    <h2><span class=os>🪟</span> Windows</h2>
+    <ol>
+      <li>Datei doppelklicken → <b>Zertifikat installieren → Lokaler Computer → Alle Zertifikate in folgendem Speicher: Vertrauenswürdige Stammzertifizierungsstellen</b>.</li>
+    </ol>
+    <h2><span class=os></span> macOS</h2>
+    <ol>
+      <li>Datei doppelklicken → <b>Schlüsselbund</b> öffnet → im Schlüsselbund <b>System</b> ablegen.</li>
+      <li>Doppelklick auf „Brainbox Root CA“ → <b>Vertrauen → Bei Verwendung dieses Zertifikats: Immer vertrauen</b>.</li>
+    </ol>
+    <h2><span class=os>🐧</span> Linux / Firefox</h2>
+    <ol>
+      <li><b>System:</b> <code>sudo cp brainbox-ca.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code></li>
+      <li><b>Firefox</b> (eigener Speicher): <b>Einstellungen → Datenschutz → Zertifikate → Zertifikate anzeigen → Importieren</b> → „Dieser CA vertrauen, um Websites zu identifizieren“.</li>
+    </ol>
+  </div>
+
+  <p class=note><span class=ok>Fertig.</span> Danach zeigt der Browser das grüne Schloss für diese Box — auf diesem Gerät dauerhaft. Für weitere Geräte diesen Schritt einmal wiederholen.</p>
+</div>
+</body></html>

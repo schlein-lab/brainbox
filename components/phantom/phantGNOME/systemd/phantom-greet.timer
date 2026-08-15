@@ -1,0 +1,14 @@
+[Unit]
+Description=phantGNOME Telegram wake-greeting at 07:00 daily
+Documentation=file:%h/phantGNOME/greet.sh
+
+[Timer]
+# 07:00 every day, local time. Persistent=true catches a missed run if the seat
+# was off at 07:00 (fires once at next start).
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+AccuracySec=1min
+Unit=phantom-greet.service
+
+[Install]
+WantedBy=timers.target

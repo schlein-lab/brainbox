@@ -1,0 +1,16 @@
+[Unit]
+Description=phantom room daemon — LLM-OS room backend (CLI-backed, resumable sessions)
+After=phantom-compositor.service
+Wants=phantom-compositor.service
+
+[Service]
+Type=simple
+User=phantom
+Environment=HOME=%h
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S /run/phantom/phantom.ctl ] && exit 0; sleep 0.5; done; exit 0'
+ExecStart=/usr/bin/python3 %h/phantom-roomd.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

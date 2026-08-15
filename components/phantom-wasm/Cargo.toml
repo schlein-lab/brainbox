@@ -1,0 +1,35 @@
+[package]
+name = "phantom-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Phantom client-side WASM/WebGL2 scene compositor (SceneFrame v1)"
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.126"
+js-sys = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "console",
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "WebGl2RenderingContext",
+    "WebGlProgram",
+    "WebGlShader",
+    "WebGlTexture",
+    "WebGlBuffer",
+    "WebGlUniformLocation",
+    "WebGlVertexArrayObject",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true

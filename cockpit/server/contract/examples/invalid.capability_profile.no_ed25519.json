@@ -1,0 +1,5 @@
+{
+  "webgl2": true,
+  "sig_algs": ["rsa2048"],
+  "max_msg_bytes": 262144
+}

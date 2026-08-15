@@ -1,0 +1,23 @@
+[Unit]
+Description=Brainarbeit off-LAN remote-access relay client (pn-relayd)
+Documentation=file://%h/portioneer/docs/relay.md file://%h/portioneer/docs/relay-security.md
+After=pnd.service
+Wants=pnd.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/portioneer/tools/pn-relayd
+Slice=pn-interactive.slice
+Restart=always
+RestartSec=2
+WatchdogSec=60
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/portioneer
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

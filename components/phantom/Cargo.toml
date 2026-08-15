@@ -1,0 +1,23 @@
+[package]
+name = "phantom"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/schlein-lab/phantom"
+description = "A from-scratch headless Wayland display server: apps render and receive input through it, but nothing is ever drawn to a real screen and no real hardware is read. Fully programmatic I/O."
+
+[[bin]]
+name = "phantom"
+path = "src/main.rs"
+
+[[bin]]
+name = "phantom-supervise"
+path = "src/bin/phantom-supervise.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

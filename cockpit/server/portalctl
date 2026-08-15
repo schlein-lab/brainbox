@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import ssl
+import json
+import urllib.request
+
+def _call(path, payload=None):
+    base = os.environ.get("PORTAL_URL", "https://127.0.0.1:8076").rstrip("/")
+    tok = os.environ.get("PORTAL_TOKEN", "")
+    headers = {"Accept": "application/json"}
+    if tok:
+        headers["Cookie"] = "pp_session=" + tok
+    _sid = os.environ.get("PORTAL_SESSION_SID", "")
+    if _sid:
+        headers["X-Pn-Session-Sid"] = _sid
+    data = None
+    method = "GET"
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        method = "POST"
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, context=ctx, timeout=130) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    return json.loads(raw or "{}")
+
+def main(argv):
+    if not argv:
+        sys.stderr.write("usage: portalctl state | portalctl <verb> '<json-args>'\n")
+        return 2
+    verb = argv[0]
+    if verb in ("state", "--state", "-s"):
+        try:
+            st = _call("/api/agent/state")
+        except Exception as e:
+            sys.stderr.write("error: %s\n" % e)
+            return 1
+        sys.stdout.write(json.dumps(st, ensure_ascii=False) + "\n")
+        return 0
+    args = {}
+    if len(argv) > 1 and argv[1].strip():
+        try:
+            args = json.loads(argv[1])
+        except Exception as e:
+            sys.stderr.write("bad json args: %s\n" % e)
+            return 2
+    if not isinstance(args, dict):
+        sys.stderr.write("json args must be an object\n")
+        return 2
+    try:
+        out = _call("/api/agent/exec", {"verb": verb, "args": args})
+    except Exception as e:
+        sys.stderr.write("error: %s\n" % e)
+        return 1
+    spoken = out.get("spoken")
+    if spoken:
+        sys.stdout.write(str(spoken) + "\n")
+    res = out.get("result")
+    if res not in (None, {}, ""):
+        sys.stdout.write(json.dumps(res, ensure_ascii=False) + "\n")
+    if not out.get("ok", True):
+        if out.get("error"):
+            sys.stderr.write("error: %s\n" % out.get("error"))
+        return 1
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

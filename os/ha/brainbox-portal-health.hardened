@@ -1,0 +1,64 @@
+#!/bin/sh
+# keepalived VIP health-gate — HARDENED candidate (supersedes ops/brainbox-portal-health).
+# DESIGN ARTIFACT: review, then install to /usr/local/bin/brainbox-portal-health when approved.
+#
+# WHY: the current gate fails-CLOSED on the blessed-version check. When `git ls-remote origin main`
+# hiccups (GitHub 5xx / DNS / rate-limit) AND the 10-min blessed cache has expired AND no prior
+# blessed value is on disk (fresh boot), `blessed` is empty -> exit 1 -> the node RELEASES the VIP
+# even though its portal is serving fine. With three peers a shared GitHub blip can demote the
+# healthy master and flap the VIP. Root principle: a REACHABLE, SERVING portal is the primary
+# signal; remote-version reachability must only DEMOTE a node PROVEN stale, never punish a node for
+# GitHub being down. Hardening = (1) retry ls-remote, (2) longer cache grace, (3) treat
+# remote-unknown as "assume current" (hold) instead of releasing.
+# Exit 0 = healthy (keep/take VIP); non-zero = unhealthy (release VIP).
+REPO="${BRAINBOX_REPO:-$(getent passwd 1000 2>/dev/null | cut -d: -f6)/brainarbeit}"
+MAINT=/run/brainbox/portal-maintenance
+BLESSED=/run/brainbox/blessed-commit
+PORT="${PORTAL_PORT:-8077}"
+now=$(date +%s)
+
+# 1) deploy window — hold the VIP through a brief restart (never fail over mid-deploy)
+if [ -f "$MAINT" ]; then
+  age=$(( now - $(stat -c %Y "$MAINT" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 90 ] && exit 0
+fi
+
+# 2) portal must actually serve (the PRIMARY liveness signal; fall/rise in keepalived absorbs blips)
+curl -fsS -k --max-time 2 "https://127.0.0.1:${PORT}/api/status" >/dev/null 2>&1 || exit 1
+
+# 3) blessed-version gate — DEMOTE only a node PROVEN to be missing the blessed commit.
+local=$(git -C "$REPO" rev-parse HEAD 2>/dev/null)
+# git momentarily busy (index.lock during a pull) must NOT release a serving node:
+[ -n "$local" ] || exit 0
+
+# refresh the blessed cache at most every 10 min; on refresh, RETRY ls-remote (transient blips).
+refresh=1
+if [ -f "$BLESSED" ]; then
+  bage=$(( now - $(stat -c %Y "$BLESSED" 2>/dev/null || echo 0) ))
+  [ "$bage" -lt 600 ] && refresh=0
+fi
+if [ "$refresh" = 1 ]; then
+  r=""
+  i=1
+  while [ "$i" -le 3 ]; do
+    r=$(timeout 5 git -C "$REPO" ls-remote origin main 2>/dev/null | awk '{print $1}')
+    [ -n "$r" ] && break
+    i=$(( i + 1 )); sleep 1
+  done
+  # only overwrite the cache on a SUCCESSFUL lookup (keep last-known-good on failure)
+  [ -n "$r" ] && printf '%s' "$r" > "$BLESSED"
+fi
+
+blessed=$(cat "$BLESSED" 2>/dev/null)
+
+# GRACE: remote version UNKNOWN (never fetched, or a long GitHub outage past cache expiry).
+# The portal is serving (step 2 passed) -> HOLD the VIP. We do not have proof this node is stale,
+# and releasing here is exactly the flap we are fixing. (Old script did `exit 1` here.)
+[ -n "$blessed" ] || exit 0
+
+# Equal to blessed = current.
+[ "$local" = "$blessed" ] && exit 0
+# Ahead of blessed (local contains it) = current-or-newer.
+git -C "$REPO" merge-base --is-ancestor "$blessed" "$local" 2>/dev/null && exit 0
+# Proven stale: local is missing the blessed commit -> release the VIP so old code is never served.
+exit 1

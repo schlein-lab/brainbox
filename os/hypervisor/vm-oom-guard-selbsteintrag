@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+ADJ="${1:--500}"
+RES="${2:-full}"
+
+for q in /sys/class/dmi/id/product_uuid /sys/devices/virtual/dmi/id/product_uuid; do
+    [ -r "$q" ] || continue
+    U=$(tr 'A-Z' 'a-z' < "$q" | tr -d ' \n')
+    case "$U" in
+        ""|00000000-0000-0000-0000-000000000000) continue;;
+    esac
+    echo "uuid:$U|$ADJ|$RES"
+    exit 0
+done
+
+echo "Keine Domain-UUID lesbar." >&2
+echo "Das heisst meistens: dieser Rechner ist keine VM (dann gibt es nichts zu schuetzen)," >&2
+echo "oder die UUID ist nur fuer root lesbar — dann mit sudo erneut versuchen." >&2
+exit 1

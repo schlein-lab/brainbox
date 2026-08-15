@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portal-contract/1/envelope.control",
+  "title": "Control-lane envelope (contract.md §1.2)",
+  "description": "Every control-lane message is a single JSON object framed as one transport message. Binary payloads are referenced by content hash, never inlined (§1.2).",
+  "type": "object",
+  "required": ["contract", "type", "id", "ts", "nonce", "principal", "key_id", "funding", "sig"],
+  "properties": {
+    "contract": {
+      "type": "string",
+      "const": "portal-contract/1",
+      "description": "Frozen contract version (§10). Mismatch -> ERR_CONTRACT_MISMATCH."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["req", "res", "evt"],
+      "description": "request / response / server event (§1.2)."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "description": "uuid-v4; correlates res->req; unique per req."
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "client wall-clock ms epoch (anti-replay §2.3)."
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "description": "base64url of 16 random bytes (unpadded, 22 chars) (§2.3)."
+    },
+    "principal": {
+      "type": "string",
+      "pattern": "^(owner|member:[A-Za-z0-9._-]+|guest:[A-Za-z0-9._-]+)$",
+      "description": "declared principal NAME; interlock §2.4."
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "description": "base64url(SHA-256(pubkey))[:16] -> 22 chars (§2.1). WHICH enrolled key signs (§2.4)."
+    },
+    "funding": {
+      "type": "string",
+      "pattern": "^(member-subsidized|byo:[a-z]+(,[a-z]+)*)$",
+      "description": "funding tag (§8.2). member-subsidized OR byo:<resource-set>."
+    },
+    "verb": {
+      "type": "string",
+      "pattern": "^(conversation|terminal|screen|app|files|artifact|verb|secret|enroll|profile|placement)\\.[a-z_]+$",
+      "description": "REQUIRED on type=req: the RPC verb (§3)."
+    },
+    "args": {
+      "type": "object",
+      "description": "verb args (§3); {} if none. JCS-canonicalized for signing (§2.2)."
+    },
+    "sig": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "description": "base64url ed25519 detached signature (64 bytes -> 86 chars unpadded) over the canonical repr (§2.2)."
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "type=res only: success flag (§8.1)."
+    },
+    "result": {
+      "type": "object",
+      "description": "type=res + ok=true (§8.1)."
+    },
+    "error": {
+      "$ref": "portal-contract/1/error"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "req" } } },
+      "then": { "required": ["verb", "args"] }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "res" }, "ok": { "const": false } },
+        "required": ["ok"]
+      },
+      "then": { "required": ["error"] }
+    }
+  ],
+  "additionalProperties": true
+}

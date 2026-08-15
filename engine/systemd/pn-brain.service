@@ -1,0 +1,25 @@
+[Unit]
+Description=portioneer autonomous brain — control face (pn-brain): the ONLY component that acts
+After=pnd.service pn-llmd.service
+Requires=pnd.service
+Wants=pn-llmd.service pn-notify.service
+
+[Service]
+Type=simple
+User=brain
+ExecStart=%h/portioneer/tools/pn-brain
+Slice=pn-interactive.slice
+Restart=always
+RestartSec=3
+MemoryAccounting=yes
+Environment=PN_BRAIN_PRINCIPAL=brain
+Environment=PN_BRAIN_TICK_S=2.0
+Environment=PN_LLM_SOCK=%t/pn-llmd.sock
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Geräte im Netzwerk</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --fg:#e7eaf0; --dim:#9aa3b2; --accent:#5b8cff; --accent2:#2b3350;
+    --ok:#37d67a; --unknown:#7a8394; --off:#ff6b6b;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f5f6f9; --panel:#fff; --panel2:#eef1f6; --line:#dde1ea;
+           --fg:#1a1d24; --dim:#5b6472; --accent:#2b5cff; --accent2:#e5ebff; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  header{position:sticky;top:0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    padding:14px 18px;background:var(--panel);border-bottom:1px solid var(--line);z-index:5}
+  h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12.5px}
+  .spacer{flex:1}
+  button,select{font:inherit;border:1px solid var(--line);background:var(--panel2);color:var(--fg);
+    border-radius:8px;padding:7px 13px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:disabled{opacity:.6;cursor:progress}
+  main{padding:16px 18px;max-width:1050px;margin:0 auto}
+  .hint{background:var(--accent2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;
+    margin-bottom:16px;color:var(--fg);font-size:13px}
+  .grp{margin:18px 0 8px;color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.7px;font-weight:600}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 15px;display:flex;flex-direction:column;gap:7px}
+  .card.hidden{opacity:.5}
+  .row{display:flex;align-items:center;gap:10px}
+  .ico{font-size:22px;line-height:1;width:26px;text-align:center}
+  .nm{font-weight:600;font-size:14.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .dot.online{background:var(--ok)} .dot.unknown{background:var(--unknown)} .dot.offline{background:var(--off)}
+  .meta{color:var(--dim);font-size:12px;display:flex;flex-wrap:wrap;gap:6px 12px}
+  .tag{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:11.5px;color:var(--dim)}
+  .bound{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+  .chip{background:var(--accent2);border:1px solid var(--line);border-radius:20px;padding:2px 9px;font-size:11.5px;display:inline-flex;align-items:center;gap:6px}
+  .chip b{font-weight:600}
+  .chip .x{cursor:pointer;color:var(--dim);font-weight:700}
+  .chip .x:hover{color:var(--off)}
+  .acts{display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;align-items:center}
+  .acts button,.acts select{padding:4px 10px;font-size:12.5px}
+  .empty{color:var(--dim);padding:40px;text-align:center}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);
+    border:1px solid var(--line);border-radius:10px;padding:9px 16px;opacity:0;transition:opacity .25s;pointer-events:none}
+  .toast.on{opacity:1}
+  a{color:var(--accent)}
+  .pmodal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+  .pmodal.on{display:flex}
+  .pbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;max-width:420px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.4)}
+  .phd{display:flex;align-items:center;gap:10px;font-size:16px;margin-bottom:12px}
+  .phd .px{margin-left:auto;cursor:pointer;color:var(--dim);font-size:18px}
+  .pbox img.qr{display:block;width:220px;height:220px;image-rendering:pixelated;background:#fff;border-radius:10px;padding:8px;margin:6px auto 12px}
+  .pbox .code{font:600 12.5px ui-monospace,Menlo,Consolas,monospace;word-break:break-all;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--dim)}
+</style>
+<script src="/portal-nav.js" defer></script></head>
+<body>
+<header>
+  <span class="ico">🔌</span>
+  <div>
+
+    <div class="sub" id="count">lädt …</div>
+  </div>
+  <div class="spacer"></div>
+  <label class="sub" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="showHidden"> ausgeblendete zeigen</label>
+  <button class="primary" id="scanBtn" onclick="scan()">🔍 Netzwerk scannen</button>
+  <button class="primary" id="pairBtn" onclick="pairStart()">📱 Gerät koppeln</button>
+  <button onclick="load()">↻ Jetzt aktualisieren</button>
+</header>
+<main>
+  <div class="hint">
+    Alles im LAN Sichtbare erscheint hier — laufend aktualisiert (ARP/Neighbor-Tabelle + Cast-Sweep, auch
+    schlafende Streamer). Was eine Session mit Geräten darf, regelt ihre Ausstattung
+    (Sessions → Rechte). Umbenennen/Ausblenden ist Admin.
+  </div>
+  <div id="list"><div class="empty">lädt …</div></div>
+</main>
+<div class="pmodal" id="pmodal"><div class="pbox">
+  <div class="phd"><b>📱 Gerät koppeln</b><span class="px" onclick="pairClose()">✕</span></div>
+  <div id="pbody"><div class="empty">lädt …</div></div>
+</div></div>
+<div class="toast" id="toast"></div>
+<script>
+const ICON = { cast:"📡", "nest-hub":"📺", tv:"📺", speaker:"🔊", printer:"🖨️", hub:"🏠",
+  voice:"🎙️", display:"🖥️", "input-keyboard":"⌨️", "input-mouse":"🖱️", "input-trackball":"🖱️",
+  "media-server":"🗄️", renderer:"📽️", upnp:"📡", host:"💻", cast_default:"🔌" };
+const GROUP = { cast:"Cast & Nest", "nest-hub":"Cast & Nest", tv:"Bildschirme & TV", display:"Bildschirme & TV",
+  renderer:"Bildschirme & TV", speaker:"Audio", voice:"Audio", "media-server":"Medien & Netz", upnp:"Medien & Netz",
+  hub:"Smarthome", printer:"Drucker", "input-keyboard":"Eingabe", "input-mouse":"Eingabe", "input-trackball":"Eingabe",
+  host:"Rechner & Handys" };
+const ORDER = ["Cast & Nest","Bildschirme & TV","Audio","Rechner & Handys","Eingabe","Smarthome","Drucker","Medien & Netz","Sonstige"];
+
+function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("on");
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("on"),2600); }
+async function jget(u){ const r=await fetch(u,{credentials:"same-origin"}); return r.json(); }
+async function jpost(u,b){ const r=await fetch(u,{method:"POST",credentials:"same-origin",
+  headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})}); return r.json(); }
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function rel(ts){ if(!ts) return ""; const s=Math.max(0,Math.floor(Date.now()/1000-ts));
+  if(s<60)return"gerade"; if(s<3600)return Math.floor(s/60)+" min"; if(s<86400)return Math.floor(s/3600)+" h"; return Math.floor(s/86400)+" d"; }
+
+function card(d){
+  const ico = ICON[d.kind] || ICON.cast_default;
+  const st = (d.state==="online")?"online":(d.state==="offline"?"offline":"unknown");
+  const tr = d.transport||{}; const addr = tr.addr||tr.location||"";
+  const c = document.createElement("div"); c.className="card"+(d.hidden?" hidden":"");
+  c.innerHTML =
+    `<div class="row"><span class="ico">${ico}</span>
+       <span class="nm" title="${esc(d.name)}">${esc(d.label||d.name||d.id)}</span>
+       <span class="dot ${st}" title="${st}"></span></div>
+     <div class="meta">
+       <span class="tag">${esc(d.kind)}</span>
+       ${addr?`<span>${esc(addr)}</span>`:""}
+       ${tr.mac?`<span style="opacity:.7">${esc(tr.mac)}</span>`:""}
+       <span class="tag">${esc(d.source||"?")}</span>
+       ${d.last_seen?`<span title="zuletzt gesehen">👁 ${esc(rel(d.last_seen))}</span>`:""}
+     </div>`;
+
+  const acts = document.createElement("div"); acts.className="acts";
+  const bR = document.createElement("button"); bR.textContent="✏️ Umbenennen";
+  bR.addEventListener("click", ()=>rename(d.id, d.label||d.name||""));
+  const bH = document.createElement("button"); bH.textContent = d.hidden?"👁 Einblenden":"🙈 Ausblenden";
+  bH.addEventListener("click", ()=>hide(d.id, !d.hidden));
+  acts.appendChild(bR); acts.appendChild(bH);
+  if(d.source==='paired'){
+    const bU=document.createElement("button"); bU.textContent="🔌 Entkoppeln"; bU.title="Geräteschlüssel widerrufen";
+    bU.addEventListener("click", ()=>unpair(d.id, d.label||d.name||d.id));
+    acts.appendChild(bU);
+  }
+  c.appendChild(acts);
+  return c;
+}
+
+async function load(){
+
+  const ae=document.activeElement;
+  if(ae && document.getElementById("list").contains(ae) && (ae.tagName==="SELECT"||ae.tagName==="INPUT")) return;
+  let r;
+  try{ r = await jget("/api/devices"); }catch(e){ return; }
+  let list = (r&&r.devices)||[];
+  const showHidden = document.getElementById("showHidden").checked;
+  const total = list.length, hiddenN = list.filter(d=>d.hidden).length;
+  if(!showHidden) list = list.filter(d=>!d.hidden);
+  document.getElementById("count").textContent =
+    total+" Geräte"+(hiddenN?` · ${hiddenN} ausgeblendet`:"")+" · laufend aktualisiert";
+  const groups = {};
+  for(const d of list){ const g = GROUP[d.kind]||"Sonstige"; (groups[g]=groups[g]||[]).push(d); }
+  const root = document.getElementById("list"); root.innerHTML="";
+  if(!list.length){ root.innerHTML='<div class="empty">Noch keine Geräte — klick „Netzwerk scannen".</div>'; return; }
+  for(const g of ORDER){
+    if(!groups[g]) continue;
+    const h=document.createElement("div"); h.className="grp"; h.textContent=g+" ("+groups[g].length+")"; root.appendChild(h);
+    const grid=document.createElement("div"); grid.className="grid";
+    groups[g].sort((a,b)=>(a.label||a.name||a.id).localeCompare(b.label||b.name||b.id));
+    for(const d of groups[g]) grid.appendChild(card(d));
+    root.appendChild(grid);
+  }
+}
+async function scan(){
+  const b=document.getElementById("scanBtn"); b.disabled=true; const o=b.textContent; b.textContent="🔍 scanne …";
+  try{ const r=await jpost("/api/devices/scan",{});
+    if(r&&r.ok){ toast("Scan fertig — "+(r.merged||0)+" aktualisiert"); await load(); }
+    else toast("Scan: "+((r&&r.error)||"Fehler")); }
+  catch(e){ toast("Scan fehlgeschlagen"); }
+  finally{ b.disabled=false; b.textContent=o; }
+}
+async function rename(id,cur){
+  const v=prompt("Neuer Name (leer = zurücksetzen):",cur); if(v===null) return;
+  const r=await jpost("/api/devices/label",{id,label:v}); toast(r&&r.ok?"Umbenannt":(r&&r.error)||"Fehler"); load();
+}
+async function hide(id,hidden){
+  const r=await jpost("/api/devices/hide",{id,hidden}); toast(r&&r.ok?(hidden?"Ausgeblendet (reversibel)":"Eingeblendet"):(r&&r.error)||"Fehler"); load();
+}
+let PAIR = null;
+async function pairStart(){
+  const pm=document.getElementById("pmodal"), pb=document.getElementById("pbody");
+  pm.classList.add("on"); pb.innerHTML='<div class="empty">Code wird erzeugt …</div>';
+
+  const scopes=["/api/status","/api/llm","/api/voice","/api/transcript","/api/client-actions","/api/sessions","/api/queue"];
+  let r; try{ r=await jpost("/api/pair/mint",{label:"",scopes,ttl_s:600}); }catch(e){ r=null; }
+  if(!r||!r.ok){ pb.innerHTML='<div style="color:var(--off);padding:8px">Konnte keinen Kopplungscode erzeugen: '+esc((r&&r.error)||"Fehler")+'</div>'; return; }
+  PAIR={pid:r.pid, until:Date.now()+((r.expires_in||600)*1000)};
+  const qr = r.qr ? `<img class="qr" src="${esc(r.qr)}" alt="QR">`
+                  : '<div style="text-align:center;color:var(--dim);padding:8px">QR nicht verfügbar — nutze den Link unten.</div>';
+  pb.innerHTML = qr +
+    '<div style="font-size:13px;color:var(--dim);margin-bottom:8px">Mit dem neuen Gerät scannen (oder Link öffnen). Gültig ~10 min, einmalig.</div>'+
+    `<div class="code">${esc(r.url)}</div>`+
+    '<div style="font-size:12px;color:var(--dim);margin-top:10px">Konto: <b>'+esc(r.principal)+'</b></div>';
+  pairPoll();
+}
+async function pairPoll(){
+  if(!PAIR) return;
+  let r; try{ r=await jget("/api/pair/pending"); }catch(e){ if(PAIR) PAIR._t=setTimeout(pairPoll,3000); return; }
+  if(!PAIR) return;
+  const open = r&&r.ok&&(r.pending||[]).some(p=>p.pid===PAIR.pid);
+  if(!open){
+    const expired = Date.now() > (PAIR.until||0); PAIR=null;
+    document.getElementById("pmodal").classList.remove("on");
+    toast(expired?"Kopplungscode abgelaufen":"Gerät gekoppelt"); load(); return;
+  }
+  PAIR._t=setTimeout(pairPoll, 3000);
+}
+function pairClose(){
+  const pm=document.getElementById("pmodal");
+  if(PAIR&&PAIR._t) clearTimeout(PAIR._t);
+  if(PAIR&&PAIR.pid) jpost("/api/pair/cancel",{pid:PAIR.pid}).catch(()=>{});
+  PAIR=null; pm.classList.remove("on");
+}
+async function unpair(id,name){
+  if(!confirm("Gerät „"+name+"“ entkoppeln? Der Zugangsschlüssel wird sofort widerrufen.")) return;
+
+  let totp="";
+  for(let attempt=0;attempt<4;attempt++){
+    const body={id}; if(totp)body.totp=totp;
+    const r=await jpost("/api/devices/unpair",body);
+    if(r&&r.ok){toast("Entkoppelt — Schlüssel widerrufen");load();return;}
+    if(r&&r.need_2fa_enrollment){alert("🔒 Löschen/Widerruf ist gesperrt.\n\n"+((r&&r.error)||"2FA ist nicht eingerichtet.")+"\n\nRichte zuerst einen zweiten Faktor ein:\n"+((r&&r.enroll_hint)||"Einstellungen → Sicherheit → 2FA"));return;}
+    if(r&&r.need_2fa){totp=(prompt(((r&&r.error)||"2FA-Code erforderlich.")+"\n\n6-stelligen Code aus deiner Authenticator-App eingeben:")||"").trim(); if(!totp){toast("Abgebrochen");return;} continue;}
+    toast((r&&r.error)||"Fehler");return;
+  }
+  toast("2FA fehlgeschlagen — nichts wurde widerrufen");
+}
+document.getElementById("showHidden").addEventListener("change",load);
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# Installiert nach /etc/sudoers.d/pn-einrichtung (0440 root:root). Erlaubt dem Portal (uid 1000),
+# die Einstellungen zu schreiben, die root gehören — NAS-Zugang und Relais-Gegenstelle.
+#
+# Warum das trotz NOPASSWD eng ist: /usr/local/sbin/pn-einrichtung-schreiben ist eine root-eigene
+# Kopie unter FESTEM Pfad (nie die vom Nutzer beschreibbare Datei im Arbeitsbaum). Sie nimmt auf
+# der Befehlszeile nur den BEREICHSNAMEN entgegen, niemals einen Schlüssel und niemals einen Wert;
+# welche Schlüssel ein Bereich setzen darf, steht einkompiliert im Helfer. Jeder Wert wird
+# shell-gequotet, bevor er in eine Datei geht, die ihre Leser mit `.` einlesen.
+#
+# ⛔ Ohne das Quoting wäre diese Zeile eine Einladung: die Leser FÜHREN site.conf/secrets.env aus.
+#
+# SERVICE_USER beim Installieren durch das Eignerkonto der Box (uid 1000) ersetzen.
+#
+# `--stand` fragt nur ab und schreibt nichts. Es gibt vom geheimen Teil ausschliesslich die
+# NAMEN der gesetzten Schluessel heraus, nie deren Wert — damit das Portal „Eingerichtet"
+# messen kann, statt es aus einem Schalter zu erraten.
+Cmnd_Alias PN_EINRICHTUNG = /usr/local/sbin/pn-einrichtung-schreiben nas, \
+                            /usr/local/sbin/pn-einrichtung-schreiben relay, \
+                            /usr/local/sbin/pn-einrichtung-schreiben hochverfuegbarkeit, \
+                            /usr/local/sbin/pn-einrichtung-schreiben --stand nas, \
+                            /usr/local/sbin/pn-einrichtung-schreiben --stand relay, \
+                            /usr/local/sbin/pn-einrichtung-schreiben --stand hochverfuegbarkeit
+SERVICE_USER ALL=(root) NOPASSWD: PN_EINRICHTUNG

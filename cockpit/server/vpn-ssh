@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+
+"""vpn-ssh / vpn-scp — Standard-SSH-Weg dieser Session-Zelle (generisch, getestet).
+
+Aliase/Hosts/Schluessel kommen AUSSCHLIESSLICH aus der pro Session JIT-injizierten
+SSH-Ausstattung (/root/.ssh/config + Schluessel, siehe TRESOR.md) — hier ist NICHTS
+hartkodiert. Kein eigenes paramiko-Snippet mehr noetig.
+
+Benutzung:
+  vpn-ssh --list                     verfuegbare Ziel-Aliase aus der injizierten Config
+  vpn-ssh <alias> ['befehl ...']     Befehl auf dem Ziel ausfuehren (Exit-Code durchgereicht)
+  vpn-ssh <alias>                    interaktive Shell auf dem Ziel
+  vpn-scp <alias>:/pfad lokal        Datei holen
+  vpn-scp lokal <alias>:/pfad        Datei hinschieben
+
+Verhalten:
+  * Existiert ein natives `ssh`/`scp`, wird es benutzt (BatchMode=yes,
+    StrictHostKeyChecking=accept-new, injizierte ~/.ssh/config gilt automatisch).
+  * Sonst paramiko-Fallback: parst die ssh-config selbst (Host/HostName/User/Port/
+    IdentityFile/ProxyJump — EIN Hop; ProxyCommand best-effort) und fuehrt den Befehl
+    aus bzw. oeffnet eine interaktive Shell. Fehlt paramiko, wird einmalig
+    `pip install --user paramiko` ueber den Session-Proxy versucht.
+  * Cluster-Tipp: nicht-interaktives SSH laedt kein Profil — Remote-Kommandos bei
+    Bedarf in `bash -lc '...'` wickeln.
+
+Env:
+  VPN_SSH_PASSPHRASE       Passphrase fuer den Schluessel (Name laut TRESOR.md), falls noetig
+  VPN_SSH_FORCE_PARAMIKO=1 paramiko-Pfad erzwingen (Test/Diagnose)
+"""
+
+import fnmatch
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+CONF = os.path.expanduser("~/.ssh/config")
+
+NO_CONF_MSG = (
+    "vpn-ssh: keine SSH-Ausstattung injiziert (~/.ssh/config fehlt).\n"
+    "Diese Session hat (noch) keine SSH-Ziele. Der Besitzer kann sie im Portal unter\n"
+    "Sessions -> Ausstattung mit ssh-config + Schluessel ausstatten; die Dateien\n"
+    "erscheinen dann unter /root/.ssh/ (siehe TRESOR.md). Danach: vpn-ssh --list\n"
+)
+
+def parse_config(path=CONF):
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    blocks, cur, skip = [], None, False
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^(\S+?)(?:\s+|\s*=\s*)(.*)$", line)
+        if not m:
+            continue
+        key, val = m.group(1).lower(), m.group(2).strip()
+        if key == "host":
+            cur, skip = {}, False
+            blocks.append((val.split(), cur))
+        elif key == "match":
+            cur, skip = None, True
+        elif cur is not None and not skip:
+            if key == "identityfile":
+                cur.setdefault("identityfile", []).append(val.strip('"'))
+            elif key not in cur:
+                cur[key] = val.strip('"')
+    return blocks
+
+def lookup(blocks, alias):
+
+    opts = {}
+    for pats, o in blocks:
+        neg = [p[1:] for p in pats if p.startswith("!")]
+        pos = [p for p in pats if not p.startswith("!")]
+        if any(fnmatch.fnmatchcase(alias, p) for p in neg):
+            continue
+        if not any(fnmatch.fnmatchcase(alias, p) for p in pos):
+            continue
+        for k, v in o.items():
+            if k == "identityfile":
+                opts.setdefault("identityfile", []).extend(v)
+            elif k not in opts:
+                opts[k] = v
+    hn = opts.get("hostname", alias)
+    opts["hostname"] = hn.replace("%%", "\x00").replace("%h", alias).replace("\x00", "%")
+    return opts
+
+def concrete_aliases(blocks):
+    seen, out = set(), []
+    for pats, _o in blocks:
+        for p in pats:
+            if p.startswith("!") or any(c in p for c in "*?"):
+                continue
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
+
+def cmd_list(blocks):
+    aliases = concrete_aliases(blocks)
+    if not aliases:
+        sys.stderr.write("vpn-ssh: die injizierte ~/.ssh/config enthaelt keine konkreten "
+                         "Host-Aliase.\n")
+        return 2
+    rows = []
+    for a in aliases:
+        o = lookup(blocks, a)
+        tgt = o["hostname"]
+        if o.get("user"):
+            tgt = "%s@%s" % (o["user"], tgt)
+        if o.get("port"):
+            tgt += ":" + o["port"]
+        via = o.get("proxyjump") or o.get("proxycommand", "")
+        rows.append((a, tgt, ("via " + via) if via else ""))
+    w0 = max(len(r[0]) for r in rows)
+    w1 = max(len(r[1]) for r in rows)
+    print("Injizierte SSH-Ziele (aus ~/.ssh/config):")
+    for r in rows:
+        print("  %-*s  %-*s  %s" % (w0, r[0], w1, r[1], r[2]))
+    print("\nBenutzung: vpn-ssh <alias> ['befehl ...']   |   vpn-scp <alias>:/pfad lokal")
+    return 0
+
+def _ssh_opts():
+
+    return ["-F", CONF, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=20"]
+
+def native_ssh(alias, cmd):
+    argv = ["ssh"] + _ssh_opts() + ["--", alias] + cmd
+    os.execvp("ssh", argv)
+
+def native_scp(args):
+    argv = ["scp"] + _ssh_opts() + ["--"] + args
+    os.execvp("scp", argv)
+
+def ensure_paramiko():
+    try:
+        import paramiko
+        return paramiko
+    except ImportError:
+        pass
+    sys.stderr.write("vpn-ssh: kein natives ssh und paramiko fehlt — versuche einmalige "
+                     "Installation ueber den Session-Proxy ...\n")
+    attempts = ([sys.executable, "-m", "pip", "install", "--user", "-q", "paramiko"],
+                [sys.executable, "-m", "ensurepip", "--user"],
+                [sys.executable, "-m", "pip", "install", "--user", "-q", "paramiko"])
+    for cmd in attempts:
+        try:
+            subprocess.run(cmd, timeout=420,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        try:
+            import importlib
+            importlib.invalidate_caches()
+            import paramiko
+            return paramiko
+        except ImportError:
+            continue
+    sys.stderr.write("vpn-ssh: paramiko liess sich nicht installieren (Netz/Proxy pruefen: "
+                     "haengt oft am VPN-Tunnel, siehe KNOWLEDGE.md).\n")
+    return None
+
+def _parse_jumpspec(spec):
+
+    m = re.match(r"^(?:([^@]+)@)?(\[[^\]]+\]|[^:@]+)(?::(\d+))?$", spec.strip())
+    if not m:
+        return None, spec.strip(), None
+    return m.group(1), m.group(2).strip("[]"), m.group(3)
+
+def pk_connect(paramiko, blocks, alias, depth=0, user_over=None, port_over=None):
+
+    o = lookup(blocks, alias)
+    host = o["hostname"]
+    port = int(port_over or o.get("port") or 22)
+    user = user_over or o.get("user")
+    keys = [os.path.expanduser(k) for k in o.get("identityfile", [])]
+    keys = [k for k in keys if os.path.exists(k)]
+    sock = None
+    pj = (o.get("proxyjump") or "").split(",")[0].strip()
+    if pj and pj.lower() != "none" and depth == 0:
+        ju, jh, jp = _parse_jumpspec(pj)
+        jump, _jo = pk_connect(paramiko, blocks, jh, depth=1, user_over=ju, port_over=jp)
+        sock = jump.get_transport().open_channel("direct-tcpip", (host, port), ("127.0.0.1", 0))
+    elif o.get("proxycommand") and depth == 0:
+        pc = o["proxycommand"].replace("%h", host).replace("%p", str(port))
+        sock = paramiko.ProxyCommand(pc)
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kw = dict(hostname=host, port=port, username=user, timeout=25,
+              allow_agent=True, look_for_keys=True, sock=sock,
+              passphrase=os.environ.get("VPN_SSH_PASSPHRASE") or None)
+    if keys:
+        kw["key_filename"] = keys
+    c.connect(**kw)
+    return c, o
+
+def pk_exec(client, cmd_words):
+
+    chan = client.get_transport().open_session()
+    chan.exec_command(" ".join(cmd_words))
+    chan.settimeout(0.0)
+    while True:
+        busy = False
+        if chan.recv_ready():
+            sys.stdout.buffer.write(chan.recv(65536)); sys.stdout.flush(); busy = True
+        if chan.recv_stderr_ready():
+            sys.stderr.buffer.write(chan.recv_stderr(65536)); sys.stderr.flush(); busy = True
+        if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
+            break
+        if not busy:
+            time.sleep(0.03)
+    for _ in range(2):
+        if chan.recv_ready():
+            sys.stdout.buffer.write(chan.recv(65536))
+        if chan.recv_stderr_ready():
+            sys.stderr.buffer.write(chan.recv_stderr(65536))
+    sys.stdout.flush(); sys.stderr.flush()
+    return chan.recv_exit_status()
+
+def pk_shell(client):
+
+    import select
+    cols, rows = shutil.get_terminal_size((80, 24))
+    chan = client.invoke_shell(term=os.environ.get("TERM", "xterm"), width=cols, height=rows)
+    fd = sys.stdin.fileno()
+    tty_mode = sys.stdin.isatty()
+    old = None
+    if tty_mode:
+        import termios, tty
+        old = termios.tcgetattr(fd)
+        tty.setraw(fd)
+    try:
+        chan.settimeout(0.0)
+        while True:
+            r, _w, _x = select.select([chan, sys.stdin], [], [], 0.1)
+            if chan in r:
+                data = chan.recv(65536)
+                if not data:
+                    break
+                sys.stdout.buffer.write(data); sys.stdout.flush()
+            if sys.stdin in r:
+                data = os.read(fd, 4096)
+                if not data:
+                    chan.shutdown_write()
+                else:
+                    chan.sendall(data)
+            if chan.exit_status_ready() and not chan.recv_ready():
+                break
+    finally:
+        if old is not None:
+            import termios
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return chan.recv_exit_status() if chan.exit_status_ready() else 0
+
+def pk_scp(paramiko, blocks, args):
+
+    if len(args) != 2:
+        sys.stderr.write("vpn-scp: genau 2 Argumente (Quelle Ziel); -r nur mit nativem scp.\n")
+        return 2
+    def is_remote(a):
+        return ":" in a and "/" not in a.split(":", 1)[0]
+    src, dst = args
+    if is_remote(src) == is_remote(dst):
+        sys.stderr.write("vpn-scp: genau EINE Seite muss remote sein (alias:/pfad).\n")
+        return 2
+    remote, get = (src, True) if is_remote(src) else (dst, False)
+    alias, rpath = remote.split(":", 1)
+    client, _o = pk_connect(paramiko, blocks, alias)
+    try:
+        sftp = client.open_sftp()
+        if get:
+            local = dst
+            if os.path.isdir(local):
+                local = os.path.join(local, os.path.basename(rpath))
+            sftp.get(rpath, local)
+        else:
+            if not rpath:
+                rpath = os.path.basename(src)
+            sftp.put(src, rpath)
+        return 0
+    finally:
+        client.close()
+
+def main(argv):
+    prog = "vpn-scp" if os.path.basename(argv[0] or "").startswith("vpn-scp") else "vpn-ssh"
+    args = argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if args else 2
+    force_pk = os.environ.get("VPN_SSH_FORCE_PARAMIKO") == "1"
+    blocks = parse_config()
+    if blocks is None:
+        sys.stderr.write(NO_CONF_MSG)
+        return 2
+    if args[0] == "--list":
+        return cmd_list(blocks)
+    if prog == "vpn-scp":
+        if shutil.which("scp") and not force_pk:
+            native_scp(args)
+        paramiko = ensure_paramiko()
+        if paramiko is None:
+            return 127
+        try:
+            return pk_scp(paramiko, blocks, args)
+        except Exception as e:
+            sys.stderr.write("vpn-scp: %s: %s\n" % (type(e).__name__, e))
+            return 255
+    alias, cmd = args[0], list(args[1:])
+    probe = lookup(blocks, alias)
+    matched = len(probe) > 1 or probe["hostname"] != alias
+    if not matched and "@" not in alias:
+        sys.stderr.write("vpn-ssh: Hinweis: '%s' steht nicht in der injizierten Config "
+                         "(vpn-ssh --list) — versuche Direktverbindung.\n" % alias)
+    if shutil.which("ssh") and not force_pk:
+        native_ssh(alias, cmd)
+    paramiko = ensure_paramiko()
+    if paramiko is None:
+        return 127
+    user_over = None
+    if "@" in alias:
+        user_over, alias = alias.split("@", 1)
+    try:
+        client, _o = pk_connect(paramiko, blocks, alias, user_over=user_over)
+    except Exception as e:
+        sys.stderr.write("vpn-ssh: Verbindung zu '%s' fehlgeschlagen: %s: %s\n"
+                         "(Tunnel unten? fail-closed = Timeouts; siehe KNOWLEDGE.md)\n"
+                         % (alias, type(e).__name__, e))
+        return 255
+    try:
+        return pk_exec(client, cmd) if cmd else pk_shell(client)
+    finally:
+        client.close()
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

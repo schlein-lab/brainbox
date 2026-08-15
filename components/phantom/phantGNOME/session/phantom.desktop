@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=phantom (phantGNOME)
+Comment=phantGNOME LLM-OS session — bare GNOME 46 with the phantom Spine
+Exec=env GNOME_SHELL_SESSION_MODE=phantom gnome-session --session=phantom
+Type=Application
+DesktopNames=GNOME
+X-GDM-SessionRegisters=true

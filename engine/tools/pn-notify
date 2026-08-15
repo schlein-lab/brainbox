@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+
+import os, sys, json, socket, time, argparse
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import ipc, notify, notifycfg, chsecrets
+
+WACHRUF_S = 60.0
+
+def cred_for(channel_name):
+
+    return chsecrets.read_channel_cred(channel_name)
+
+def build_broker():
+
+    cfg = notifycfg.load()
+    return notify.build_from_config(cfg, cred_for=cred_for, enable_mock=True)
+
+def own_principal():
+
+    try:
+        r = ipc.send_request({"verb": "via-inflight"})
+    except Exception:
+        return None
+    return r.get("principal") if isinstance(r, dict) and r.get("ok") else None
+
+def entdeckte_topics():
+
+    try:
+        import sqlite3
+        from pnlib import DATA_DIR
+        pfad = os.path.join(DATA_DIR, "queue.db")
+        if not os.path.exists(pfad):
+            return []
+        con = sqlite3.connect("file:%s?mode=ro" % pfad, uri=True, timeout=5)
+        try:
+            zeilen = con.execute(
+                "SELECT DISTINCT topic FROM job_events WHERE topic LIKE 'user/%'").fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        sys.stderr.write("pn-notify: Empfaengerliste nicht aus dem Bus lesbar (%s) — "
+                         "es bleibt beim eigenen Principal\n" % e.__class__.__name__)
+        return []
+    return sorted(t for (t,) in zeilen
+                  if t and "*" not in t and "?" not in t and t != "user/__probe__")
+
+def resolve_topics(explicit=None, cfg=None):
+
+    if explicit:
+        topics = list(explicit)
+    else:
+        cfg = cfg if cfg is not None else notifycfg.load()
+        topics = list((cfg.get("bus") or {}).get("topics") or [])
+    if not topics:
+        topics = entdeckte_topics()
+    if not topics:
+        who = own_principal()
+        if not who:
+            raise SystemExit("pn-notify: cannot resolve my own principal from pnd — pass --topics "
+                             "user/<principal> explicitly rather than subscribing to nothing")
+        topics = [f"user/{who}"]
+    bad = [t for t in topics if "*" in t or "?" in t]
+    if bad:
+        raise SystemExit(f"pn-notify: pnd matches bus topics EXACTLY; the wildcard topic(s) {bad} "
+                         f"would match no event and deliver nothing. Name them explicitly, "
+                         f"e.g. --topics user/admin")
+    return topics
+
+def cursor_pfad():
+    return os.path.join(notifycfg.NOTIFY_DIR, "cursor")
+
+def cursor_lesen():
+
+    try:
+        with open(cursor_pfad()) as f:
+            n = int((f.read() or "0").strip())
+        return n if n > 0 else None
+    except (OSError, ValueError):
+        return None
+
+def cursor_schreiben(n):
+
+    try:
+        os.makedirs(notifycfg.NOTIFY_DIR, exist_ok=True)
+        tmp = cursor_pfad() + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("%d\n" % int(n))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, cursor_pfad())
+    except OSError as e:
+        sys.stderr.write("pn-notify: Zeiger nicht schreibbar (%s) — nach einem Neustart "
+                         "wuerde von vorne zugestellt\n" % e.__class__.__name__)
+
+def bus_kopf():
+
+    try:
+        import sqlite3
+        from pnlib import DATA_DIR
+        pfad = os.path.join(DATA_DIR, "queue.db")
+        if not os.path.exists(pfad):
+            return 0
+        con = sqlite3.connect("file:%s?mode=ro" % pfad, uri=True, timeout=5)
+        try:
+            (n,) = con.execute("SELECT COALESCE(MAX(id), 0) FROM job_events").fetchone()
+        finally:
+            con.close()
+        return int(n or 0)
+    except Exception:
+        return 0
+
+def startzeiger(ausdruecklich=None):
+
+    if ausdruecklich is not None:
+        return int(ausdruecklich)
+    gemerkt = cursor_lesen()
+    if gemerkt is not None:
+        return gemerkt
+    kopf = bus_kopf()
+    cursor_schreiben(kopf)
+    sys.stderr.write("pn-notify: erster Lauf — Start am Kopf des Busses (Ereignis %d). Der "
+                     "Rueckstand davor wird NICHT nachgeliefert; er waere kein Melden mehr, "
+                     "sondern ein Archiv-Auszug.\n" % kopf)
+    return kopf
+
+def subscribe_stream(broker, topics=None, after_id=0):
+
+    fest = list(topics) if topics else None
+    aktuell = None
+    sock = ipc.sock_path()
+    cursor = after_id
+    while True:
+
+        topics = resolve_topics(fest)
+        if topics != aktuell:
+            sys.stderr.write(f"pn-notify: topics={topics}\n")
+            aktuell = topics
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect(sock)
+        except OSError as e:
+            sys.stderr.write(f"pn-notify: pnd socket unavailable ({e}); retrying\n")
+            time.sleep(2.0)
+            continue
+
+        s.settimeout(WACHRUF_S)
+        try:
+            req = {"verb": "subscribe", "topics": topics, "after_id": cursor}
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            while True:
+                try:
+                    ch = s.recv(65536)
+                except socket.timeout:
+                    if resolve_topics(fest) != aktuell:
+                        break
+                    continue
+                if not ch:
+                    break
+                buf += ch
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    msg = json.loads(line.decode())
+                    if msg.get("type") == "event":
+                        ev = msg["event"]
+                        res = broker.handle_event(ev)
+                        if ev.get("id"):
+                            if ev["id"] > cursor:
+                                cursor = ev["id"]
+                                cursor_schreiben(cursor)
+                        if not res.get("ok") and not res.get("skipped"):
+                            sys.stderr.write(f"pn-notify: delivery issue {res}\n")
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            sys.stderr.write(f"pn-notify: stream dropped ({e}); reconnecting from {cursor}\n")
+        finally:
+            s.close()
+        time.sleep(1.0)
+
+def self_test():
+
+    mock = notify.MockAdapter("mock")
+    broker = notify.NotifyBroker({"mock": mock, "native": notify.NativeAdapter()})
+    ev = {"id": 1, "job_id": 42, "kind": "notify", "topic": "user/alice",
+          "data": json.dumps({"job_id": 42, "task_type": "echo.test", "state": "done",
+                              "principal": "alice", "reply_to": "mock:alice-device",
+                              "leak": "sk-ant-AAAABBBBCCCCDDDDEEEE"})}
+    r1 = broker.handle_event(ev)
+    r2 = broker.handle_event(ev)
+    sent = mock.sent
+    ok = (r1["ok"] and r2.get("deduped") and len(sent) == 1
+          and "sk-ant-AAAA" not in sent[0]["content"]
+          and sent[0]["address"] == "alice-device")
+    print(json.dumps({"self_test": "pass" if ok else "FAIL",
+                      "delivered": len(sent), "content": sent[0]["content"] if sent else None,
+                      "deduped_second": r2.get("deduped")}, indent=2))
+    return 0 if ok else 1
+
+def postfach_dir(cfg=None):
+    cfg = cfg if cfg is not None else notifycfg.load()
+    return ((cfg.get("adapters") or {}).get("file") or {}).get("dir") or notifycfg.POSTFACH_DIR
+
+def show_postfach(address, limit):
+
+    d = postfach_dir()
+    items = notify.read_postfach(d, address, limit=limit)
+    box = os.path.join(d, notify.FileAdapter(d).mailbox_name(address) + ".jsonl")
+    if not items:
+        print(f"(Postfach {box} ist leer)")
+        return 0
+    for it in items:
+
+        wann = it.get("ereignis_ts") or it.get("ts") or 0
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(wann))
+        nachlauf = ""
+        if it.get("ereignis_ts") and it.get("ts") and (it["ts"] - it["ereignis_ts"]) > 60:
+            nachlauf = "  (zugestellt %s)" % time.strftime("%H:%M:%S", time.localtime(it["ts"]))
+        print(f"{ts}  [{it.get('state') or it.get('kind')}]  {it.get('text')}{nachlauf}")
+    print(f"\n-- {len(items)} Meldung(en) aus {box}", file=sys.stderr)
+    return 0
+
+def probe(address, state):
+
+    broker = build_broker()
+    eid = int(time.time() * 1000) % 2_000_000_000
+    payload = {"job_id": 0, "task_type": "pn-notify.probe", "state": state,
+               "principal": address, "remaining_s": 358, "walltime_s": 1800,
+               "extendable": True, "probe": True,
+               "leak": "sk-ant-PROBE0000111122223333"}
+    ev = {"id": eid, "job_id": 0, "kind": "notify", "topic": f"user/{address}",
+          "data": json.dumps(payload)}
+    res = broker.handle_event(ev)
+    print(json.dumps({"probe": res, "postfach": postfach_dir(),
+                      "adapters": sorted(broker.adapters),
+                      "fallback_adapter": broker.default_adapter}, indent=2, default=str))
+    return 0 if res.get("ok") else 1
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-notify")
+    ap.add_argument("--once", action="store_true", help="drain the current backlog once and exit")
+    ap.add_argument("--self-test", action="store_true", help="in-process mock round-trip")
+    ap.add_argument("--after", type=int, default=None,
+                    help="start cursor (last_event_id). Ohne Angabe: der haltbare Zeiger aus "
+                         "<DATA>/notify/cursor, beim allerersten Lauf der Kopf des Busses.")
+    ap.add_argument("--route", nargs=2, metavar=("PRINCIPAL", "KANAL:ADRESSE"),
+                    help="Route je Principal setzen: wohin dessen Meldungen gehen, wenn der Job "
+                         "kein eigenes reply_to traegt (z.B. owner telegram:12345). '-' loescht.")
+    ap.add_argument("--setcred", metavar="CHANNEL",
+                    help="seal a per-channel credential (token/password) read from stdin")
+    ap.add_argument("--status", action="store_true",
+                    help="print the notify config + which channels have a sealed credential")
+    ap.add_argument("--postfach", metavar="PRINCIPAL", nargs="?", const="admin",
+                    help="print a principal's delivered notifications from the file channel")
+    ap.add_argument("--probe", metavar="PRINCIPAL", nargs="?", const="admin",
+                    help="deliver ONE synthetic notification through the REAL configured broker")
+    ap.add_argument("--probe-state", default="walltime-warn",
+                    help="the notify state the --probe carries (default walltime-warn)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="--postfach: how many lines (default 20); --once: replay page size "
+                         "(default 500)")
+    ap.add_argument("--topics", nargs="+", metavar="TOPIC",
+                    help="bus topics to subscribe/replay (default: the caller's user/<principal>; "
+                         "pnd matches EXACTLY, a wildcard is refused)")
+    args = ap.parse_args()
+    if args.status:
+        cfg = notifycfg.load()
+        d = postfach_dir(cfg)
+        try:
+            boxes = sorted(f for f in os.listdir(d) if f.endswith(".jsonl"))
+        except OSError:
+            boxes = []
+        print(json.dumps({"config_path": notifycfg.CONFIG_PATH,
+                          "routes": (cfg.get("routes") or {}),
+                          "config_exists": os.path.exists(notifycfg.CONFIG_PATH),
+                          "config": cfg,
+                          "postfach_dir": d,
+                          "postfach_mailboxes": boxes,
+                          "channel_creds": chsecrets.status()}, indent=2))
+        return 0
+    if args.route:
+        wer, wohin = args.route
+        cfg = notifycfg.load()
+        routen = dict(cfg.get("routes") or {})
+        if wohin == "-":
+            entfernt = routen.pop(wer, None)
+            cfg["routes"] = routen
+            notifycfg.save(cfg)
+            print(json.dumps({"ok": True, "principal": wer,
+                              "geloescht": bool(entfernt), "routes": routen}, indent=2))
+            return 0
+        if ":" not in wohin:
+            raise SystemExit("pn-notify: Route braucht die Form KANAL:ADRESSE (z.B. file:owner, "
+                             "telegram:<chat>) — oder '-' zum Loeschen")
+        kanal = wohin.partition(":")[0]
+        bekannt = ("file", "native", "telegram", "webhook", "mock")
+        if kanal not in bekannt:
+            raise SystemExit("pn-notify: unbekannter Kanal %r (kenne: %s)" % (kanal, ", ".join(bekannt)))
+        routen[wer] = wohin
+        cfg["routes"] = routen
+        notifycfg.save(cfg)
+        print(json.dumps({"ok": True, "principal": wer, "route": wohin}, indent=2))
+        return 0
+    if args.postfach:
+        return show_postfach(args.postfach, args.limit or 20)
+    if args.probe:
+        return probe(args.probe, args.probe_state)
+    if args.setcred:
+
+        val = sys.stdin.readline().rstrip("\n")
+        receipt = chsecrets.write_channel_cred(args.setcred, val)
+        val = "x" * len(val)
+        print(json.dumps({"ok": True, "sealed": receipt}, indent=2))
+        return 0
+    if args.self_test:
+        return self_test()
+    broker = build_broker()
+    topics = resolve_topics(args.topics)
+    ab = startzeiger(args.after)
+    if args.once:
+
+        r = ipc.send_request({"verb": "replay", "topics": topics, "after_id": ab,
+                              "limit": args.limit or 500})
+        evs = r.get("events", [])
+        out = broker.run_feed(evs)
+        delivered = sum(1 for o in out if o.get("ok") and not o.get("skipped"))
+
+        sys.stderr.write(
+            f"pn-notify --once: topics={topics} after={ab} events={len(evs)} "
+            f"delivered={delivered} deduped={broker.deduped} rate_limited={broker.dropped_rate} "
+            f"retryable={broker.retried} dead_lettered={broker.dead_lettered} "
+            f"cursor={r.get('cursor')}\n")
+        if r.get("cursor"):
+            cursor_schreiben(r["cursor"])
+        return 0
+    sys.stderr.write("pn-notify: subscribing to the pnd bus (notify/partial/approval-request)\n")
+
+    subscribe_stream(broker, topics=args.topics, after_id=ab)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

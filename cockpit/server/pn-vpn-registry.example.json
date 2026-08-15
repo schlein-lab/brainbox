@@ -1,0 +1,16 @@
+[
+  {
+    "id": "beispiel-cluster",
+    "name": "Beispiel — VPN einer Hochschule oder Firma",
+    "purpose": "Beispiel-Eintrag. Kopiere die Datei, trage deine eigenen Werte ein und entferne diesen Eintrag.",
+    "gateway": "vpn.example.org",
+    "user": "BENUTZERNAME",
+    "type": "cisco-anyconnect",
+    "backend": "netns",
+    "netns": "beispiel",
+    "operator_gated": true,
+    "status_cmd": "/usr/local/bin/vpn-status --json",
+    "shared": true,
+    "_shared_doc": "shared:true = EIN geteilter Account-Tunnel pro (Benutzer, VPN) im netns pnv-<id>-<uid>-acct; ALLE Sessions des Benutzers routen durch diesen einen Tunnel (2FA nur einmal), refcount-gezaehlt. Noetig fuer Gateways, die nur EINE Sitzung pro Kennung erlauben (Cisco SAML). Weglassen/false = klassischer Tunnel pro Session. Alternativ per-Umgebung erzwingbar: PN_VPN_SHARED=1."
+  }
+]

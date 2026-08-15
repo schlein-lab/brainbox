@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Einstellungen — Brainarbeit</title>
+<style>
+  :root{
+    --bg:#0e0e18; --panel:#181826; --panel2:#1f1f31; --line:#2a2a44; --line2:#34345a;
+    --ink:#ececff; --muted:#9a9ac0; --accent:#6b7cff; --accent-ink:#0b0b14;
+    --ok:#3ecf8e; --warn:#e6a742; --bad:#ff6b6b; --radius:14px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f3f3f8; --panel:#ffffff; --panel2:#f6f6fb; --line:#e2e2ee; --line2:#d3d3e6;
+           --ink:#191926; --muted:#5c5c78; --accent:#5461e6; --accent-ink:#ffffff; }
+  }
+  :root[data-theme="dark"]{ --bg:#0e0e18; --panel:#181826; --panel2:#1f1f31; --line:#2a2a44; --line2:#34345a;
+           --ink:#ececff; --muted:#9a9ac0; --accent:#6b7cff; --accent-ink:#0b0b14; }
+  :root[data-theme="light"]{ --bg:#f3f3f8; --panel:#ffffff; --panel2:#f6f6fb; --line:#e2e2ee; --line2:#d3d3e6;
+           --ink:#191926; --muted:#5c5c78; --accent:#5461e6; --accent-ink:#ffffff; }
+  *{ box-sizing:border-box }
+  body{ margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased }
+  .wrap{ max-width:840px; margin:0 auto; padding:26px 18px 80px }
+  header.top{ display:flex; align-items:center; gap:12px; margin:6px 0 22px }
+  header.top h1{ font-size:1.45rem; font-weight:680; margin:0; letter-spacing:-.01em }
+  header.top .sub{ color:var(--muted); font-size:.88rem }
+  .home{ margin-left:auto; color:var(--muted); text-decoration:none; font-size:.9rem;
+    border:1px solid var(--line); padding:7px 12px; border-radius:10px }
+  .home:hover{ border-color:var(--line2); color:var(--ink) }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 18px 14px; margin:0 0 18px }
+  .card > h2{ font-size:.78rem; text-transform:uppercase; letter-spacing:.09em; color:var(--muted);
+    margin:0 0 4px; font-weight:640 }
+  .card > .lead{ color:var(--muted); font-size:.9rem; margin:0 0 14px }
+  .row{ display:flex; align-items:center; gap:12px; padding:11px 0; border-top:1px solid var(--line) }
+  .row:first-of-type{ border-top:0 }
+  .row .grow{ flex:1; min-width:0 }
+  .row .name{ font-weight:560 }
+  .row .meta{ color:var(--muted); font-size:.83rem; margin-top:1px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .pill{ display:inline-block; font-size:.72rem; font-weight:640; padding:2px 8px; border-radius:999px;
+    border:1px solid var(--line2); color:var(--muted); vertical-align:middle }
+  .pill.on{ color:var(--ok); border-color:color-mix(in srgb,var(--ok) 45%,transparent) }
+  .pill.off{ color:var(--muted) }
+  .pill.tnum{ color:var(--accent); border-color:color-mix(in srgb,var(--accent) 50%,transparent);
+    font-variant-numeric:tabular-nums }
+  input,select{ background:var(--panel2); color:var(--ink); border:1px solid var(--line2);
+    border-radius:9px; padding:8px 10px; font:inherit; font-size:.9rem; max-width:100% }
+  input:focus,select:focus{ outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent); outline-offset:1px }
+  input.rename{ width:190px }
+  button{ background:var(--accent); color:var(--accent-ink); border:0; border-radius:9px;
+    padding:8px 14px; font:inherit; font-weight:640; font-size:.88rem; cursor:pointer }
+  button.ghost{ background:transparent; color:var(--ink); border:1px solid var(--line2) }
+  button:disabled{ opacity:.5; cursor:default }
+  button:hover:not(:disabled){ filter:brightness(1.06) }
+  .rowform{ display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  .note{ font-size:.82rem; color:var(--muted); margin-top:10px }
+  .banner{ padding:10px 12px; border-radius:10px; font-size:.86rem; margin:0 0 12px;
+    border:1px solid var(--line2); background:var(--panel2) }
+  .banner.warn{ color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent) }
+  .banner.ok{ color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,transparent) }
+  .hidden{ display:none }
+  .toast{ position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+    background:var(--ink); color:var(--bg); padding:9px 16px; border-radius:10px; font-size:.88rem;
+    box-shadow:0 8px 30px rgba(0,0,0,.35); opacity:0; transition:opacity .2s; pointer-events:none }
+  .toast.show{ opacity:1 }
+  @media (max-width:560px){ .row{ flex-wrap:wrap } input.rename{ width:100% } }
+</style>
+<script src="/portal-nav.js" defer></script></head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>⚙️ Einstellungen</h1>
+    <a class="home" href="/">← Portal</a>
+  </header>
+
+  <section class="card" id="voiceCard">
+    <h2>🎙 Sprache — mit welcher Session verbinden</h2>
+    <p class="lead">Alles, was du sprichst, geht an die hier gewählte Session. Standard: eine frische
+      Tages-Session. Du kannst die Sprache auch fest an ein laufendes Projekt hängen.</p>
+    <div class="row">
+      <div class="grow">
+        <div class="name">Aktive Voice-Session</div>
+        <div class="meta" id="voiceEff">…</div>
+      </div>
+      <span class="pill" id="voiceMode">…</span>
+    </div>
+    <div class="row">
+      <div class="grow rowform">
+        <select id="voiceSel"><option>lädt…</option></select>
+        <button id="voiceBind">Verbinden</button>
+        <button class="ghost" id="voiceDaily" title="Zurück auf die tägliche Standard-Session">Standard</button>
+      </div>
+    </div>
+    <div class="row">
+      <div class="grow rowform">
+        <input id="voiceNew" class="rename" placeholder="neue Session, z. B. projekt-steuer">
+        <button class="ghost" id="voiceNewBtn">Neu erstellen &amp; verbinden</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="termCard">
+    <h2>🖥 Terminals — Anzeigen &amp; Fernseher benennen</h2>
+    <p class="lead">Jede Anzeige hat eine feste Nummer (kleb ein Schild dran). Du kannst ihr einen
+      eigenen Namen geben — die Nummer bleibt.</p>
+    <div id="termList"><div class="row"><div class="grow meta">lädt…</div></div></div>
+  </section>
+
+  
+  <section class="card hidden" id="mediaCard">
+    <h2>📡 Medienserver — die Box im Heimnetz sichtbar machen</h2>
+    <p class="lead">Eingeschaltet erscheint die Box bei allen Geräten im Heimnetz als Netzlaufwerk
+      (Windows-Explorer, macOS Finder, Datei-Manager) und als Medienquelle für Fernseher (DLNA).
+      Geteilt wird der Ordner „public“ — nur für angemeldete Freigabe-Mitglieder, nie anonym;
+      Session-Freigaben bleiben zusätzlich einzeln passwortgeschützt. Ausgeschaltet ist die Box im
+      Netz <b>nicht</b> als Medienserver sichtbar und die Datei-Ports sind zu.</p>
+    <div class="row">
+      <span class="pill off" id="mediaPill">aus</span>
+      <div class="grow"><div class="name">Medienserver (SMB + DLNA)</div>
+        <div class="meta" id="mediaMeta">lädt…</div></div>
+      <div class="rowform"><button class="ghost" id="mediaBtn" disabled>…</button></div>
+    </div>
+    <p class="note">Wirkt sofort, in beide Richtungen. Beim Ausschalten bleiben alle Freigaben und
+      Passwörter erhalten — nach dem Einschalten ist alles wieder da. Dieselbe Entscheidung wie im
+      Einrichtungs-Assistenten, nur jederzeit umkehrbar.</p>
+  </section>
+
+  
+  <section class="card hidden" id="featCard">
+    <h2>⚙️ Funktionen — Entscheidungen aus der Einrichtung ändern</h2>
+    <p class="lead">Dieselben Schalter wie im Einrichtungs-Assistenten: keine Entscheidung von damals
+      ist endgültig. Der Medienserver (oben) wirkt sofort; die Schalter hier übernimmt die Box beim
+      nächsten Neustart.</p>
+    <div id="featList"><div class="row"><div class="grow meta">lädt…</div></div></div>
+    <p class="note">NAS-Einbindung und Hochverfügbarkeit brauchen Zugangsdaten und laufen deshalb
+      weiter über den Assistenten: an der Konsole <b>sudo brainbox-setup --tty --force</b>.</p>
+  </section>
+
+  
+  <section class="card hidden" id="rightsCard">
+    <h2>🛡 Nutzerrechte — was darf welcher Nutzer</h2>
+    <p class="lead">Du setzt pro Nutzer eine Obergrenze (Floor). Sie kann Rechte nur <b>einschränken</b>,
+      nie erweitern. Änderungen greifen sofort in laufenden Sessions.</p>
+    <div id="rightsList"><div class="row"><div class="grow meta">lädt…</div></div></div>
+    <p class="note">Vorlagen: <b>Im Haus</b> Alltagsgeräte und lokale Anzeige ·
+      <b>Im Haus, erweitert</b> zusätzlich Bildschirm-Steuerung und alle freigegebenen Geräte ·
+      <b>Fernzugriff</b> von außerhalb, mit Internet, keine Geräte im Haus ·
+      <b>Nur Assistenz</b> darf nur denken und antworten · <em>(leer = keine Obergrenze)</em>.</p>
+  </section>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var J = function(url,opt){ return fetch(url, Object.assign({credentials:"same-origin"}, opt||{}))
+    .then(function(r){ return r.status===403 ? {ok:false,_forbidden:true} : r.json().catch(function(){return {ok:false}}); })
+    .catch(function(){ return {ok:false,_neterr:true}; }); };
+  var POST = function(url,body){ return J(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}); };
+  var $ = function(id){ return document.getElementById(id); };
+  var esc = function(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c];}); };
+  var tN;
+  var toast = function(m){ var t=$("toast"); t.textContent=m; t.classList.add("show"); clearTimeout(tN); tN=setTimeout(function(){t.classList.remove("show");},1900); };
+
+  function loadVoice(){
+    J("/api/voice/route").then(function(d){
+      if(!d || !d.ok) return;
+      $("voiceEff").textContent = d.effective + (d.effective===d.daily ? "  (Tages-Session)" : "");
+      var routed = d.session && d.session===d.effective;
+      var m=$("voiceMode"); m.textContent = routed ? "fest verbunden" : "Standard";
+      m.className = "pill " + (routed ? "on" : "off");
+      var sel=$("voiceSel"); sel.innerHTML="";
+      (d.options||[]).forEach(function(o){
+        var op=document.createElement("option"); op.value=o.session;
+        op.textContent=o.label===o.session?o.session:(o.label+" ("+o.session+")");
+        if(o.session===d.effective) op.selected=true; sel.appendChild(op);
+      });
+    });
+  }
+  $("voiceBind").onclick=function(){ POST("/api/voice/route",{session:$("voiceSel").value}).then(function(d){
+    toast(d&&d.ok?("Sprache → "+d.effective):"Fehler"); loadVoice(); }); };
+  $("voiceDaily").onclick=function(){ POST("/api/voice/route",{session:""}).then(function(d){
+    toast("Zurück auf Tages-Session"); loadVoice(); }); };
+  $("voiceNewBtn").onclick=function(){ var v=$("voiceNew").value.trim(); if(!v){toast("Name eingeben");return;}
+    POST("/api/voice/route",{new:v}).then(function(d){ toast(d&&d.ok?("Neu: "+d.effective):"Fehler"); $("voiceNew").value=""; loadVoice(); }); };
+
+  function loadTerms(){
+    J("/api/displays").then(function(d){
+      var box=$("termList"); box.innerHTML="";
+      var list=(d&&d.displays)||[];
+      if(!list.length){ box.innerHTML='<div class="row"><div class="grow meta">keine Anzeigen gefunden</div></div>'; return; }
+      list.forEach(function(x){
+        var isT = typeof x.terminal==="number";
+        var r=document.createElement("div"); r.className="row";
+        r.innerHTML =
+          '<span class="pill '+(isT?"tnum":"off")+'">'+(isT?("T"+x.terminal):"—")+'</span>'+
+          '<div class="grow"><div class="name">'+esc(x.label||x.name)+'</div>'+
+          '<div class="meta">'+esc(x.name)+' · '+esc(x.kind)+' · '+esc(x.state||"")+'</div></div>';
+        var form=document.createElement("div"); form.className="rowform";
+        var inp=document.createElement("input"); inp.className="rename"; inp.placeholder="Terminal "+(x.terminal||"");
+        inp.value = (x.label && x.label!==("Terminal "+x.terminal)) ? x.label : "";
+        var b=document.createElement("button"); b.className="ghost"; b.textContent="Umbenennen";
+        b.onclick=function(){ POST("/api/displays/label",{display:x.id,label:inp.value.trim()}).then(function(res){
+          toast(res&&res.ok?"Umbenannt":(res&&res.error?res.error:"Fehler")); loadTerms(); }); };
+        if(!isT){ b.disabled=true; inp.disabled=true; inp.placeholder="dieses Fenster"; }
+        form.appendChild(inp); form.appendChild(b); r.appendChild(form); box.appendChild(r);
+      });
+    });
+  }
+
+  var PRESETS=["","minimal","standard","erweitert","fernzugriff","voll"];
+  var PRESET_LABELS={ "":"— keine —", minimal:"Nur Assistenz", standard:"Im Haus",
+    erweitert:"Im Haus, erweitert", fernzugriff:"Fernzugriff", voll:"Voll",
+
+    trusted:"Im Haus, erweitert", remote:"Fernzugriff", full:"Voll", doktorand:"Fernzugriff" };
+  function loadRights(){
+    J("/api/admin/rights").then(function(d){
+      if(!d || d._forbidden || !d.ok){ return; }
+      $("rightsCard").classList.remove("hidden");
+      var presets = (d.presets && d.presets.length) ? [""].concat(d.presets) : PRESETS;
+      var box=$("rightsList"); box.innerHTML="";
+      (d.users||[]).forEach(function(u){
+        var r=document.createElement("div"); r.className="row";
+        r.innerHTML='<div class="grow"><div class="name">'+esc(u.uid)+'</div>'+
+          '<div class="meta">'+(u.floor?"Obergrenze gesetzt":"keine Obergrenze")+'</div></div>';
+        var form=document.createElement("div"); form.className="rowform";
+        var sel=document.createElement("select");
+        presets.forEach(function(p){ var o=document.createElement("option"); o.value=p;
+          o.textContent = PRESET_LABELS[p] || p || "— keine —"; sel.appendChild(o); });
+        var b=document.createElement("button"); b.className="ghost"; b.textContent="Setzen";
+        b.onclick=function(){ var body={uid:u.uid}; if(sel.value) body.preset=sel.value; else body.floor=null;
+          POST("/api/admin/user-floor",body).then(function(res){ toast(res&&res.ok?("Rechte für "+u.uid+" gesetzt"):"Fehler"); loadRights(); }); };
+        form.appendChild(sel); form.appendChild(b); r.appendChild(form); box.appendChild(r);
+      });
+    });
+  }
+
+  
+  
+  
+  var FEAT_LABELS = {
+    RELAY_ENABLED: ["Fernzugriff (Relay)", "Box auch von unterwegs erreichbar machen"],
+    VOICE_ENABLED: ["Sprachassistent", "Sprachdienste der Box (sofern auf diesem Gerät eingerichtet)"],
+    CELLS_ENABLED: ["Arbeitszellen (microVMs)", "isolierte Arbeitsumgebungen für Sessions (sofern die Box sie unterstützt)"]
+  };
+  function loadFeatures(){
+    J("/api/admin/features").then(function(d){
+      if(!d || d._forbidden || !d.ok){ return; }        
+      $("mediaCard").classList.remove("hidden");
+      $("featCard").classList.remove("hidden");
+      var on = !!(d.flags && d.flags.MEDIA_SERVER_ENABLED), m = d.media || {};
+      var pill=$("mediaPill"); pill.textContent = on ? "an" : "aus"; pill.className = "pill "+(on?"on":"off");
+      $("mediaMeta").textContent = on
+        ? ((m.smb ? "Dateiserver läuft" : "Dateiserver startet nicht — /var/log/brainbox-smbd.log prüfen")
+           + " · " + (m.dlna ? "DLNA läuft" : "DLNA aus")
+           + " · " + (m.advert ? "im Netz angekündigt" : "Ankündigung folgt gleich"))
+        : ((m.smb || m.dlna) ? "wird beendet…" : "nicht sichtbar, Datei-Ports zu");
+      var b=$("mediaBtn"); b.disabled=false; b.textContent = on ? "Ausschalten" : "Einschalten";
+      b.onclick=function(){ b.disabled=true;
+        POST("/api/admin/features",{key:"MEDIA_SERVER_ENABLED",enabled:!on}).then(function(res){
+          toast(res&&res.ok ? (on?"Medienserver ausgeschaltet":"Medienserver eingeschaltet")
+                            : ((res&&res.error)||"Fehler"));
+          loadFeatures(); }); };
+      var box=$("featList"); box.innerHTML="";
+      Object.keys(FEAT_LABELS).forEach(function(k){
+        var fon = !!(d.flags && d.flags[k]);
+        var r=document.createElement("div"); r.className="row";
+        r.innerHTML='<span class="pill '+(fon?"on":"off")+'">'+(fon?"an":"aus")+'</span>'+
+          '<div class="grow"><div class="name">'+esc(FEAT_LABELS[k][0])+'</div>'+
+          '<div class="meta">'+esc(FEAT_LABELS[k][1])+' · wirkt ab dem nächsten Neustart</div></div>';
+        var form=document.createElement("div"); form.className="rowform";
+        var b2=document.createElement("button"); b2.className="ghost";
+        b2.textContent = fon ? "Ausschalten" : "Einschalten";
+        b2.onclick=function(){ b2.disabled=true;
+          POST("/api/admin/features",{key:k,enabled:!fon}).then(function(res){
+            toast(res&&res.ok ? "Gespeichert — wirkt ab dem nächsten Neustart"
+                              : ((res&&res.error)||"Fehler"));
+            loadFeatures(); }); };
+        form.appendChild(b2); r.appendChild(form); box.appendChild(r);
+      });
+    });
+  }
+
+  loadVoice(); loadTerms(); loadRights(); loadFeatures();
+})();
+</script>
+</body>
+</html>

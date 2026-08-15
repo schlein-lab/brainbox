@@ -1,0 +1,45 @@
+#!/bin/sh
+set -u
+exec >>/var/log/brainbox-dlnad.log 2>&1
+echo "=== brainbox-dlnad run $(date -Is 2>/dev/null || echo '?') args=$* ==="
+
+command -v python3 >/dev/null 2>&1 || { echo "[brainbox-dlnad] no python3 — inactive"; exit 0; }
+
+SHARES=/data/shares
+PUBLIC="$SHARES/public"
+SVCUSER=$(stat -c %U "$SHARES" 2>/dev/null || echo brainbox)
+SVC_HOME=$(getent passwd "$SVCUSER" 2>/dev/null | cut -d: -f6)
+[ -n "$SVC_HOME" ] || SVC_HOME=$(eval echo "~$SVCUSER")
+
+CONF=/etc/brainbox/site.conf
+
+MEDIA_ON="$([ -r "$CONF" ] && sed -n 's/^MEDIA_SERVER_ENABLED=//p' "$CONF" | tail -1 | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ' || true)"
+if [ "$MEDIA_ON" != "1" ]; then
+  echo "[brainbox-dlnad] media server disabled via site.conf (MEDIA_SERVER_ENABLED=0)"; exit 0
+fi
+
+_bbx_profile="$(sed -n 's/^NET_PROFILE=//p' "$CONF" 2>/dev/null | tail -1 | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
+if [ "${_bbx_profile:-home}" = "managed" ]; then
+  echo "[brainbox-dlnad] Netzprofil 'managed' — DLNA bleibt aus (kein SSDP/HTTP-8200)."; exit 0
+fi
+
+DLNAD=""
+for c in "${PN_DLNAD:-}" "$SVC_HOME/brainarbeit/cockpit/server/pn_dlnad.py" /usr/local/lib/brainbox/pn_dlnad.py; do
+  [ -n "$c" ] && [ -f "$c" ] && { DLNAD="$c"; break; }
+done
+[ -n "$DLNAD" ] || { echo "[brainbox-dlnad] pn_dlnad.py not found — inactive"; exit 0; }
+
+mkdir -p "$PUBLIC" 2>/dev/null || true
+[ "${1:-}" = "--setup-only" ] && exit 0
+
+if pgrep -f "pn_dlnad.py" >/dev/null 2>&1; then
+  echo "[brainbox-dlnad] already running"; exit 0
+fi
+
+if [ "$(id -u 2>/dev/null)" = 0 ] && command -v runuser >/dev/null 2>&1; then
+  setsid runuser -u "$SVCUSER" -- python3 "$DLNAD" --root "$PUBLIC" --name Brainbox --port 8200 >/dev/null 2>&1 &
+else
+  setsid python3 "$DLNAD" --root "$PUBLIC" --name Brainbox --port 8200 >/dev/null 2>&1 &
+fi
+echo "[brainbox-dlnad] started pid $!"
+exit 0

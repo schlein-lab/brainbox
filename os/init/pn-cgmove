@@ -1,0 +1,105 @@
+#!/bin/bash
+set -u
+CG=/sys/fs/cgroup
+DEST=$CG/pn.slice/critical/pnd
+log(){ echo "[pn-cgmove] $*"; }
+
+if [ "${1:-}" = "--sessions" ]; then
+  shift
+  SDEST=$CG/pn.slice/interactive/sessions
+  mkdir -p "$SDEST" 2>/dev/null
+  moved=0
+  for pid in "$@"; do
+    case "$pid" in (*[!0-9]*|"") log "skip '$pid' (not a pid)"; continue ;; esac
+    [ -d "/proc/$pid" ] || { log "skip $pid (gone)"; continue; }
+    powner=$(stat -c %u "/proc/$pid" 2>/dev/null)
+    [ "$powner" = "1000" ] || { log "skip $pid (owner ${powner:-?} != 1000)"; continue; }
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null)
+    cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    ok=""
+    [ "$comm" = "pn-vmm" ] && ok=1
+    case "$cmd" in
+      *pn_cell_*_broker.py\ --unix-mux\ /tmp/pn-cells/*) ok=1 ;;
+      *pn_cell_desk_bridge.py\ --lane\ /tmp/pn-cells/*) ok=1 ;;
+    esac
+    [ -n "$ok" ] || { log "skip $pid (not a session-cell process: comm=${comm:-?})"; continue; }
+    if printf '%s' "$pid" > "$SDEST/cgroup.procs" 2>/dev/null; then
+      moved=$((moved+1)); log "session pid=$pid (${comm}) -> pn.slice/interactive/sessions"
+    else
+      log "WARN: could not move session pid=$pid (leaving in place)"
+    fi
+  done
+  log "sessions done: $moved moved"
+  exit 0
+fi
+
+if [ "${1:-}" = "--seat" ]; then
+  pid="${2:-}"; leaf="${3:-}"
+  case "$pid" in (*[!0-9]*|"") log "seat: bad pid '$pid'"; exit 1 ;; esac
+  case "$leaf" in
+    *[!A-Za-z0-9_-]*) log "seat: bad leaf name '$leaf'"; exit 1 ;;
+    phantom-?*) : ;;
+    *) log "seat: leaf must match phantom-* (got '$leaf')"; exit 1 ;;
+  esac
+  DEST="$CG/pn.slice/batch/$leaf"
+  [ -d "$DEST" ] || { log "seat: leaf $DEST missing (the portal creates it first)"; exit 1; }
+  [ -d "/proc/$pid" ] || { log "seat: pid $pid gone"; exit 1; }
+  powner=$(stat -c %u "/proc/$pid" 2>/dev/null)
+  [ "$powner" = "${SUDO_UID:-1000}" ] || { log "seat: pid $pid owner ${powner:-?} != caller uid ${SUDO_UID:-1000}"; exit 1; }
+  my_cg=$(cut -d: -f3- /proc/self/cgroup 2>/dev/null)
+  tgt_cg=$(cut -d: -f3- "/proc/$pid/cgroup" 2>/dev/null)
+  [ -n "$my_cg" ] && [ "$my_cg" = "$tgt_cg" ] \
+    || { log "seat: pid $pid is not in the caller's cgroup (${tgt_cg:-?} != ${my_cg:-?})"; exit 1; }
+  if printf '%s' "$pid" > "$DEST/cgroup.procs" 2>/dev/null; then
+    log "seat pid=$pid -> pn.slice/batch/$leaf"
+    exit 0
+  fi
+  log "WARN: could not move seat pid=$pid into $leaf (leaving in place)"
+  exit 1
+fi
+
+find_pnd(){
+  local p cmd
+  for p in $(pgrep -f "portioneer/tools/pnd" 2>/dev/null); do
+    cmd=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)
+    case "$cmd" in
+      *portioneer/tools/pn-llmd*) continue ;;
+      *portioneer/tools/pnd*)     echo "$p"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+tree_ready(){
+  [ -d "$CG/pn.slice/critical" ] && [ -d "$CG/pn.slice/batch" ] \
+    && [ "$(stat -c %u "$CG/pn.slice/batch" 2>/dev/null)" = "1000" ]
+}
+
+pid=""
+for i in $(seq 1 40); do
+  if tree_ready; then
+    pid=$(find_pnd) && [ -n "$pid" ] && break
+  fi
+  sleep 0.5
+done
+tree_ready || { log "pn.slice not delegated after ~20s (pn-cgtree missing/failed) — skip, fail-safe"; exit 0; }
+[ -n "$pid" ] || { log "pnd not running after ~20s — nothing to migrate (skip, fail-safe)"; exit 0; }
+
+mkdir -p "$DEST" 2>/dev/null
+
+before=$(cat /proc/$pid/cgroup 2>/dev/null)
+case "$before" in
+  *pn.slice/critical/pnd*) log "pnd pid=$pid already in pn.slice/critical/pnd — nothing to do"; exit 0 ;;
+esac
+if printf '%s' "$pid" > "$DEST/cgroup.procs" 2>/dev/null; then
+  after=$(cat /proc/$pid/cgroup 2>/dev/null)
+  log "pnd pid=$pid migrated:"
+  log "  before: $before"
+  log "  after : $after"
+  case "$after" in
+    *pn.slice/critical/pnd*) log "OK — pnd now under the delegated shared parent" ;;
+    *) log "WARN: migration not reflected (LLM may stay down; box unaffected)" ;;
+  esac
+else
+  log "WARN: could not migrate pnd pid=$pid (leaving in place; LLM stays down, box unaffected)"
+fi
