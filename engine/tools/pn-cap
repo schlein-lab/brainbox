@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pnlib import rootkey
+from pnlib.captok import (
+    CapToken, Caveat, CapTokError, mint as captok_mint, attenuate as captok_attenuate,
+    seal as captok_seal, verify as captok_verify,
+)
+from pnlib.captok import revoke as captok_revoke
+
+def _die(msg, code=2):
+    sys.stderr.write(f"pn-cap: {msg}\n")
+    sys.exit(code)
+
+def _read_token(args) -> CapToken:
+    raw = None
+    if getattr(args, "in_file", None):
+        with open(args.in_file) as f:
+            raw = f.read()
+    else:
+        raw = sys.stdin.read()
+    if not raw.strip():
+        _die("no token on stdin / --in")
+    try:
+        return CapToken.from_json(raw)
+    except CapTokError as e:
+        _die(f"cannot parse token: {e}")
+
+def _env_key(name, what):
+    v = os.environ.get(name)
+    if not v:
+        return None
+    try:
+        raw = bytes.fromhex(v)
+    except ValueError:
+        _die(f"{name} is not valid hex")
+    if len(raw) != 32:
+        _die(f"{name} must be 32 bytes ({what})")
+    return raw
+
+def _parse_caveats(specs):
+
+    cavs = []
+    for kind, spec in specs:
+        if "=" not in spec:
+            _die(f"bad {kind} caveat {spec!r} (need DIM=VALUE)")
+        dim, val = spec.split("=", 1)
+        if kind == "scope":
+            cavs.append(Caveat.scope(dim, val.split(",")))
+        elif kind == "member":
+            cavs.append(Caveat.member(dim, val.split(",")))
+        elif kind == "num":
+            cavs.append(Caveat.num_leq(dim, int(val)))
+        elif kind == "time":
+            cavs.append(Caveat.time_leq(dim, int(val)))
+    return cavs
+
+def _collect_caveats(args):
+    specs = []
+    for s in args.scope or []:
+        specs.append(("scope", s))
+    for s in args.member or []:
+        specs.append(("member", s))
+    for s in args.num or []:
+        specs.append(("num", s))
+    for s in args.time or []:
+        specs.append(("time", s))
+    return _parse_caveats(specs)
+
+def cmd_mint(args):
+    priv = _env_key("PN_OWNER_PRIV", "owner private key")
+    pub = _env_key("PN_OWNER_PUB", "owner public key")
+    if priv is None or pub is None:
+        _die("mint needs PN_OWNER_PRIV and PN_OWNER_PUB (owner keypair, off-box)")
+    tok = captok_mint(owner_priv=priv, owner_pub=pub, agent=args.agent,
+                      audience=args.audience, max_redelegation_depth=args.max_depth,
+                      exp=args.exp, caveats=_collect_caveats(args))
+    if args.seal:
+        tok = captok_seal(tok)
+    print(tok.to_json())
+
+def cmd_attenuate(args):
+    tok = _read_token(args)
+    try:
+        out = captok_attenuate(tok, agent=args.agent, caveats=_collect_caveats(args),
+                               max_redelegation_depth=args.max_depth)
+    except CapTokError as e:
+        _die(f"attenuation refused: {e}")
+    if args.seal:
+        out = captok_seal(out)
+    print(out.to_json())
+
+def cmd_inspect(args):
+    tok = _read_token(args)
+    out = {"root_pubkey_id": tok.root_pubkey_id, "sealed": tok.sealed,
+           "declared_depth": tok.declared_depth, "audience": tok.audience, "blocks": []}
+    for i, b in enumerate(tok.blocks):
+        out["blocks"].append({
+            "i": i, "typ": b.typ, "agent": b.agent,
+            "caveats": [c.to_list() for c in b.caveats()],
+            "revocation_id": captok_revoke.block_revocation_id(b),
+        })
+    print(json.dumps(out, indent=2))
+
+def cmd_verify(args):
+    tok = _read_token(args)
+    owner_pub = _env_key("PN_OWNER_PUB", "owner public key")
+    if args.owner_pub:
+        try:
+            owner_pub = bytes.fromhex(args.owner_pub)
+        except ValueError:
+            _die("--owner-pub is not valid hex")
+    try:
+        g = captok_verify(tok, owner_pubkey=owner_pub, audience=args.audience, now=args.now)
+    except CapTokError as e:
+        _die(f"INVALID: {e}", code=1)
+    out = {"valid": True, "agent": g.agent, "audience": g.audience, "exp": g.exp,
+           "depth": g.depth, "max_depth": g.max_depth,
+           "scopes": {k: sorted(v) for k, v in g.scopes.items()},
+           "members": {k: sorted(v) for k, v in g.members.items()},
+           "num_caps": dict(g.num_caps), "time_caps": dict(g.time_caps),
+           "delegation": list(g.delegation.agents)}
+    print(json.dumps(out, indent=2))
+
+def cmd_revoke(args):
+    tok = _read_token(args)
+    rid = captok_revoke.prefix_revocation_id(tok, args.depth)
+    result = {"revocation_id": rid, "depth": args.depth,
+              "chain_revocation_ids": captok_revoke.chain_revocation_ids(tok)}
+    if args.db:
+        cx = sqlite3.connect(args.db)
+        reg = captok_revoke.RevocationRegistry(cx)
+        reg.revoke(rid, reason=args.reason)
+        result["recorded_in"] = args.db
+        cx.close()
+    print(json.dumps(result, indent=2))
+
+def _add_caveat_flags(p):
+    p.add_argument("--scope", action="append", metavar="DIM=v1,v2", help="scope caveat (intersection)")
+    p.add_argument("--member", action="append", metavar="DIM=v1,v2", help="member caveat (intersection)")
+    p.add_argument("--num", action="append", metavar="DIM=N", help="numeric <= caveat (min)")
+    p.add_argument("--time", action="append", metavar="DIM=UNIX", help="time <= caveat (min)")
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="pn-cap", description="owner-rooted capability tokens (T1)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    m = sub.add_parser("mint", help="mint a level-0 authority token (owner side)")
+    m.add_argument("--agent", required=True)
+    m.add_argument("--audience", default=None)
+    m.add_argument("--max-depth", type=int, default=0, dest="max_depth")
+    m.add_argument("--exp", type=int, default=None, help="expiry unix seconds")
+    m.add_argument("--seal", action="store_true")
+    _add_caveat_flags(m)
+    m.set_defaults(func=cmd_mint)
+
+    a = sub.add_parser("attenuate", help="append a restriction-only attenuation block")
+    a.add_argument("--in", dest="in_file", default=None)
+    a.add_argument("--agent", required=True)
+    a.add_argument("--max-depth", type=int, default=None, dest="max_depth")
+    a.add_argument("--seal", action="store_true")
+    _add_caveat_flags(a)
+    a.set_defaults(func=cmd_attenuate)
+
+    i = sub.add_parser("inspect", help="print a token's chain without verifying")
+    i.add_argument("--in", dest="in_file", default=None)
+    i.set_defaults(func=cmd_inspect)
+
+    v = sub.add_parser("verify", help="offline-verify a token, print the granted authority")
+    v.add_argument("--in", dest="in_file", default=None)
+    v.add_argument("--owner-pub", default=None, help="owner public key hex (else PN_OWNER_PUB/pinned)")
+    v.add_argument("--audience", default=None)
+    v.add_argument("--now", type=int, default=None)
+    v.set_defaults(func=cmd_verify)
+
+    r = sub.add_parser("revoke", help="compute (and optionally record) a chain-prefix revocation id")
+    r.add_argument("--in", dest="in_file", default=None)
+    r.add_argument("--depth", type=int, default=None,
+                   help="prefix block index to revoke (default: the token's tail block)")
+    r.add_argument("--db", default=None, help="sqlite db to record the revocation in (not queue.db)")
+    r.add_argument("--reason", default=None)
+    r.set_defaults(func=cmd_revoke)
+
+    args = ap.parse_args(argv)
+    if args.cmd == "revoke" and args.depth is None:
+
+        tok = _read_token(args)
+        args.depth = len(tok.blocks) - 1
+
+        args._preparsed = tok
+
+        def _cmd(a):
+            rid = captok_revoke.prefix_revocation_id(a._preparsed, a.depth)
+            result = {"revocation_id": rid, "depth": a.depth,
+                      "chain_revocation_ids": captok_revoke.chain_revocation_ids(a._preparsed)}
+            if a.db:
+                cx = sqlite3.connect(a.db)
+                reg = captok_revoke.RevocationRegistry(cx)
+                reg.revoke(rid, reason=a.reason)
+                result["recorded_in"] = a.db
+                cx.close()
+            print(json.dumps(result, indent=2))
+        return _cmd(args)
+    return args.func(args)
+
+if __name__ == "__main__":
+    main()

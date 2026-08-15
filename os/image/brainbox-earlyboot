@@ -1,0 +1,105 @@
+#!/bin/sh
+set -u
+
+log(){ echo "[earlyboot] $*"; }
+
+mkdir -p /run/brainbox 2>/dev/null || true
+printf 'Geraete und Netzwerk werden vorbereitet\n' > /run/brainbox/boot-status 2>/dev/null || true
+
+[ -f /etc/brainbox/service.env ] && . /etc/brainbox/service.env 2>/dev/null || true
+
+HN="$(tr -cd 'A-Za-z0-9.-' < /etc/hostname 2>/dev/null || true)"
+[ -n "$HN" ] || HN=brainbox
+CUR="$(hostname 2>/dev/null || echo '(none)')"
+if [ "$CUR" = "$HN" ]; then
+  log "hostname: $HN (already set)"
+elif hostname "$HN" 2>/dev/null; then
+  log "hostname: '$CUR' -> '$HN'"
+else
+  log "WARN hostname: could not apply '$HN' (still '$CUR')"
+fi
+if [ -f /etc/hosts ] && [ -w /etc/hosts ]; then
+  if grep -qE "^127\.0\.1\.1[[:space:]]" /etc/hosts 2>/dev/null; then
+    if ! grep -qE "^127\.0\.1\.1[[:space:]]+$HN([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
+      sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$HN/" /etc/hosts 2>/dev/null \
+        && log "hosts: 127.0.1.1 -> $HN"
+    fi
+  else
+    printf '127.0.1.1\t%s\n' "$HN" >> /etc/hosts 2>/dev/null && log "hosts: added 127.0.1.1 $HN"
+  fi
+fi
+
+MODPROBE=""
+for m in /sbin/modprobe /usr/sbin/modprobe /bin/modprobe /usr/bin/modprobe; do
+  [ -x "$m" ] && { MODPROBE="$m"; break; }
+done
+[ -n "$MODPROBE" ] || log "WARN no modprobe binary — skipping all module loads"
+
+load(){
+  [ -n "$MODPROBE" ] || return 1
+  if "$MODPROBE" "$1" 2>/dev/null; then log "module $1: ok ($2)"; return 0; fi
+  log "module $1: unavailable on this kernel — $2 disabled"; return 1
+}
+
+KVM_MOD=""
+if [ -r /proc/cpuinfo ]; then
+  FLAGS="$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null || true)"
+  if   printf '%s' "$FLAGS" | grep -qw vmx; then KVM_MOD=kvm_intel
+  elif printf '%s' "$FLAGS" | grep -qw svm; then KVM_MOD=kvm_amd
+  fi
+fi
+if [ -n "$KVM_MOD" ]; then
+  load "$KVM_MOD" "microVM cells"
+elif [ -e /dev/kvm ]; then
+  log "module kvm: /dev/kvm already present (built-in or pre-loaded)"
+else
+  log "module kvm: CPU exposes no vmx/svm ($(uname -m)) — cells will be reported unavailable"
+fi
+
+load tun    "tap/VPN network lanes"   || true
+load uinput "phantom seat input"      || true
+
+if [ -d /proc/device-tree/cooling_fan ]; then
+  load pwm_rp1 "PWM controller for the fan node" || true
+  load pwm_fan "thermal-governed fan regulation" || true
+fi
+
+if [ -n "$MODPROBE" ] && [ ! -e /etc/brainbox/no-coldplug ]; then
+  _before=$(cut -d" " -f1 /proc/modules | sort)
+  find /sys/devices -name modalias -exec cat {} + 2>/dev/null | sort -u \
+  | while IFS= read -r _alias; do
+      [ -n "$_alias" ] && "$MODPROBE" -qab -- "$_alias" 2>/dev/null || true
+    done
+  _new=$(printf '%s\n%s\n%s\n' "$_before" "$_before" "$(cut -d" " -f1 /proc/modules | sort)" \
+         | sort | uniq -u | tr '\n' ' ')
+  log "coldplug: ${_new:-nothing new to load}"
+  if [ -w /proc/sys/kernel/hotplug ] && [ -x /usr/local/sbin/brainbox-hotplug ]; then
+    printf '/usr/local/sbin/brainbox-hotplug\n' > /proc/sys/kernel/hotplug
+    log "hotplug: uevent helper registered"
+  else
+    log "hotplug: kernel uevent helper unavailable — late-plugged devices need a manual modprobe"
+  fi
+fi
+
+fix(){
+  n="$1"; g="$2"; m="$3"; why="$4"
+  [ -e "$n" ] || { log "node $n: absent — $why unavailable"; return 1; }
+  if [ "$g" != "-" ] && ! getent group "$g" >/dev/null 2>&1; then
+    log "WARN node $n: group '$g' does not exist — leaving as-is"; return 1
+  fi
+  before="$(stat -c '%U:%G %a' "$n" 2>/dev/null || echo '?')"
+  [ "$g" = "-" ] || chgrp "$g" "$n" 2>/dev/null || true
+  chmod "$m" "$n" 2>/dev/null || true
+  after="$(stat -c '%U:%G %a' "$n" 2>/dev/null || echo '?')"
+  if [ "$before" = "$after" ]; then log "node $n: $after (already ok) [$why]"
+  else                              log "node $n: $before -> $after [$why]"; fi
+}
+
+fix /dev/kvm         kvm   0660 "microVM cells (pn-vmm runs as the service user)"
+fix /dev/vhost-vsock kvm   0660 "kernel vsock (pn-vmm has its OWN userspace vsock; belt-and-braces)"
+fix /dev/net/tun     -     0666 "tap/VPN network lanes"
+fix /dev/fuse        -     0666 "userspace filesystems"
+fix /dev/uinput      input 0660 "phantom seat input actuator"
+
+log "done"
+exit 0

@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+
+import os, sys, json
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import discoverrun
+from pnlib import netdetect
+
+def main():
+    cidr = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PN_DISCOVER_CIDR", "")
+
+    own_cidrs = [c.strip() for c in cidr.split(",") if c.strip()] or netdetect.own_cidrs()
+    mode = os.environ.get("PN_DISCOVER_MODE", "mock")
+    fixture = os.environ.get("PN_DISCOVER_FIXTURE")
+    rate = float(os.environ.get("PN_DISCOVER_RATE", "5"))
+    targets = None
+    if mode == "live":
+        raw = os.environ.get("PN_DISCOVER_TARGETS")
+        targets = json.loads(raw) if raw else []
+    try:
+        report = discoverrun.run_discovery(
+            own_cidrs=own_cidrs, mode=mode, fixture=fixture,
+            live_targets=targets, rate_per_sec=rate)
+    except Exception as e:
+        sys.stdout.write(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}) + "\n")
+        return 1
+
+    sys.stderr.write(
+        f"net.discover[{mode}] scope={own_cidrs} scanned={report['scanned']} "
+        f"new={len(report['diff']['new'])} changed={len(report['diff']['changed'])} "
+        f"gone={len(report['diff']['gone'])} proposals={len(report['proposals'])} "
+        f"scanned_live={report['scanned_live']}\n")
+    sys.stdout.write(json.dumps(report, default=str) + "\n")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

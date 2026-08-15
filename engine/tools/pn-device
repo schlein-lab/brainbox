@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""pn-device — the L8 device-empowerment adapter (architecture §11).
+
+A thin CLI over the P9 modules: the transport-driver registry, observe-only discovery + propose,
+the drop-zone / identity-by-channel convention, and the consent-gated maintenance/firmware DAG.
+
+It NEVER auto-binds and NEVER flashes real firmware: discovery PROPOSES (a human approves via the
+approval gate; the brain can't mint the nonce), and the firmware tail is EMULATED / dry-run.
+
+Subcommands:
+  transports                 list the transport-driver registry (REAL vs STUB drivers)
+  compose <scheme,...>       show the capabilities the appliance could COMPOSE from transports
+  discover <targets.json>    observe-only discover (own-CIDR + rate-limited) -> classified profiles
+  propose  <targets.json>    discover, then emit the approval-request PROPOSAL bodies (no bind)
+  candidates                 list the OWN candidate store (post re-scan diff)
+  audit    <profile.json>    read-only CVE/health audit (autonomous, no consent)
+  maintain <profile.json>    run the firmware DAG (EMULATED; refuses to write without consent)
+  abandonware <profile.json> <patch.json>   generate+sign+stage an update (dry-run)
+
+`discover`/`propose`/`maintain` are admin-only on the appliance (the task_type `net.discover` /
+`device.maintain` caps gate them in pnd); this CLI is the local operator adapter.
+
+All output is JSON on stdout. No live LAN scan, no real flash.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+
+from pnlib import transport as T
+from pnlib import discover as D
+from pnlib import devmaint as M
+from pnlib import netdetect as ND
+
+def _load(path):
+    with open(path) as f:
+        return json.load(f)
+
+def _print(obj):
+    print(json.dumps(obj, indent=2, default=str))
+
+def cmd_transports(_args):
+    reg = T.default_registry()
+    _print({"real": reg.real_schemes(), "stub": reg.stub_schemes(),
+            "drivers": reg.describe()})
+
+def cmd_compose(args):
+    schemes = [s for s in args[0].replace(",", " ").split()] if args else []
+    _print({"transports": schemes, "composed": T.compose_capabilities(schemes)})
+
+def _own_cidrs(targets_doc):
+
+    return (targets_doc.get("own_cidrs") or ND.own_cidrs()
+            or ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"])
+
+def cmd_discover(args):
+    doc = _load(args[0])
+    profiles = D.discover(doc["targets"], _own_cidrs(doc),
+                          rate_per_sec=doc.get("rate_per_sec", 5.0))
+    _print({"observe_only": True, "auto_bind": False, "profiles": profiles})
+
+def cmd_propose(args):
+    doc = _load(args[0])
+    profiles = D.discover(doc["targets"], _own_cidrs(doc),
+                          rate_per_sec=doc.get("rate_per_sec", 5.0))
+    store = D.DiscoveryStore()
+    diff = store.rescan_diff(profiles)
+    proposals = [D.propose_payload(p) for p in profiles]
+    store.close()
+    _print({"observe_only": True, "auto_bind": False, "rescan_diff": diff,
+            "proposals": proposals,
+            "note": "PROPOSAL only — onboarding requires a human approval nonce pnd mints "
+                    "(the brain cannot mint it)."})
+
+def cmd_candidates(_args):
+    store = D.DiscoveryStore()
+    out = store.candidates()
+    store.close()
+    _print({"candidates": out})
+
+def cmd_audit(args):
+    profile = _load(args[0])
+    _print(M.cve_audit(profile, profile.get("firmware_version")))
+
+def cmd_maintain(args):
+    profile = _load(args[0])
+
+    def _no_mint(_nonce):
+        return False
+    dag = M.MaintenanceDAG(_no_mint, mode=M.detect_mode())
+    res = dag.run(profile,
+                  patch=profile.get("patch", {"note": "operator patch"}),
+                  current_image=(profile.get("firmware_image", "FW-BASE")).encode()
+                  if isinstance(profile.get("firmware_image"), str) else b"FW-BASE",
+                  current_version=profile.get("firmware_version", "1.0"),
+                  consent_nonce=None, brick_warning_ack=False)
+    res["ordering_proof"] = dag.ordering_ok()
+    _print(res)
+
+def cmd_abandonware(args):
+    profile = _load(args[0])
+    patch = _load(args[1]) if len(args) > 1 else {"note": "community patch"}
+    _print(M.abandonware_update(profile, patch))
+
+COMMANDS = {
+    "transports": cmd_transports, "compose": cmd_compose, "discover": cmd_discover,
+    "propose": cmd_propose, "candidates": cmd_candidates, "audit": cmd_audit,
+    "maintain": cmd_maintain, "abandonware": cmd_abandonware,
+}
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    fn = COMMANDS.get(cmd)
+    if not fn:
+        print(f"unknown command {cmd!r}; try --help", file=sys.stderr)
+        return 2
+    try:
+        fn(rest)
+        return 0
+    except (IndexError,) as e:
+        print(f"missing argument for {cmd!r}: {e}", file=sys.stderr)
+        return 2
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

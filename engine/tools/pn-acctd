@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import socket
+import sqlite3
+import struct
+import sys
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+
+from pnlib import acct as A
+from pnlib import DB_PATH
+
+DEF_WORKERS = 4
+DEF_FOLD_BATCH = 500
+DEF_INTERVAL = 5.0
+CB_THRESHOLD = 5
+CB_COOLDOWN = 30.0
+MAX_FRAME = 1 << 16
+
+ACCT_SOCK = os.environ.get("PN_ACCT_SOCK", "/run/pn-acctd.sock")
+
+def log(msg):
+    sys.stderr.write(f"pn-acctd: {msg}\n")
+    sys.stderr.flush()
+
+class Folder:
+    def __init__(self, store: A.AcctStore, queue_db: str, fold_batch=DEF_FOLD_BATCH, log=log):
+        self.store = store
+        self.queue_db = queue_db
+        self.fold_batch = fold_batch
+        self._log = log
+
+        self._cb_fails = 0
+        self._cb_open_until = 0.0
+        self.last_fold = {"folded": 0, "cursor": store.get_cursor(), "ts": 0.0, "breaker": "closed"}
+
+    def _q_connect(self):
+
+        try:
+            cx = sqlite3.connect(f"file:{self.queue_db}?mode=ro", uri=True, timeout=0.25)
+        except sqlite3.OperationalError:
+            cx = sqlite3.connect(self.queue_db, timeout=0.25)
+        cx.row_factory = sqlite3.Row
+        cx.execute("PRAGMA busy_timeout=200")
+        return cx
+
+    def breaker_state(self) -> str:
+        now = time.monotonic()
+        if self._cb_open_until > now:
+            return "open"
+        return "half-open" if self._cb_fails >= CB_THRESHOLD else "closed"
+
+    def fold_once(self) -> dict:
+
+        now = time.monotonic()
+        if self._cb_open_until > now:
+            self.last_fold = {"folded": 0, "cursor": self.store.get_cursor(),
+                              "ts": time.time(), "breaker": "open"}
+            return self.last_fold
+        folded = 0
+        cursor = self.store.get_cursor()
+        try:
+            cx = self._q_connect()
+            try:
+                rows = cx.execute(
+                    "SELECT id,job_id,data FROM job_events "
+                    "WHERE kind='actuals' AND id > ? ORDER BY id ASC LIMIT ?",
+                    (cursor, self.fold_batch)).fetchall()
+            finally:
+                cx.close()
+            for r in rows:
+                try:
+                    d = json.loads(r["data"]) if r["data"] else {}
+                except Exception:
+                    d = {}
+
+                if isinstance(d, dict):
+                    try:
+                        self.store.record_actual(
+                            job_id=r["job_id"],
+                            task_type=d.get("task_type"),
+                            principal=d.get("principal"),
+                            mem_peak=d.get("mem_peak"),
+                            cpu_s=d.get("cpu_s"),
+                            wall_s=d.get("wall_s"),
+                            llm_calls=d.get("llm_calls"),
+                            llm_tokens=d.get("llm_tokens"))
+                    except Exception as e:
+                        self._log(f"fold: record skipped for event {r['id']} "
+                                  f"({type(e).__name__}: {e})")
+                cursor = r["id"]
+                folded += 1
+            self.store.set_cursor(cursor)
+
+            self._cb_fails = 0
+            self.last_fold = {"folded": folded, "cursor": cursor,
+                              "ts": time.time(), "breaker": "closed"}
+        except Exception as e:
+            self._cb_fails += 1
+            if self._cb_fails >= CB_THRESHOLD:
+                self._cb_open_until = time.monotonic() + CB_COOLDOWN
+                self._log(f"fold: circuit breaker OPEN after {self._cb_fails} failures "
+                          f"({type(e).__name__}: {e}); cooling down {CB_COOLDOWN:.0f}s")
+            else:
+                self._log(f"fold: pass failed ({self._cb_fails}/{CB_THRESHOLD}) "
+                          f"({type(e).__name__}: {e})")
+            self.last_fold = {"folded": 0, "cursor": self.store.get_cursor(),
+                              "ts": time.time(), "breaker": self.breaker_state()}
+        return self.last_fold
+
+def peer_uid(conn):
+    try:
+        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _pid, uid, _gid = struct.unpack("3i", creds)
+        return uid
+    except OSError:
+        return None
+
+class QueryServer:
+
+    def __init__(self, folder: Folder, reader: A.AcctReader, path=ACCT_SOCK,
+                 allow_uids=None, group=None, max_workers=DEF_WORKERS, log=log):
+        self.folder = folder
+        self.reader = reader
+        self.path = path
+        if allow_uids is None:
+            allow_uids = {0, os.getuid()}
+        self.allow_uids = set(allow_uids)
+        self.group = group
+        self._log = log
+        self._sock = None
+        self._stop = False
+        self._sem = threading.BoundedSemaphore(value=max(1, max_workers))
+
+    def _bind(self):
+        if os.path.exists(self.path):
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old = os.umask(0o177)
+        try:
+            s.bind(self.path)
+        finally:
+            os.umask(old)
+        if self.group:
+            try:
+                import grp
+                os.chown(self.path, -1, grp.getgrnam(self.group).gr_gid)
+                os.chmod(self.path, 0o660)
+            except (KeyError, OSError) as e:
+                self._log(f"socket: group '{self.group}' not applied ({e}); uid-only 0600")
+                os.chmod(self.path, 0o600)
+        else:
+            os.chmod(self.path, 0o600)
+        s.listen(16)
+        self._sock = s
+        return s
+
+    def serve_forever(self):
+        self._bind()
+        self._log(f"query socket up at {self.path} (allow uids {sorted(self.allow_uids)})")
+        while not self._stop:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                if self._stop:
+                    break
+                time.sleep(0.05)
+                continue
+            if not self._sem.acquire(blocking=False):
+                self._reply(conn, {"ok": False, "error": "busy"})
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            try:
+                threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+            except RuntimeError:
+                self._sem.release()
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def stop(self):
+        self._stop = True
+        try:
+            if self._sock:
+                self._sock.close()
+        except OSError:
+            pass
+
+    def _reply(self, conn, obj):
+        try:
+            conn.sendall((json.dumps(obj) + "\n").encode())
+        except OSError:
+            pass
+
+    def _handle(self, conn):
+        try:
+            conn.settimeout(5)
+            uid = peer_uid(conn)
+            if uid is None or uid not in self.allow_uids:
+                self._reply(conn, {"ok": False, "error": "unauthorized"})
+                return
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                if len(buf) > MAX_FRAME:
+                    self._reply(conn, {"ok": False, "error": "frame too large"})
+                    return
+            try:
+                req = json.loads(buf.split(b"\n", 1)[0].decode())
+            except (ValueError, UnicodeDecodeError):
+                self._reply(conn, {"ok": False, "error": "bad json"})
+                return
+            self._reply(conn, self.dispatch(req))
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            self._sem.release()
+
+    def dispatch(self, req) -> dict:
+
+        if not isinstance(req, dict):
+            return {"ok": False, "error": "request must be an object"}
+        verb = req.get("verb")
+        if verb in ("acct.estimate", "estimate"):
+            tt = req.get("task_type")
+            return {"ok": True, "task_type": tt, "estimate": self.reader.type_estimate(tt)}
+        if verb in ("acct.service_time", "service_time", "svc"):
+            tt = req.get("task_type")
+            return {"ok": True, "task_type": tt, "svc_s": self.reader.type_service_time(tt)}
+        if verb in ("acct.service_times", "service_times", "svc.all"):
+            return {"ok": True, "svc": self.reader.all_service_times()}
+        if verb in ("acct.usage", "usage", "fairshare.usage"):
+            p = req.get("principal")
+            return {"ok": True, "principal": p, "usage": round(self.reader.principal_usage(p), 4)}
+        if verb in ("acct.status", "status", "health"):
+            return {"ok": True, **self.folder.last_fold,
+                    "breaker": self.folder.breaker_state()}
+        return {"ok": False, "error": f"unknown verb: {verb}"}
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-acctd")
+    ap.add_argument("--queue-db", default=DB_PATH, help="queue.db to read actuals from (read-only)")
+    ap.add_argument("--acct-db", default=None, help="acct.db to write (default: pnlib.acct.default_path)")
+    ap.add_argument("--socket", default=ACCT_SOCK, help="read-only query socket path")
+    ap.add_argument("--allow-uid", type=int, action="append", default=None,
+                    help="uid allowed on the query socket (repeatable; default: 0 + invoking uid)")
+    ap.add_argument("--group", default=None, help="group to own the socket (0660)")
+    ap.add_argument("--interval", type=float, default=DEF_INTERVAL, help="fold cadence (s)")
+    ap.add_argument("--workers", type=int, default=DEF_WORKERS, help="fixed control-socket worker cap")
+    ap.add_argument("--fold-batch", type=int, default=DEF_FOLD_BATCH,
+                    help="max queue.db events folded per pass (bounded scan)")
+    ap.add_argument("--gc-keep", type=int, default=20000, help="raw job_actuals rows to retain")
+    ap.add_argument("--watchdog-file", default=os.environ.get("PN_ACCT_WATCHDOG", ""),
+                    help="touch-file PID1 stats for liveness")
+    ap.add_argument("--once", action="store_true", help="run one fold pass and exit (diagnostics)")
+    a = ap.parse_args()
+
+    store = A.AcctStore(a.acct_db)
+    reader = A.AcctReader(a.acct_db)
+    folder = Folder(store, a.queue_db, fold_batch=a.fold_batch)
+
+    if a.once:
+        rep = folder.fold_once()
+        print(json.dumps(rep, indent=2))
+        store.close()
+        return 0
+
+    allow = set(a.allow_uid) if a.allow_uid else None
+    server = QueryServer(folder, reader, path=a.socket, allow_uids=allow,
+                         group=a.group, max_workers=a.workers)
+
+    def _serve():
+        try:
+            server.serve_forever()
+        except Exception as e:
+            log(f"query socket unavailable ({type(e).__name__}: {e}); fold-only mode")
+    threading.Thread(target=_serve, daemon=True).start()
+
+    stop = {"v": False}
+
+    def _sig(_s, _f):
+        stop["v"] = True
+    signal.signal(signal.SIGTERM, _sig)
+    signal.signal(signal.SIGINT, _sig)
+
+    log(f"up: queue_db={a.queue_db} acct_db={store.path} interval={a.interval}s "
+        f"workers={a.workers} (observe-only, pn-misc)")
+    gc_every = max(1, int(3600 / max(0.1, a.interval)))
+    tick = 0
+    while not stop["v"]:
+        folder.fold_once()
+        if a.watchdog_file:
+            try:
+                with open(a.watchdog_file, "w") as f:
+                    f.write(str(time.time()))
+            except OSError:
+                pass
+        tick += 1
+        if tick % gc_every == 0:
+            try:
+                store.gc(keep=a.gc_keep)
+            except Exception as e:
+                log(f"gc skipped ({type(e).__name__}: {e})")
+
+        slept = 0.0
+        while slept < a.interval and not stop["v"]:
+            time.sleep(min(0.5, a.interval - slept))
+            slept += 0.5
+    server.stop()
+    store.close()
+    log("stopped")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

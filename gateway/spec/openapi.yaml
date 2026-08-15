@@ -1,0 +1,474 @@
+openapi: 3.1.0
+info:
+  title: Brainarbeit Public API
+  version: "1.0.0"
+  summary: Drive the Brainbox and receive its reality, from anywhere.
+  description: |
+    The comprehensive, authenticated, **bidirectional** public REST API for a Brainarbeit Brainbox.
+
+    This is the off-LAN / third-party tier. It fronts the box's **one contract** (the `pnd` engine
+    socket + typed event bus) behind a mandatory security model, and submits every job through the
+    broker **on-behalf-of** path so the box resolves the human principal server-side and
+    **intersects capabilities** — there is no raw command and no HPC reach through this API.
+
+    - **Drive:** submit (typed, with multimodal file attachments + box-side path refs), approve /
+      reject / revise, steer a running job, cancel.
+    - **Receive:** list / mine / history / result / outputs, the live event stream (see the
+      AsyncAPI spec), the media streams, and webhooks.
+
+    On-LAN single-user clients use the local `brainbox-portal` directly (SO_PEERCRED auth, no token).
+    This API is for everything else.
+  contact:
+    name: schlein-lab
+    url: https://github.com/schlein-lab/brainarbeit
+  license:
+    name: Proprietary (pre-release)
+servers:
+  - url: https://{box}/v1
+    description: A Brainbox on your LAN or via the relay
+    variables:
+      box:
+        default: brainbox.local:8810
+
+security:
+  - bearerToken: []
+    twoFactor: []
+
+tags:
+  - name: jobs
+    description: Submit work and read its status / result / outputs.
+  - name: approvals
+    description: The human-in-the-loop gate — nothing irreversible fires without your yes.
+  - name: stream
+    description: Reconnect-replay convergence (the live stream itself is WebSocket — see AsyncAPI).
+  - name: media
+    description: Watch the box work (MJPEG now, WebRTC later).
+  - name: webhooks
+    description: Box -> external delivery on events.
+  - name: meta
+    description: Health, engine status, machine-readable specs.
+
+paths:
+  /health:
+    get:
+      tags: [meta]
+      summary: Liveness + version (unauthenticated).
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  version: { type: string }
+                  engine: { type: object }
+
+  /engine/status:
+    get:
+      tags: [meta]
+      summary: Governor / queue snapshot (counts, pressure, reserved RAM, config).
+      responses:
+        "200": { $ref: "#/components/responses/VerbResult" }
+
+  /jobs:
+    get:
+      tags: [jobs]
+      summary: List recent jobs visible to the caller (principal-scoped) + counts.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200": { $ref: "#/components/responses/VerbResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [jobs]
+      summary: Submit a typed job (with optional multimodal attachments + box-side path refs).
+      description: |
+        Raw `cmd` is **not** accepted over the public API (no raw/HPC reach) — submit a `task_type`.
+        Attachments are written to a scratch drop-zone on the box and passed to the job as path refs
+        under `params.attachments`; bytes are never embedded in the queue row. `reply_to` (e.g.
+        `webhook:https://you/hook`, `telegram:<id>`, `email:<addr>`) makes the box deliver the
+        result back to that channel — the bidirectional return path. A `task_type` that declares an
+        approval gate (or `needs_confirmation: true`) parks the job before the side effect fires.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitRequest" }
+            examples:
+              simple:
+                summary: A simple typed submit
+                value: { task_type: "summarize.document", params: { style: "brief" } }
+              with_attachment:
+                summary: With a file attachment + a webhook return path
+                value:
+                  task_type: "fill.form"
+                  params: { form: "customs-CN22" }
+                  attachments:
+                    - { filename: "invoice.pdf", content_b64: "JVBERi0xLjQK..." }
+                  reply_to: "webhook:https://you.example/brainarbeit-hook"
+                  needs_confirmation: true
+      responses:
+        "200":
+          description: Submitted (may be queued, blocked, or staged for approval).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Raw cmd or a verb not exposed to the API. }
+        "413": { description: Attachments exceed the size cap. }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /jobs/dag:
+    post:
+      tags: [jobs]
+      summary: Submit a whole work-order DAG atomically (forward-only deps).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodes]
+              properties:
+                nodes:
+                  type: array
+                  items: { $ref: "#/components/schemas/SubmitRequest" }
+                  description: Each node may carry `deps:[i,j]` referencing EARLIER nodes by index.
+                group_id: { type: string }
+                parent_job: { type: integer }
+      responses:
+        "200": { $ref: "#/components/responses/VerbResult" }
+
+  /jobs/mine:
+    get:
+      tags: [jobs]
+      summary: The caller's own jobs (filter by state).
+      parameters:
+        - { name: state, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200": { $ref: "#/components/responses/VerbResult" }
+
+  /jobs/{id}:
+    get:
+      tags: [jobs]
+      summary: One job snapshot + queue position.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses:
+        "200": { $ref: "#/components/responses/VerbResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /jobs/{id}/cvm:
+    get:
+      tags: [jobs]
+      summary: The Canonical View Model (the one serializer every adapter renders identically).
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/result:
+    get:
+      tags: [jobs]
+      summary: The typed result ({artifacts, verdict, confidence}).
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/outputs:
+    get:
+      tags: [jobs]
+      summary: (alias) the job's emitted outputs are part of its result/whereis view.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/log:
+    get:
+      tags: [jobs]
+      summary: stdout/stderr tail.
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - { name: bytes, in: query, schema: { type: integer, default: 8000 } }
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/events:
+    get:
+      tags: [jobs]
+      summary: A job's event history (typed bus events).
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - { name: limit, in: query, schema: { type: integer, default: 200 } }
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/history:
+    get:
+      tags: [jobs]
+      summary: The job + its events in one call.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/whereis:
+    get:
+      tags: [jobs]
+      summary: Post-GC ledger answer (status / what / when / who) after artifacts are emitted.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/handoff:
+    get:
+      tags: [jobs]
+      summary: Upstream dependency artifact hand-off refs.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/steer:
+    post:
+      tags: [jobs]
+      summary: Live feedback into a RUNNING job.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { input: {} } }
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /jobs/{id}/cancel:
+    post:
+      tags: [jobs]
+      summary: Cancel a queued or running job.
+      parameters: [ { $ref: "#/components/parameters/JobId" } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /groups/{id}:
+    get:
+      tags: [jobs]
+      summary: A workflow group's aggregate status.
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /outputs:
+    get:
+      tags: [jobs]
+      summary: All outputs the caller's jobs have emitted.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 200 } }
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /approvals:
+    get:
+      tags: [approvals]
+      summary: The per-principal pending-approvals inbox (the live "does this pass?" queue).
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /approvals/{nonce}:
+    post:
+      tags: [approvals]
+      summary: Resolve an approval gate (approve / reject / revise / deny).
+      description: |
+        Nonce-gated + idempotent + per-principal. `approve` lets the side effect fire (or finalizes
+        a post-result gate to `done`); `reject` retains the artifact but blocks the action; `revise`
+        re-runs with your feedback (delivered into the job via the steer channel); `deny` cancels a
+        pre-dispatch staged job. A cross-tenant nonce looks like an unknown nonce.
+      parameters:
+        - { name: nonce, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approve, reject, revise, deny] }
+                feedback: { type: string, description: "Required-ish for revise; the notes to re-run with." }
+      responses:
+        "200": { $ref: "#/components/responses/VerbResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /egress:
+    get:
+      tags: [approvals]
+      summary: Pending new-WAN-destination egress proposals (human operator only).
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /egress/{action}:
+    post:
+      tags: [approvals]
+      summary: Approve or deny an egress proposal (the brain can never self-approve egress).
+      parameters:
+        - { name: action, in: path, required: true, schema: { type: string, enum: [approve, deny] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [nonce], properties: { nonce: { type: string } } }
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /stream/replay:
+    get:
+      tags: [stream]
+      summary: Replay events since a cursor (reconnect convergence) before tailing live over WS.
+      parameters:
+        - { name: topics, in: query, schema: { type: string }, description: "comma-separated, e.g. user/<me>" }
+        - { name: after_id, in: query, schema: { type: integer, default: 0 } }
+      responses: { "200": { $ref: "#/components/responses/VerbResult" } }
+
+  /media/ticket:
+    post:
+      tags: [media]
+      summary: Mint a short-lived, signed media ticket (so a header-less browser media element binds to you).
+      responses:
+        "200":
+          description: A ticket to use as ?ticket= on the media WS.
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean }, ticket: { type: string } } }
+
+  /media/webrtc:
+    get:
+      tags: [media]
+      summary: WebRTC signaling availability + how to negotiate (forward-compat).
+      description: |
+        Two-way WebRTC is built by a separate agent in phantom. When its signaling backend is wired
+        (GW_WEBRTC_SIGNAL) this returns the signaling endpoint and the supported message kinds
+        (offer / answer / ice-candidate); until then it returns 503 with a clear note. The MJPEG
+        lane (`/media/screen`, WebSocket — see AsyncAPI) works today.
+      responses:
+        "200": { description: Signaling available. }
+        "503": { description: WebRTC backend not yet wired (use MJPEG). }
+
+  /webhooks:
+    post:
+      tags: [webhooks]
+      summary: Register a webhook subscription (box -> external) for a topic set.
+      description: |
+        For per-job delivery, set `reply_to: "webhook:<https-url>"` on a submit instead. This
+        endpoint registers a standing subscription (default `user/<me>`). The box POSTs each typed
+        event to your URL with an HMAC-SHA256 `X-Brainarbeit-Signature`. Host must be on the box's
+        allow-list (default-deny). HTTPS required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                topics: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Registered; returns the HMAC signing secret.
+        "403": { description: Host not on the allow-list. }
+
+  /openapi.yaml:
+    get:
+      tags: [meta]
+      summary: This document (machine-readable).
+      security: []
+      responses: { "200": { description: OpenAPI YAML } }
+
+  /asyncapi.yaml:
+    get:
+      tags: [meta]
+      summary: The WebSocket / event-bus / webhook contract (machine-readable).
+      security: []
+      responses: { "200": { description: AsyncAPI YAML } }
+
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <device_did>.<durable_token>`. The durable token is issued once when
+        you pair a device (one-time OOB code); thereafter you reconnect with it, no re-login,
+        connected-until-revoked. Only its peppered hash is stored on the box.
+    twoFactor:
+      type: apiKey
+      in: header
+      name: X-Brainarbeit-2FA
+      description: |
+        **MANDATORY** RFC 6238 TOTP (6 digits) for the bound principal. A stolen durable token alone
+        is never sufficient. Anti-replay (an accepted code can't be reused in its window) +
+        brute-force lockout are enforced on the box.
+
+  parameters:
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    VerbResult:
+      description: A proxied engine verb result. `ok:false` carries a human-readable `error`.
+      content:
+        application/json:
+          schema: { type: object, properties: { ok: { type: boolean }, error: { type: string } } }
+    SubmitResult:
+      description: Submit result.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SubmitResponse" }
+    Unauthorized:
+      description: Missing/invalid credential or 2FA. `X-Brainarbeit-Need-2FA:1` if 2FA is the gap.
+    BadRequest:
+      description: Malformed request.
+    NotFound:
+      description: No such job (or not visible to the caller).
+    RateLimited:
+      description: Per-device rate ceiling exceeded.
+
+  schemas:
+    Attachment:
+      type: object
+      required: [filename, content_b64]
+      properties:
+        filename: { type: string }
+        content_b64: { type: string, description: "base64-encoded file bytes" }
+        content_type: { type: string }
+    SubmitRequest:
+      type: object
+      required: [task_type]
+      properties:
+        task_type: { type: string, description: "a server-side typed task template (no raw cmd)" }
+        params: { type: object, description: "task parameters (validated parse-first by the template)" }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/Attachment" }
+          description: "uploaded files; staged on the box, passed to the job as params.attachments path refs"
+        path_refs:
+          type: array
+          items: { type: string }
+          description: "files ALREADY on the box (e.g. a discovered share) to pass without re-upload"
+        class: { type: string, default: worker, description: "governor class (worker/interactive/...)" }
+        tag: { type: string }
+        room: { type: string }
+        priority: { type: integer }
+        mem: { type: integer, description: "RAM reservation hint (MiB)" }
+        timeout: { type: integer }
+        idempotent: { type: boolean }
+        needs_confirmation: { type: boolean, description: "force a pre-dispatch approval gate" }
+        reply_to:
+          type: string
+          description: "where to deliver results: <adapter>:<address> (webhook:/telegram:/email:)"
+        deps: { type: array, items: { type: integer } }
+        group_id: { type: string }
+        parent_job: { type: integer }
+        work_order:
+          type: object
+          description: "the typed {goal,inputs,constraints,acceptance} hand-off contract"
+    SubmitResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        id: { type: integer }
+        state: { type: string, enum: [queued, blocked, staged] }
+        pos: { type: integer }
+        nonce: { type: string, description: "present when staged for approval — resolve at /approvals/{nonce}" }
+        approval: { type: string }
+        group_id: { type: string }
+        parent_job: { type: integer }

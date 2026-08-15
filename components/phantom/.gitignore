@@ -1,0 +1,5 @@
+/target
+# Ignore Cargo build dirs anywhere in the tree (workspace members / nested crates).
+target/
+__pycache__/
+*.pyc

@@ -1,0 +1,20 @@
+[Unit]
+Description=portioneer notify-broker (pn-notify) — the single result-delivery point
+After=pnd.service
+Requires=pnd.service
+
+[Service]
+Type=simple
+ExecStart=%h/portioneer/tools/pn-notify
+Slice=pn-interactive.slice
+Restart=always
+RestartSec=2
+MemoryAccounting=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

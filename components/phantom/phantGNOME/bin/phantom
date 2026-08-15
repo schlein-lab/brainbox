@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -u
+OBJ=(--session --dest org.gnome.Phantom --object-path /org/gnome/Phantom --method org.gnome.Phantom)
+call() { gdbus call "${OBJ[@]}.$1" "${@:2}"; }
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  state|status)    call DebugState ;;
+  windows|ls)      call ListWindows ;;
+  focused)         call FocusedWindow ;;
+  apps)            call ListA11yApps ;;
+  tree)            call ReadTree "${1:?app hint}" "${2:-200}" ;;
+  widget)          call ReadWidget "${1:?app}" "${2:?selector}" ;;
+  invoke)          call InvokeAction "${1:?app}" "${2:?selector}" "${3:?action}" ;;
+  write)           call WriteWidget "${1:?app}" "${2:?selector}" "${3:?text}" ;;
+  type)            call Type "${1:?text}" ;;
+  click)           call Click "${1:?x}" "${2:?y}" ;;
+  activate|raise)  call ActivateWindow "${1:?id}" 0 ;;
+  minimize)        call Minimize "${1:?id}" ;;
+  maximize)        call Maximize "${1:?id}" ;;
+  stage)           call SetStage "${1:?A|B|C}" ;;
+  summon|front)    call SummonLlm ;;
+  snapshot|shot)   python3 "$HOME/phantGNOME/ph_snap.py" "${1:-/tmp/phantom-shot.png}" && echo "saved ${1:-/tmp/phantom-shot.png}" ;;
+  notify|tell)
+    msg="$*"
+    [ -n "$msg" ] || { echo "usage: phantom notify \"message\"" >&2; exit 1; }
+    TOK="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$HOME/zyrkel/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'\''[:space:]')"
+    CHAT="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/zyrkel/config.json'))).get('allowed_chat_id',''))" 2>/dev/null)"
+    if [ -z "$TOK" ] || [ -z "$CHAT" ]; then echo "notify: telegram token/chat not configured" >&2; exit 1; fi
+    if curl -s "https://api.telegram.org/bot${TOK}/sendMessage" --data-urlencode "chat_id=${CHAT}" --data-urlencode "text=${msg}" | grep -q '"ok":true'; then
+      echo "notified"; else echo "notify failed" >&2; exit 1; fi
+    ;;
+  secret)
+    # LOCAL secret store — secrets live HERE, never in a kartei card (cards stay
+    # shareable). PIPE values straight into commands; do not echo them.
+    SF="$HOME/.config/phantom/secrets"
+    sub="${1:-help}"; shift 2>/dev/null || true
+    case "$sub" in
+      get)  k="${1:?key}"; grep -E "^${k}=" "$SF" 2>/dev/null | head -1 | cut -d= -f2- ;;
+      set)  mkdir -p "$(dirname "$SF")"; : >>"$SF"; chmod 600 "$SF"; k="${1:?key}"; v="${2:?value}"; \
+            grep -vE "^${k}=" "$SF" 2>/dev/null >"$SF.tmp"; mv "$SF.tmp" "$SF"; printf '%s=%s\n' "$k" "$v" >>"$SF"; chmod 600 "$SF"; echo "stored '$k' (value hidden)" ;;
+      has)  k="${1:?key}"; grep -qE "^${k}=" "$SF" 2>/dev/null && echo yes || echo no ;;
+      list) grep -oE '^[^=]+' "$SF" 2>/dev/null ;;     # KEYS only, never values
+      *)    echo "phantom secret <get KEY | set KEY VALUE | has KEY | list>  (store: $SF, mode 600)" ;;
+    esac
+    ;;
+  help|*) cat <<'EOF'
+phantom — drive the phantGNOME desktop (org.gnome.Phantom). Usage:
+  phantom state | windows | focused | apps        read the desktop
+  phantom tree APP [max] | widget APP SELECTOR     read an app's a11y tree / one widget
+  phantom write APP SELECTOR TEXT                  type into a field FOCUS-FREE (preferred)
+  phantom type TEXT | click X Y                    raw inject (target must be visible+mapped)
+  phantom activate ID | minimize ID | maximize ID  window ops
+  phantom stage A|B|C                              set intervention mode
+  phantom summon                                   bring THIS (claude) window to the front
+  phantom snapshot [file]                          save a PNG of the whole screen
+  phantom notify "message"                         PROACTIVELY message the human (Telegram)
+  phantom secret <get|set|has|list>                local secret store (never put secrets in cards)
+EOF
+  ;;
+esac

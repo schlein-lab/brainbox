@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+
+import os, sys, time, json, signal
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import ipc, db, brain, VERSION, DB_PATH
+from pnlib import brain as B
+
+class Brain:
+
+    def __init__(self, cx, ask_fn, pnd_fn, *, principal=None,
+                 task_type_allowlist=B.DEFAULT_TASK_TYPE_ALLOWLIST):
+        self.cx = cx
+        self.ask_fn = ask_fn
+        self.pnd_fn = pnd_fn
+        self.principal = principal or os.environ.get("PN_BRAIN_PRINCIPAL", "brain")
+        self.allowlist = task_type_allowlist
+        self.turns = 0
+        self.acted = 0
+        self.rejected = 0
+
+        self.notify_cursor = B.get_state(cx, self.principal, "notify_cursor", default=0)
+
+    def resume(self):
+
+        plan = B.resume_plan(self.cx, self.principal)
+        self.log("resume", {"prev_session": plan["prev_session"],
+                            "fresh_session": plan["fresh_session"]["session_id"],
+                            "inflight": plan["inflight"], "timers": len(plan["timers"]),
+                            "digest_bytes": len(plan["digest"] or "")})
+        return plan
+
+    def run_turn(self, prompt=None, *, now=None):
+
+        now = B._now(now)
+        self.turns += 1
+        sess = B.get_session(self.cx, self.principal) or B.new_session(self.cx, self.principal, now=now)
+
+        out = {"turn": self.turns, "session": sess["session_id"], "fired_timers": [],
+               "summaries": [], "action": None, "disposition": None}
+
+        for t in B.due_timers(self.cx, now=now):
+            res = self._fire_timer(t, now=now)
+            out["fired_timers"].append(res)
+
+        out["summaries"] = self._emit_completion_summaries()
+
+        if prompt is None:
+            prompt = self._build_prompt(sess)
+        try:
+            text = self.ask_fn(prompt, session=sess)
+        except Exception as e:
+            out["disposition"] = {"ok": False, "rejected": True, "error": f"reasoning face: {e}"}
+            self.log("reason-error", {"error": str(e)})
+            return out
+        out["action"], out["disposition"] = self._dispose_text(text, sess=sess, now=now)
+        return out
+
+    def _dispose_text(self, text, *, sess, now=None):
+
+        now = B._now(now)
+        try:
+            action = B.parse_action(text, task_type_allowlist=self.allowlist)
+        except B.ValidationError as e:
+            self.rejected += 1
+            self.log("reject", {"why": "closed-world", "error": str(e),
+                                "raw": (text or "")[:300]})
+            return (None, {"ok": False, "rejected": True, "error": str(e)})
+        return (action, self._dispose_action(action, sess=sess, now=now))
+
+    def _dispose_action(self, action, *, sess, now=None):
+
+        now = B._now(now)
+        try:
+            plan = B.plan_dispose(action, acting_as=self.principal)
+        except B.ActingAsViolation as e:
+            self.rejected += 1
+            self.log("reject", {"why": "acting-as", "error": str(e), "action": action})
+            return {"ok": False, "rejected": True, "error": str(e)}
+
+        if plan["kind"] == "sleep":
+            B.bump_session(self.cx, self.principal, progress=False, now=now)
+            self.log("sleep", {"seconds": plan["seconds"]})
+            return {"ok": True, "op": "sleep", "seconds": plan["seconds"]}
+        if plan["kind"] == "noop":
+            return {"ok": True, "op": action["op"], "noop": plan.get("reason")}
+
+        req = plan["request"]
+        resp = self.pnd_fn(req)
+        ok = bool(resp.get("ok"))
+        if ok:
+            self.acted += 1
+            B.bump_session(self.cx, self.principal, tasks_delta=1, progress=True, now=now)
+        self.log("dispose", {"op": action["op"], "request": _safe(req), "ok": ok,
+                            "id": resp.get("id"), "state": resp.get("state"),
+                            "error": resp.get("error")})
+        return {"ok": ok, "op": action["op"], "response": resp}
+
+    def _fire_timer(self, timer, *, now=None):
+
+        now = B._now(now)
+        sess = B.get_session(self.cx, self.principal) or B.new_session(self.cx, self.principal, now=now)
+        try:
+            action = B.validate_action(json.loads(timer["action_json"]),
+                                       task_type_allowlist=self.allowlist)
+        except (B.ValidationError, ValueError, TypeError) as e:
+            B.advance_timer(self.cx, timer["id"], now=now)
+            self.log("timer-reject", {"name": timer["name"], "error": str(e)})
+            return {"name": timer["name"], "ok": False, "error": str(e)}
+        disp = self._dispose_action(action, sess=sess, now=now)
+        B.advance_timer(self.cx, timer["id"], now=now)
+        self.log("timer-fire", {"name": timer["name"], "op": action["op"],
+                               "ok": disp.get("ok"), "id": (disp.get("response") or {}).get("id")})
+        return {"name": timer["name"], "ok": disp.get("ok"), "op": action["op"],
+                "disposition": disp}
+
+    def consume_discovery_report(self, report):
+
+        from pnlib import discoverrun
+        sess = B.get_session(self.cx, self.principal) or B.new_session(self.cx, self.principal)
+        out = []
+        for action in discoverrun.proposals_to_actions(report, task_type_allowlist=self.allowlist):
+            try:
+                validated = B.validate_action(action, task_type_allowlist=self.allowlist)
+            except B.ValidationError as e:
+                self.log("discover-propose-reject", {"error": str(e)})
+                continue
+            disp = self._dispose_action(validated, sess=sess)
+            out.append({"summary": action.get("summary"), "ok": disp.get("ok"),
+                        "id": (disp.get("response") or {}).get("id")})
+            self.log("discover-propose", {"summary": action.get("summary"), "ok": disp.get("ok")})
+        return out
+
+    def _emit_completion_summaries(self):
+
+        out = []
+        rep = self.pnd_fn({"verb": "replay", "topics": [f"user/{self.principal}"],
+                          "after_id": self.notify_cursor, "limit": 200})
+        if not rep.get("ok"):
+            return out
+        max_seen = self.notify_cursor
+        for ev in rep.get("events", []):
+            max_seen = max(max_seen, ev.get("id", 0))
+            if ev.get("kind") != "notify":
+                continue
+            try:
+                data = json.loads(ev.get("data") or "{}")
+            except (ValueError, TypeError):
+                data = {}
+            if data.get("state") not in ("done", "failed", "rejected", "timeout"):
+                continue
+            reply_to = data.get("reply_to")
+            if not reply_to:
+                continue
+            msg = (f"job {data.get('job_id')} ({data.get('task_type') or '?'}) "
+                   f"-> {data.get('state')}")
+            r = self.pnd_fn({"verb": "submit", "task_type": "summary.notify",
+                            "params": {"msg": msg}, "reply_to": reply_to,
+                            "tag": "brain:summary"})
+            out.append({"job": data.get("job_id"), "ok": r.get("ok"), "to": reply_to})
+        if max_seen > self.notify_cursor:
+            self.notify_cursor = max_seen
+            B.set_state(self.cx, self.principal, "notify_cursor", max_seen)
+        return out
+
+    def _build_prompt(self, sess):
+
+        from pnlib import ctxpressure
+        digest = B.get_state(self.cx, self.principal, "digest", default="")
+        intents = B.get_state(self.cx, self.principal, "intents", default=[])
+        inflight = [r["id"] for r in self.cx.execute(
+            "SELECT id FROM jobs WHERE submitter_principal=? AND state IN "
+            "('queued','blocked','running','staged','awaiting_approval') ORDER BY id LIMIT 50",
+            (self.principal,)).fetchall()]
+        system = ctxpressure.build_system_contract(
+            task_type_allowlist=self.allowlist, allowed_ops=B.ALLOWED_OPS)
+        return json.dumps({"role": "brain", "principal": self.principal,
+                          "cache_prefix": sess.get("cache_prefix"),
+                          "system": system,
+                          "digest": digest, "intents": intents, "inflight": inflight,
+                          "instructions": "Emit ONE action as a JSON object with a closed `op`. "
+                          "No shell/raw. See `system` for the closed world."})
+
+    def log(self, kind, data):
+
+        try:
+            sys.stderr.write(f"pn-brain[{self.principal}] {kind}: "
+                             f"{json.dumps(data, separators=(',', ':'))}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+def _safe(req):
+
+    return {k: v for k, v in req.items() if not k.startswith("_")}
+
+def _live_ask_fn(llm_sock):
+
+    def ask(prompt, *, session):
+        resp = ipc.send_request({"verb": "reason", "prompt": prompt},
+                                timeout=int(os.environ.get("PN_LLM_TIMEOUT", "300")),
+                                path=llm_sock)
+        if not resp.get("ok"):
+            err = resp.get("error")
+            raise RuntimeError("pn-llmd error" if err in (None, "", "empty") else err)
+        return resp.get("text") or ""
+    return ask
+
+def _live_pnd_fn():
+
+    def call(req):
+        return ipc.send_request(req)
+    return call
+
+def main():
+    principal = os.environ.get("PN_BRAIN_PRINCIPAL", "brain")
+    llm_sock = os.environ.get("PN_LLM_SOCK") or os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pn-llmd.sock")
+    cx = db.connect(DB_PATH)
+    bn = Brain(cx, _live_ask_fn(llm_sock), _live_pnd_fn(), principal=principal)
+    stop = {"v": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(v=True))
+    signal.signal(signal.SIGINT, lambda *_: stop.update(v=True))
+    sys.stderr.write(f"pn-brain {VERSION} up: principal={principal} llm_sock={llm_sock}\n")
+    sys.stderr.flush()
+    bn.resume()
+    tick = float(os.environ.get("PN_BRAIN_TICK_S", "2.0"))
+    max_turns = int(os.environ.get("PN_BRAIN_MAX_TURNS", "0"))
+    while not stop["v"]:
+        try:
+            bn.run_turn()
+        except Exception as e:
+            sys.stderr.write(f"pn-brain turn error: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+        if max_turns and bn.turns >= max_turns:
+            break
+        time.sleep(tick)
+
+if __name__ == "__main__":
+    main()

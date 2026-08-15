@@ -1,0 +1,95 @@
+#!/bin/bash
+set -u
+CG=/sys/fs/cgroup
+U=$( . /etc/brainbox/service.env 2>/dev/null; echo "${SERVICE_USER:-}" )
+[ -n "$U" ] || U=$( . /etc/brainbox/site.conf 2>/dev/null; echo "${SERVICE_USER:-}" )
+[ -n "$U" ] || U=$( id -nu 1000 2>/dev/null )
+[ -n "$U" ] || U=root
+PN=$CG/pn.slice
+
+log(){ echo "[pn-cgtree] $*"; }
+w(){ printf '%s' "$2" > "$1" 2>/dev/null && return 0; log "  warn: could not write $1 <- '$2'"; return 1; }
+own(){ chown "$U" "$1" 2>/dev/null || log "  warn: could not chown $1"; }
+rd(){ cat "$1" 2>/dev/null; }
+
+[ -d "$CG" ] || { log "no cgroup2 at $CG — abort (fail-safe)"; exit 0; }
+
+B=$CG/pn-batch.slice
+C=$CG/pn-critical.slice
+BHIGH=$(rd $B/memory.high);      [ -n "${BHIGH:-}" ] && [ "$BHIGH" != max ] || BHIGH=$((3*1024*1024*1024))
+BMAX=$(rd $B/memory.max);        [ -n "${BMAX:-}"  ] && [ "$BMAX"  != max ] || BMAX=$((4*1024*1024*1024))
+BSWAP=$(rd $B/memory.swap.max);  [ -n "${BSWAP:-}" ] && [ "$BSWAP" != max ] || BSWAP=$((1024*1024*1024))
+BCPUW=$(rd $B/cpu.weight);       [ -n "${BCPUW:-}" ] || BCPUW=1000
+CMIN=536870912
+MEMTOTAL_KB=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null); MEMTOTAL_KB=${MEMTOTAL_KB:-0}
+MEMTOTAL_B=$((MEMTOTAL_KB*1024))
+
+SITE=/etc/brainbox/site.conf
+gv(){ sed -n "s/^$1=//p" "$SITE" 2>/dev/null | head -1; }
+BH_MIB=$(gv PN_BATCH_HIGH_MIB); BM_MIB=$(gv PN_BATCH_MAX_MIB)
+case "${BH_MIB:-}" in ''|*[!0-9]*) : ;; *) BHIGH=$((BH_MIB*1024*1024)) ;; esac
+case "${BM_MIB:-}" in ''|*[!0-9]*) : ;; *) BMAX=$((BM_MIB*1024*1024)) ;; esac
+[ "$BMAX" -le "$BHIGH" ] && BMAX=$((BHIGH + 1024*1024*1024))
+CUR=$(rd $CG/pn.slice/batch/memory.current); CUR=${CUR:-0}
+if [ "$BMAX" -lt "$CUR" ]; then
+  log "REFUSE: memory.max=$BMAX < current=$CUR — would OOM-kill inside the slice; keeping the old cap"
+  BMAX=$(rd $CG/pn.slice/batch/memory.max); [ "${BMAX:-max}" = max ] && BMAX=$((4*1024*1024*1024))
+fi
+
+log "caps: batch high=$BHIGH max=$BMAX swap=$BSWAP cpuw=$BCPUW ; critical min=$CMIN"
+
+mkdir -p "$PN" 2>/dev/null
+w "$PN/memory.min" "$CMIN"
+w "$PN/cgroup.subtree_control" "+cpu +io +memory +pids"
+own "$PN/cgroup.procs"
+own "$PN/cgroup.threads"
+
+mkdir -p "$PN/critical" 2>/dev/null
+w "$PN/critical/memory.min" "$CMIN"
+w "$PN/critical/memory.low" "$CMIN"
+w "$PN/critical/cpu.weight" "10000"
+w "$PN/critical/cgroup.subtree_control" "+cpu +memory +pids"
+mkdir -p "$PN/critical/pnd" 2>/dev/null
+
+mkdir -p "$PN/batch" 2>/dev/null
+w "$PN/batch/memory.high" "$BHIGH"
+w "$PN/batch/memory.max"  "$BMAX"
+w "$PN/batch/memory.swap.max" "$BSWAP"
+w "$PN/batch/cpu.weight"  "$BCPUW"
+w "$PN/batch/cgroup.subtree_control" "+cpu +memory +pids"
+own "$PN/batch"
+own "$PN/batch/cgroup.procs"
+own "$PN/batch/cgroup.subtree_control"
+own "$PN/batch/cgroup.threads"
+
+mkdir -p "$PN/interactive" 2>/dev/null
+w "$PN/interactive/memory.min" "$CMIN"
+if [ "$MEMTOTAL_B" -gt 0 ]; then
+  IMAX=$(( MEMTOTAL_B - BMAX - CMIN ))
+  [ "$IMAX" -lt $((512*1024*1024)) ] && IMAX=$((512*1024*1024))
+  ICUR=$(rd "$PN/interactive/memory.current"); ICUR=${ICUR:-0}
+  IHIGH=$IMAX
+  [ "$IHIGH" -le $((ICUR + 512*1024*1024)) ] && IHIGH=$(( ICUR + 512*1024*1024 ))
+  w "$PN/interactive/memory.high" "$IHIGH"
+  IFRESH=$((256*1024*1024))
+  if [ "$ICUR" -lt "$IFRESH" ]; then
+    w "$PN/interactive/memory.max" "$IMAX"
+    log "interactive: fresh tier (cur=$ICUR) -> hard memory.max=$IMAX + soft memory.high=$IHIGH"
+  else
+    log "interactive: LIVE tier (cur=$ICUR >= $IFRESH) -> soft memory.high=$IHIGH only; leaving memory.max=max (never risk OOM of live cells)"
+  fi
+fi
+w "$PN/interactive/cpu.weight" "9000"
+w "$PN/interactive/cgroup.subtree_control" "+cpu +memory +pids"
+own "$PN/interactive"
+own "$PN/interactive/cgroup.procs"
+own "$PN/interactive/cgroup.subtree_control"
+own "$PN/interactive/cgroup.threads"
+
+log "layout:"
+for d in "$PN" "$PN/critical" "$PN/critical/pnd" "$PN/interactive" "$PN/batch"; do
+  printf '  %s ' "$d"; ls -ld "$d" 2>/dev/null | awk '{print $1,$3,$4}'
+done
+log "ownership of delegated core files:"
+ls -l "$PN/cgroup.procs" "$PN/batch/cgroup.procs" "$PN/batch" 2>/dev/null | sed 's/^/  /'
+log "done."

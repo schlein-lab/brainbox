@@ -1,0 +1,236 @@
+asyncapi: 3.0.0
+info:
+  title: Brainarbeit Event & Media API
+  version: "1.0.0"
+  description: |
+    The **receive** half of the Brainarbeit public API: the single-reality event stream, the media
+    streams, and webhooks. One event shape across every transport.
+
+    - **Event stream (WebSocket):** subscribe to `user/<principal>` and get every event on jobs you
+      own — results, progress, partial results, approval-requests, state changes — without
+      enumerating job ids. Reconnect-replay: pass `after_id` (a monotonic cursor) and the box
+      replays what you missed, then tails live (at-least-once; dedupe on event `id`).
+    - **Media (WebSocket):** watch the box work. **MJPEG today** (binary JPEG frames over
+      `/v1/media/screen`); **WebRTC later** (signaling proxied from phantom — see the channel).
+    - **Webhooks (HTTP, box -> you):** the same typed events POSTed to your URL, HMAC-signed.
+
+    Auth is the same model as REST: `Authorization: Bearer <device_did>.<durable_token>` +
+    `X-Brainarbeit-2FA: <totp>`. For header-less browser media, mint a short-lived ticket at
+    `POST /v1/media/ticket` and pass `?ticket=` on the media WS.
+
+defaultContentType: application/json
+
+servers:
+  box:
+    host: "brainbox.local:8810"
+    protocol: wss
+    description: A Brainbox (LAN or via the relay). Use ws:// only on loopback.
+    security:
+      - $ref: "#/components/securitySchemes/bearerToken"
+      - $ref: "#/components/securitySchemes/twoFactor"
+
+channels:
+  eventStream:
+    address: /v1/stream
+    title: The single-reality event bus
+    description: |
+      Subscribe with `?topics=user/<principal>` (default if omitted: your own user topic) and
+      optionally `?after_id=<cursor>` for reconnect-replay. The box authorizes topics server-side:
+      you only ever get `user/<you>`, `job/<id>` and `group/<gid>` for jobs you own (or all, if you
+      hold `view:all`). Frames the box can't authorize are silently dropped from your set.
+    parameters:
+      topics:
+        description: Comma-separated topic set (e.g. `user/alice`, `job/42`, `group/wf-abc`).
+      after_id:
+        description: Resume cursor — replay events with id > after_id, then tail live.
+    messages:
+      subscribed: { $ref: "#/components/messages/Subscribed" }
+      event: { $ref: "#/components/messages/Event" }
+      ping: { $ref: "#/components/messages/Ping" }
+
+  mediaScreen:
+    address: /v1/media/screen
+    title: MJPEG live screen (watch the box)
+    description: |
+      Binary WebSocket frames, each a complete JPEG (phantom `streamd`, display.md §7). Authenticate
+      with headers, or `?ticket=<media-ticket>` for browsers. Display is non-sacred: if the display
+      tier is down the box sends one `{"type":"error"}` text frame and closes — your data jobs are
+      unaffected.
+    messages:
+      jpegFrame: { $ref: "#/components/messages/JpegFrame" }
+
+  mediaWebrtc:
+    address: /v1/media/webrtc/signal
+    title: WebRTC signaling (two-way A/V + control) — forward-compatible
+    description: |
+      A separate agent builds two-way WebRTC in phantom (branch media-webrtc-bidirectional). When
+      its signaling backend is wired (the gateway's GW_WEBRTC_SIGNAL), this channel proxies signaling
+      between you and the box: you send an `offer`, the box answers, both trickle `ice-candidate`s,
+      and a peer connection carries video (and, in the bidirectional build, input back). Until then
+      `GET /v1/media/webrtc` returns 503 — use MJPEG. The message CONTRACT is published now.
+    messages:
+      offer: { $ref: "#/components/messages/SdpOffer" }
+      answer: { $ref: "#/components/messages/SdpAnswer" }
+      ice: { $ref: "#/components/messages/IceCandidate" }
+
+  webhookDelivery:
+    address: "{your-registered-url}"
+    title: Webhook delivery (box -> you)
+    description: |
+      The box POSTs each typed event (the same shape as the WS `event` payload) to a URL you set via
+      `reply_to: "webhook:<url>"` on a submit, or via `POST /v1/webhooks`. Headers:
+      `X-Brainarbeit-Signature: sha256=<hmac>` (verify over the raw body with your signing secret),
+      `X-Brainarbeit-Delivery: <event id>` (dedupe key). HTTPS + allow-listed host required.
+    messages:
+      event: { $ref: "#/components/messages/Event" }
+
+operations:
+  subscribe:
+    action: receive
+    channel: { $ref: "#/channels/eventStream" }
+    summary: Receive the live event stream for your topics.
+    messages:
+      - { $ref: "#/channels/eventStream/messages/subscribed" }
+      - { $ref: "#/channels/eventStream/messages/event" }
+      - { $ref: "#/channels/eventStream/messages/ping" }
+  watchScreen:
+    action: receive
+    channel: { $ref: "#/channels/mediaScreen" }
+    summary: Receive MJPEG frames of the box's screen.
+    messages:
+      - { $ref: "#/channels/mediaScreen/messages/jpegFrame" }
+  negotiateWebrtc:
+    action: send
+    channel: { $ref: "#/channels/mediaWebrtc" }
+    summary: Send an SDP offer / ICE candidates to negotiate a peer connection (when available).
+    messages:
+      - { $ref: "#/channels/mediaWebrtc/messages/offer" }
+      - { $ref: "#/channels/mediaWebrtc/messages/ice" }
+  receiveWebhook:
+    action: receive
+    channel: { $ref: "#/channels/webhookDelivery" }
+    summary: Your endpoint receives box events.
+    messages:
+      - { $ref: "#/channels/webhookDelivery/messages/event" }
+
+components:
+  securitySchemes:
+    bearerToken:
+      type: httpApiKey
+      in: header
+      name: Authorization
+      description: "Bearer <device_did>.<durable_token>"
+    twoFactor:
+      type: httpApiKey
+      in: header
+      name: X-Brainarbeit-2FA
+      description: "MANDATORY RFC 6238 TOTP (6 digits)."
+
+  messages:
+    Subscribed:
+      title: subscribed
+      summary: Sent once when the subscription opens, with the authorized topic set + cursor.
+      payload:
+        type: object
+        properties:
+          ok: { type: boolean }
+          type: { const: subscribed }
+          topics: { type: array, items: { type: string } }
+          principal: { type: string }
+          cursor: { type: integer, description: "the current max event id (your resume point)" }
+    Ping:
+      title: ping
+      summary: Idle keepalive with the current cursor.
+      payload:
+        type: object
+        properties:
+          type: { const: ping }
+          cursor: { type: integer }
+    Event:
+      title: event
+      summary: One typed bus event (also the webhook body).
+      payload: { $ref: "#/components/schemas/BusEvent" }
+      examples:
+        - name: approvalRequest
+          payload:
+            type: event
+            event:
+              id: 1024
+              ts: 1719700000.0
+              kind: approval-request
+              topic: user/alice
+              data:
+                job_id: 42
+                nonce: "k3y-..."
+                gate: post
+                summary: "Send the customs declaration?"
+                action: { side_effecting: true }
+        - name: result
+          payload:
+            type: event
+            event:
+              id: 1025
+              ts: 1719700050.0
+              kind: result
+              topic: user/alice
+              data: { job_id: 42, verdict: ok, confidence: 0.93 }
+    JpegFrame:
+      title: jpegFrame
+      summary: A single complete JPEG image (binary WebSocket frame).
+      contentType: image/jpeg
+      payload:
+        type: string
+        format: binary
+    SdpOffer:
+      title: offer
+      payload:
+        type: object
+        properties:
+          kind: { const: offer }
+          sdp: { type: string }
+    SdpAnswer:
+      title: answer
+      payload:
+        type: object
+        properties:
+          kind: { const: answer }
+          sdp: { type: string }
+    IceCandidate:
+      title: ice-candidate
+      payload:
+        type: object
+        properties:
+          kind: { const: ice-candidate }
+          candidate: { type: string }
+          sdpMid: { type: string }
+          sdpMLineIndex: { type: integer }
+
+  schemas:
+    BusEvent:
+      type: object
+      properties:
+        type: { type: string, enum: [event], description: "frame type on the WS; absent in webhook body" }
+        event:
+          type: object
+          properties:
+            id: { type: integer, description: "monotonic event id — the reconnect/dedupe cursor" }
+            ts: { type: number }
+            topic: { type: string, description: "job/<id> | group/<gid> | user/<principal>" }
+            kind:
+              type: string
+              enum:
+                - state
+                - progress
+                - partial
+                - notify
+                - steer
+                - result
+                - replicated
+                - error
+                - gc
+                - note
+                - approval-request
+                - approval-result
+                - workorder
+                - group-status
+            data: { type: object }

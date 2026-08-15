@@ -1,0 +1,1517 @@
+#!/usr/bin/env python3
+"""phantom-room — multi-agent / persistent claude rooms on the phantom seat.
+
+A "room" is one or more `claude` sessions running in tmux (persistent across window
+close + reboot, wrap-safe because tmux is a real terminal). A *multi-agent* room runs
+TWO claude agents in a shared working dir and a BROKER that cross-feeds them:
+
+  Agent 1 writes a turn  ->  shown in the shared FEED  +  delivered to Agent 2
+  Agent 2 writes a turn  ->  shown in the shared FEED  +  delivered to Agent 1
+  You type in the composer ->  addressed @1 / @2 / @both
+
+Loop control = DONE-convergence: each agent is instructed (message 1) to end with the
+token <<DONE>> when it has nothing substantive to add; the broker then stops forwarding
+that turn. The runaway backstop is NOT a hard round cap but a PROGRESS REFEREE: every
+`--cap` forwards an independent model (fresh context) judges the trajectory and only
+PAUSES when the room is actually stalled — a productive flux runs on with no ceiling
+(disable with --no-referee or PHANTOM_ROOM_REFEREE=0).
+
+Routing is driven off each agent's structured JSONL transcript
+(~/.claude/projects/<slug>/<id>.jsonl) — NOT terminal scraping — so there is no
+line-wrap corruption and turns are clean and complete.
+
+No third-party deps (stdlib + tmux + claude).
+
+Subcommands:
+  phantom-room new <name> [--agents N|spec] [--cwd DIR] [--cap N] [--no-referee]
+        create a room (default 2 common; --agents 1 | --agents 3 |
+        --agents common,spec:rustfft,newrole). --cap = forwards between progress reviews
+        (default 8); --no-referee = old hard round cap instead of the progress referee.
+  phantom-room wizard [new|add]            interactive builder: count + common/specialist
+  phantom-room addagent <name> [--role R]  add ONE agent (common or specialist) live
+  phantom-room resume <name>               restart a room's agents, resume their sessions
+  phantom-room broker <name>               (internal) the routing daemon loop
+  phantom-room send <name> <@1|@2|@both> <text...>   inject operator input
+  phantom-room attach <name>               open the feed TUI (feed + composer) here
+  phantom-room feedview <name>             (internal) colorized feed tail
+  phantom-room composer <name>             (internal) the @-addressing input line
+  phantom-room list                        list rooms + status
+  phantom-room close <name>                close a room (stop + close topic + drop tab; resumable)
+  phantom-room delete <name>               permanently remove a room (+ delete its topic)
+  phantom-room stop <name>                 stop a room (kills agents + broker)
+
+Right-click a room tab in the cockpit for the room menu: add agent, rename, close, delete.
+"""
+
+import json, os, re, sys, time, subprocess, signal, threading, queue
+
+HOME = os.path.expanduser("~")
+
+LANG = (os.environ.get("PHANTOM_LANG") or os.environ.get("PHANTOM_ROOM_LANG") or "de").lower()[:2]
+def L(de, en): return en if LANG == "en" else de
+STATE = os.path.join(HOME, ".local", "state", "phantom-rooms")
+ROOMS_ROOT = os.path.join(HOME, "rooms")
+PROJ_ROOT = os.path.join(HOME, ".claude", "projects")
+CLAUDE = os.environ.get("PHANTOM_CLAUDE_BIN", os.path.join(HOME, ".local", "bin", "claude"))
+CTX_FILE = os.path.join(HOME, "phantGNOME", "docs", "PHANTOM-LLM-CONTEXT.md")
+DONE = "<<DONE>>"
+
+DEFAULT_CAP = 8
+STARTUP_WAIT = 6.0
+REFEREE_ENV_ON = (os.environ.get("PHANTOM_ROOM_REFEREE", "1").lower() not in ("0", "off", "false", "no"))
+REFEREE_TIMEOUT = 120
+REFEREE_MODEL = os.environ.get("PHANTOM_ROOM_REFEREE_MODEL", "").strip()
+
+COCKPIT = "cockpit"
+COCKPIT_CONF_PATH = os.path.join(HOME, ".config", "tmux", "phantom-cockpit.conf")
+COCKPIT_CONF = """# phantom cockpit — rooms as tabs (tmux windows) in one focal window.
+# Follow the attached foot client's size exactly, so resizing on a mode switch
+# reflows instead of overflowing the window.
+set -g window-size smallest
+setw -g aggressive-resize on
+# Lots of scrollback, and mouse-wheel up FREEZES the view in copy-mode (you stay where
+# you scrolled to instead of being shoved back to the bottom by new output).
+set -g history-limit 50000
+set -g mode-keys vi
+set -g status-position top
+set -g status-justify left
+set -g status-interval 5
+set -g status-style "bg=#0b0b14,fg=#4a4a66"
+# Branding pill (left): ◉ phantom
+set -g status-left "#[fg=#0b0b14,bg=#8a7fff,bold] ◉ phantom #[default]  "
+set -g status-left-length 22
+# Clock + the + neuer Room button (right)
+set -g status-right "#[fg=#6a6a8a] %H:%M #[fg=#0b0b14,bg=#8a7fff,bold] ＋ Room #[default] "
+set -g status-right-length 22
+# Tabs as fancy pills: ❯ for the main claude tab, ◇ inactive room, ◆ active room.
+set -g window-status-format "#[fg=#8a8aac,bg=#15151f] #{?#{==:#W,main},❯,◇} #W #[default] "
+set -g window-status-current-format "#[fg=#0b0b14,bg=#8a7fff,bold] #{?#{==:#W,main},❯,◆} #W #[default] "
+set -g window-status-separator ""
+setw -g automatic-rename off
+set -g allow-rename off
+set -g base-index 0
+set -g pane-border-style "fg=#1a1a2a"
+set -g pane-active-border-style "fg=#8a7fff"
+# Switch rooms by CLICKING the tab buttons. No Alt+Tab (deliberately not bound).
+set -g mouse on
+# Ctrl+C is ALWAYS copy here, never anything else (never reaches the app, never kills):
+# it copies the current mouse selection to the system clipboard. Ctrl+V pastes. Select
+# text by dragging the mouse first, then Ctrl+C.
+bind -n C-c run-shell -b "tmux save-buffer - 2>/dev/null | wl-copy 2>/dev/null || true"
+# A mouse selection copies straight to the system clipboard on release.
+bind -T copy-mode    MouseDragEnd1Pane send -X copy-pipe-and-cancel "wl-copy"
+bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel "wl-copy"
+# Ctrl+V = smart paste into the focused pane: a clipboard IMAGE is saved + its path
+# inserted (claude can view it), TEXT is pasted as-is. (Drag-and-drop a file onto the
+# window inserts its path natively via foot.)
+bind -n C-v run-shell -b "$HOME/.local/bin/phantom-room clip '#{pane_id}'"
+# Click the "＋ Room" button (status-right) -> interactive wizard (room name, how many
+# agents, and per agent common vs specialist — reuse a local specialist or a new role).
+bind -n MouseDown1StatusRight new-window -n "+room" "$HOME/.local/bin/phantom-room wizard new"
+# RIGHT-CLICK a room tab -> room settings menu (add agent, rename, close, delete).
+bind -n MouseDown3Status display-menu -T "#[align=centre]Raum: #{window_name}" -t = -x M -y W "＋ Agent hinzufügen" a "new-window -n +agent '$HOME/.local/bin/phantom-room wizard addto #{window_name}'" "✎ Umbenennen" e "new-window -n +rename '$HOME/.local/bin/phantom-room wizard renameto #{window_name}'" "✕ Raum schließen (resumebar)" c "run-shell -b '$HOME/.local/bin/phantom-room close #{window_name} >/dev/null 2>&1'" "🗑 Raum löschen (endgültig)" d "run-shell -b '$HOME/.local/bin/phantom-room delete #{window_name} >/dev/null 2>&1'"
+"""
+
+def sh(*args, **kw):
+    return subprocess.run(args, capture_output=True, text=True, **kw)
+
+def tmux(*args):
+    return sh("tmux", *args)
+
+def tmux_has(session):
+    return tmux("has-session", "-t", session).returncode == 0
+
+def room_dir(name):  return os.path.join(STATE, name)
+def feed_path(name): return os.path.join(room_dir(name), "feed.log")
+def fifo_path(name): return os.path.join(room_dir(name), "input.fifo")
+def cfg_path(name):  return os.path.join(room_dir(name), "room.json")
+
+def load_cfg(name):
+    with open(cfg_path(name)) as f: return json.load(f)
+
+def save_cfg(name, cfg):
+    tmp = cfg_path(name) + ".tmp"
+    with open(tmp, "w") as f: json.dump(cfg, f, indent=2)
+    os.replace(tmp, cfg_path(name))
+
+def slug_for(cwd):
+
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+def ensure_trusted(cwd):
+
+    p = os.path.join(HOME, ".claude.json")
+    try:
+        d = json.load(open(p))
+    except Exception:
+        return
+    proj = d.setdefault("projects", {}).setdefault(cwd, {})
+    if proj.get("hasTrustDialogAccepted") is True:
+        return
+    proj["hasTrustDialogAccepted"] = True
+    proj["hasClaudeMdExternalIncludesApproved"] = True
+    proj["hasClaudeMdExternalIncludesWarningShown"] = True
+    tmp = p + ".phr.tmp"
+    with open(tmp, "w") as f: json.dump(d, f, indent=2)
+    os.replace(tmp, p)
+
+def accept_bypass(session):
+
+    out = tmux("capture-pane", "-p", "-t", session).stdout or ""
+    if "Bypass Permissions mode" in out and "Yes, I accept" in out:
+        tmux("send-keys", "-t", session, "Down")
+        time.sleep(0.2)
+        tmux("send-keys", "-t", session, "Enter")
+        time.sleep(2.0)
+        return True
+    return False
+
+def wait_ready(session, timeout=18.0):
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        out = tmux("capture-pane", "-p", "-t", session).stdout or ""
+        low = out.lower()
+        if ("for shortcuts" in low or "bypass permissions" in low
+                or "│ >" in out or "? for" in low or "welcome to claude" in low):
+            time.sleep(1.0)
+            return True
+        time.sleep(0.7)
+    return False
+
+def now_hm():
+
+    return time.strftime("%H:%M:%S")
+
+import urllib.request, urllib.parse
+ZYRKEL_ENV = os.path.join(HOME, "zyrkel", ".env")
+ZYRKEL_CFG = os.path.join(HOME, "zyrkel", "config.json")
+ROOM_TOPICS = os.path.join(HOME, ".local", "share", "phantom-room", "room-topics.json")
+_TG = {}
+
+def _tg_cfg():
+    if "tok" not in _TG:
+        tok = None
+        try:
+            for ln in open(ZYRKEL_ENV):
+                if ln.startswith("TELEGRAM_BOT_TOKEN="):
+                    tok = ln.split("=", 1)[1].strip().strip('"').strip("'"); break
+        except Exception:
+            tok = None
+        try:
+            grp = json.load(open(ZYRKEL_CFG)).get("group_chat_id")
+        except Exception:
+            grp = None
+        _TG["tok"], _TG["grp"] = tok, grp
+    return _TG["tok"], _TG["grp"]
+
+def _tg_call(method, params):
+    tok, _ = _tg_cfg()
+    if not tok:
+        return None
+    data = urllib.parse.urlencode(params).encode()
+    req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/{method}", data=data)
+    try:
+        return json.load(urllib.request.urlopen(req, timeout=20))
+    except Exception:
+        return None
+
+def _topics_load():
+    try:
+        return json.load(open(ROOM_TOPICS))
+    except Exception:
+        return {}
+
+def _topics_save(d):
+    os.makedirs(os.path.dirname(ROOM_TOPICS), exist_ok=True)
+    tmp = ROOM_TOPICS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, ROOM_TOPICS)
+
+def tg_topic_ensure(name):
+
+    tok, grp = _tg_cfg()
+    if not tok or grp is None:
+        return None
+    d = _topics_load(); rec = d.get(name)
+    if rec and rec.get("thread_id"):
+        if rec.get("closed"):
+            _tg_call("reopenForumTopic", {"chat_id": grp, "message_thread_id": rec["thread_id"]})
+            rec["closed"] = False; _topics_save(d)
+        return rec["thread_id"]
+    resp = None
+    for _attempt in range(3):
+        resp = _tg_call("createForumTopic", {"chat_id": grp, "name": name[:120]})
+        if resp and resp.get("ok"):
+            break
+        time.sleep(1.5 * (_attempt + 1))
+    if not resp or not resp.get("ok"):
+        return None
+    tid = resp["result"]["message_thread_id"]
+    d[name] = {"thread_id": tid, "name": name, "closed": False}
+    _topics_save(d)
+    return tid
+
+def tg_topic_rename(old, new):
+    tok, grp = _tg_cfg()
+    if not tok or grp is None:
+        return
+    d = _topics_load(); rec = d.get(old)
+    if not rec:
+        return
+    _tg_call("editForumTopic", {"chat_id": grp, "message_thread_id": rec["thread_id"], "name": new[:120]})
+    rec["name"] = new
+    d[new] = rec
+    if new != old and old in d:
+        del d[old]
+    _topics_save(d)
+
+def tg_topic_close(name):
+    tok, grp = _tg_cfg()
+    if not tok or grp is None:
+        return
+    d = _topics_load(); rec = d.get(name)
+    if not rec:
+        return
+    _tg_call("closeForumTopic", {"chat_id": grp, "message_thread_id": rec["thread_id"]})
+    rec["closed"] = True; _topics_save(d)
+
+def tg_topic_send(name, text):
+    tok, grp = _tg_cfg()
+    if not tok or grp is None:
+        return
+    d = _topics_load(); rec = d.get(name)
+    if not rec or rec.get("closed"):
+        return
+    _tg_call("sendMessage", {"chat_id": grp, "message_thread_id": rec["thread_id"], "text": text[:3900]})
+
+def append_feed(name, tag, text):
+    line = f"[{now_hm()} {tag}] {text}".rstrip() + "\n"
+    with open(feed_path(name), "a") as f: f.write(line)
+
+    if tag.startswith("Agent") or tag == "system":
+        try:
+            tg_topic_send(name, ("" if tag == "system" else f"{tag}: ") + text)
+        except Exception:
+            pass
+
+def inject(session, text):
+
+    buf = "phroom"
+    tmux("set-buffer", "-b", buf, "--", text)
+    tmux("paste-buffer", "-d", "-p", "-b", buf, "-t", session)
+    time.sleep(0.25)
+    tmux("send-keys", "-t", session, "Enter")
+
+def read_new_turns(path, state):
+
+    turns = []
+    off = state.get("off", 0)
+    try:
+        with open(path, "rb") as f:
+            f.seek(off)
+            data = f.read()
+    except FileNotFoundError:
+        return turns, off
+    if not data:
+        return turns, off
+
+    last_nl = data.rfind(b"\n")
+    if last_nl == -1:
+        return turns, off
+    consumed = data[: last_nl + 1]
+    new_off = off + len(consumed)
+    for raw in consumed.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            ev = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            continue
+        if ev.get("type") != "assistant":
+            continue
+        msg = ev.get("message") or {}
+        parts = []
+        for blk in (msg.get("content") or []):
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                t = blk.get("text", "").strip()
+                if t:
+                    parts.append(t)
+        text = "\n".join(parts).strip()
+        if text:
+            turns.append(text)
+    state["off"] = new_off
+    return turns, new_off
+
+def find_transcript_for(slug_dir, marker, claimed):
+
+    try:
+        files = [os.path.join(slug_dir, f) for f in os.listdir(slug_dir) if f.endswith(".jsonl")]
+    except FileNotFoundError:
+        return None
+    for fp in sorted(files, key=lambda p: os.path.getmtime(p), reverse=True):
+        if fp in claimed:
+            continue
+        try:
+            with open(fp, "rb") as f:
+                blob = f.read()
+        except Exception:
+            continue
+        if marker.encode() in blob:
+            return fp
+    return None
+
+def construct_msg(room, n, total, cwd, marker, role=None, kfile=None):
+    role_line = ""
+    if role:
+        if kfile and os.path.exists(kfile):
+            role_line = (f"DEINE ROLLE: Spezialist für '{role}'. Deine persistente Wissensbasis liegt in {kfile} — "
+                         f"lies sie ZUERST (cat {kfile}) und arbeite konsequent als dieser Spezialist; ergänze sie am "
+                         f"Ende um neue Erkenntnisse aus diesem Gespräch. ")
+        else:
+            role_line = (f"DEINE ROLLE: du wirst Spezialist für '{role}'. Es gibt noch KEINE Wissensbasis — onboarde dich "
+                         f"ZUERST kurz per 6–8 WebSearches und schreibe sie nach {kfile}, dann arbeite als dieser Spezialist. ")
+    if total <= 1:
+        crew = ("Du arbeitest ALLEIN in diesem Raum (kein anderer Agent). Der menschliche Operator gibt dir "
+                "Aufgaben und sieht deine Antworten im gemeinsamen Feed. '[Operator' kommt vom Menschen. ")
+    else:
+        crew = (f"Du bist AGENT {n} von {total}. Es gibt {total-1} weitere Claude-Agenten und einen menschlichen "
+                f"Operator. Wenn du antwortest, geht deine Nachricht an ALLE anderen Agenten und der Operator sieht "
+                f"sie im gemeinsamen Feed. Nachrichten ab '[von Agent k]' kommen von einem anderen Agenten; "
+                f"'[Operator' kommt vom Menschen. Arbeitet zusammen, antwortet KNAPP und konkret (kein Geplauder, "
+                f"ihr seht euch gegenseitig). ")
+    return (
+        f"[phantom multi-agent room '{room}'] (intern-marker {marker}) — " +
+        L("", "IMPORTANT: communicate and write ALL of your output and artifacts in English. ") +
+        role_line + crew +
+        f"Euer ARBEITSORDNER ist {cwd} (geteilt — Dateien des einen sieht der andere). Speichert ALLE Artefakte "
+        f"dort mit Zeitstempel im Namen (z.B. 2026-06-11-1430_kurzbeschreibung.md), Endergebnisse nach "
+        f"{cwd}/artifacts/. So ist permanent alles dokumentiert und zuordenbar. "
+        f"VOLLE OPERATOR-RECHTE: ihr könnt den Rechner WIRKLICH bedienen — `phantom` steuert den ganzen Desktop "
+        f"fokus-frei (phantom snapshot = Bildschirm sehen, phantom windows/tree/click/type/activate, "
+        f"phantom notify = dem Menschen auf Telegram schreiben), `kartei` ist das Programm-Wissen, und beliebige "
+        f"Shell-Befehle laufen ohne Rückfrage. Besprecht nicht nur — FÜHRT AUS und prüft das Ergebnis (z.B. per phantom snapshot). "
+        f"ZUSAMMEN BAUEN + VORFÜHREN: programmiert echte Dinge gemeinsam im Arbeitsordner. Wenn ihr ein Artefakt fertig "
+        f"habt, ZEIGT es dem Operator mit `phantom-room present {room} <datei>` — Skripte/Programme laufen dann live in "
+        f"einem Demo-Tab, HTML/Bilder/PDF öffnen als Fenster. Nicht nur beschreiben — vorführen. "
+        f"ENDLOSSCHLEIFEN-SCHUTZ: Wenn du nichts Substanzielles mehr beizutragen hast oder die Aufgabe erledigt ist, "
+        f"beende deine Nachricht mit dem Token {DONE} in einer eigenen Zeile — dann wird nicht weitergereicht. "
+        f"Warte jetzt auf die erste Aufgabe vom Operator."
+    )
+
+MAX_ROOMS = 10
+
+def cmd_new(name, cwd=None, resume=False, agentspecs=None, force=False, cap=None, referee=None):
+
+    if not resume and not force and os.path.isdir(STATE):
+        existing = [d for d in os.listdir(STATE) if os.path.isdir(room_dir(d))]
+        if name not in existing and len(existing) >= MAX_ROOMS:
+            print(f"limit: max {MAX_ROOMS} rooms (have {len(existing)}). Stop one first: phantom-room stop <name>")
+            return
+    cwd = cwd or os.path.join(ROOMS_ROOT, name)
+    os.makedirs(room_dir(name), exist_ok=True)
+    os.makedirs(cwd, exist_ok=True)
+    os.makedirs(os.path.join(cwd, "artifacts"), exist_ok=True)
+    ensure_trusted(cwd)
+
+    tid = tg_topic_ensure(name)
+    if tid:
+        if resume:
+            tg_topic_send(name, L(f"↪ Room \"{name}\" wieder aktiv.", f"↪ Room \"{name}\" active again."))
+        else:
+            tg_topic_send(name, L(f"🏠 Room \"{name}\" ist offen. Der Feed läuft hier rein — "
+                                  f"schreib in dieses Thema, um den Agenten etwas aufzutragen.",
+                                  f"🏠 Room \"{name}\" is open. The feed lands here — "
+                                  f"write in this topic to task the agents."))
+    else:
+        _tok, _grp = _tg_cfg()
+        if _tok and _grp is not None:
+
+            try:
+                _tg_call("sendMessage", {"chat_id": _grp,
+                    "text": f"⚠️ Room \"{name}\" läuft, aber sein Telegram-Topic ließ sich gerade nicht "
+                            f"anlegen (Netz/DNS?). Sobald wieder online: phantom-room tgsync {name}"})
+            except Exception:
+                pass
+            print(f"WARN: Telegram topic for '{name}' not created (network?). Retry: phantom-room tgsync {name}")
+
+    open(feed_path(name), "a").close()
+    if not os.path.exists(fifo_path(name)):
+        os.mkfifo(fifo_path(name))
+
+    cfg = {}
+    if resume and os.path.exists(cfg_path(name)):
+        cfg = load_cfg(name)
+    cfg.setdefault("name", name)
+    cfg.setdefault("cwd", cwd)
+    if cap:
+        cfg["cap"] = cap
+    else:
+        cfg.setdefault("cap", DEFAULT_CAP)
+    if referee is not None:
+        cfg["referee"] = referee
+    cfg.setdefault("kind", "multiagent")
+    slug = slug_for(cwd)
+    cfg["slug"] = slug
+    if resume and cfg.get("agents"):
+        agents = cfg["agents"]
+    else:
+        specs = list(agentspecs) if agentspecs else [None, None]
+        agents = []
+        for i, role in enumerate(specs):
+            n = i + 1
+            a = {"n": n, "session": f"phr-{name}-a{n}", "marker": f"ROOMTAG-{name}-A{n}"}
+            if role:
+                a["role"] = role
+                a["kfile"] = os.path.join(specialist_dir(role_slug(role)), "knowledge.md")
+            agents.append(a)
+    cfg["agents"] = agents
+    save_cfg(name, cfg)
+
+    for a in agents:
+        sess = a["session"]
+        if tmux_has(sess):
+            tmux("kill-session", "-t", sess)
+
+        sid = cfg.get("sessions", {}).get(str(a["n"]))
+        resume_arg = f"--resume {sid}" if (resume and sid) else ""
+
+        ctx = f"--append-system-prompt-file {CTX_FILE}" if os.path.exists(CTX_FILE) else ""
+        env_exports = ('export XDG_RUNTIME_DIR=/run/user/$(id -u) '
+                       'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" '
+                       'PATH="$HOME/.local/bin:$PATH" PHANTOM_ROOM_AGENT=1')
+        claude_cmd = (f"cd {cwd} && {env_exports} && "
+                      f"exec {CLAUDE} --permission-mode bypassPermissions {resume_arg} {ctx}")
+        tmux("new-session", "-d", "-s", sess, "-x", "200", "-y", "50", "bash", "-lc", claude_cmd)
+
+    print(f"room '{name}' agents starting; waiting for the TUIs…")
+    for a in agents:
+        ready = wait_ready(a["session"])
+        if accept_bypass(a["session"]):
+            ready = wait_ready(a["session"])
+        print(f"  agent {a['n']} ({a['session']}): {'ready' if ready else 'TIMEOUT (injecting anyway)'}")
+
+    if not resume:
+        total = len(agents)
+        for a in agents:
+            inject(a["session"], construct_msg(name, a["n"], total, cwd, a["marker"], a.get("role"), a.get("kfile")))
+        roster = ", ".join((f"Spezialist {a['role']}") if a.get("role") else "common" for a in agents)
+        append_feed(name, "system", L(f"Raum '{name}' gestartet — {total} Agent(en) instruiert ({roster}). Operator: phantom-room send {name} @both <Aufgabe>",
+                                       f"Room '{name}' started — {total} agent(s) briefed ({roster}). Operator: phantom-room send {name} @both <task>"))
+
+        for a in agents:
+            if a.get("role") and a.get("kfile") and not os.path.exists(a["kfile"]):
+                a["onboarding"] = True
+                append_feed(name, "system", L(
+                    f"🎓 Agent {a['n']} – Spezialist „{a['role']}“ – bildet sich gerade ein "
+                    f"(Onboarding per WebSearch) und legt zuerst seine Wissensbasis an. "
+                    f"Er antwortet erst, sobald das steht — einen Moment Geduld.",
+                    f"🎓 Agent {a['n']} – specialist “{a['role']}” – is onboarding now "
+                    f"(via WebSearch) and building its knowledge base first. "
+                    f"It answers once that's ready — one moment."))
+        if any(a.get("onboarding") for a in agents):
+            cfg["agents"] = agents
+            save_cfg(name, cfg)
+        time.sleep(2.0)
+
+    sh("pkill", "-f", f"phantom-room broker {name}")
+    time.sleep(0.5)
+    log = os.path.join(room_dir(name), "broker.log")
+    with open(log, "a") as lf:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "broker", name],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+    print(f"broker launched. attach the feed with:  phantom-room attach {name}")
+
+def feed_head_tail(name, head_chars=900, tail_chars=11000):
+
+    try:
+        data = open(feed_path(name), encoding="utf-8", errors="replace").read()
+    except OSError:
+        return "", ""
+    head = data[:head_chars]
+    tail = data[-tail_chars:] if len(data) > tail_chars else data
+    return head, tail
+
+REFEREE_PROMPT = """You are an impartial REFEREE for a multi-agent working session. Two or more AI agents \
+collaborate in a shared room toward a goal. You are NOT a participant — judge only the trajectory.
+
+Read the START (the goal / opening brief) and the RECENT exchange, then rule on ONE verdict:
+
+- PROGRESS  — substantive forward motion: new ideas, decisions taken, code/artifacts produced or \
+refined, open questions being resolved. The discussion is worth continuing.
+- STALLED   — looping or repeating the same points, mutual agreement with no new content, \
+bikeshedding, two agents talking past each other, or thrashing without converging. Needs the operator.
+- CONVERGED — they have effectively reached the goal or a clear shared conclusion and are now only \
+acknowledging each other; safe to wrap up.
+
+Bias toward PROGRESS when there is genuine new content — do NOT punish a long, hard problem for \
+taking many rounds. Reserve STALLED for real circularity or dead-ends.
+
+Reply with EXACTLY two lines and nothing else:
+VERDICT: PROGRESS|STALLED|CONVERGED
+REASON: {reason_lang}
+
+=== START (goal / opening) ===
+{head}
+
+=== RECENT EXCHANGE ===
+{tail}
+"""
+
+def referee_assess(head, tail):
+
+    reason_lang = L("ein knapper deutscher Satz, den der Operator umsetzen kann",
+                    "one concise sentence the operator can act on")
+    prompt = REFEREE_PROMPT.format(reason_lang=reason_lang, head=head, tail=tail)
+    cmd = [CLAUDE, "-p", prompt]
+    if REFEREE_MODEL:
+        cmd[1:1] = ["--model", REFEREE_MODEL]
+    try:
+
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=REFEREE_TIMEOUT,
+                           cwd=os.environ.get("TMPDIR", "/tmp"))
+    except subprocess.TimeoutExpired:
+        return ("ERROR", L("Referee-Timeout", "referee timed out"))
+    except Exception as e:
+        return ("ERROR", str(e)[:80])
+    out = (r.stdout or "").strip()
+    if r.returncode != 0 or not out:
+        return ("ERROR", L("Referee nicht erreichbar", "referee unreachable"))
+
+    verdict = None
+    m = re.search(r"VERDICT:\s*([A-Za-z]+)", out)
+    if m and m.group(1).upper() in ("PROGRESS", "STALLED", "CONVERGED"):
+        verdict = m.group(1).upper()
+    if verdict is None:
+        up = out.upper()
+        for v in ("CONVERGED", "STALLED", "PROGRESS"):
+            if v in up:
+                verdict = v
+                break
+    if verdict is None:
+        verdict = "PROGRESS"
+    rm = re.search(r"REASON:\s*(.+)", out)
+    reason = (rm.group(1).strip() if rm else out.replace("\n", " ").strip())[:180]
+    return (verdict, reason)
+
+def start_referee(box, name, rev):
+
+    head, tail = feed_head_tail(name)
+    def _run():
+        v, r = referee_assess(head, tail)
+        box.put((rev, v, r))
+    threading.Thread(target=_run, daemon=True).start()
+
+def cmd_broker(name):
+    cfg = load_cfg(name)
+    cap = cfg.get("cap", DEFAULT_CAP)
+    slug_dir = os.path.join(PROJ_ROOT, cfg["slug"])
+    agents = {a["n"]: a for a in cfg["agents"]}
+    tstate = {n: {} for n in agents}
+    files = {n: None for n in agents}
+    done = {n: False for n in agents}
+    claimed = set()
+    rounds = 0
+    paused = False
+    sealed = False
+    consec_done = 0
+
+    referee_on = cfg.get("referee", True) and REFEREE_ENV_ON
+    referee_pending = False
+    referee_box = queue.Queue()
+    review_n = 0
+
+    fifo_fd = os.open(fifo_path(name), os.O_RDONLY | os.O_NONBLOCK)
+    fifo_buf = b""
+
+    def others(n): return [k for k in agents if k != n]
+
+    def deliver_to_agent(n, text, who):
+        inject(agents[n]["session"], text)
+        done[n] = False
+
+    log = lambda *a: print(now_hm(), *a, flush=True)
+    log(f"broker up for room '{name}', cap={cap}, agents={sorted(agents)}")
+
+    while True:
+
+        try:
+            disk = load_cfg(name)
+            for a in disk.get("agents", []):
+                if a["n"] not in agents:
+                    agents[a["n"]] = a
+                    tstate[a["n"]] = {}; files[a["n"]] = None; done[a["n"]] = False
+                    log(f"agent {a['n']} joined live")
+                    sealed = False; paused = False; consec_done = 0; rounds = 0; referee_pending = False
+            cfg["agents"] = list(agents.values())
+        except Exception:
+            pass
+
+        for _n, _a in agents.items():
+            if _a.get("onboarding") and _a.get("kfile"):
+                try:
+                    _ready = os.path.exists(_a["kfile"]) and os.path.getsize(_a["kfile"]) > 200
+                except OSError:
+                    _ready = False
+                if _ready:
+                    _a["onboarding"] = False
+                    append_feed(name, "system", L(
+                        f"✅ Agent {_n} – Spezialist „{_a.get('role','')}“ – ist eingearbeitet "
+                        f"(Wissensbasis steht) und antwortet ab jetzt.",
+                        f"✅ Agent {_n} – specialist “{_a.get('role','')}” – is onboarded "
+                        f"(knowledge base ready) and answers from now on."))
+                    try:
+                        cfg["agents"] = list(agents.values()); save_cfg(name, cfg)
+                    except Exception:
+                        pass
+
+        for n, a in agents.items():
+            if files[n] is None:
+                fp = find_transcript_for(slug_dir, a["marker"], claimed)
+                if fp:
+                    files[n] = fp; claimed.add(fp)
+
+                    try:
+                        tstate[n]["off"] = os.path.getsize(fp)
+                    except OSError:
+                        tstate[n]["off"] = 0
+                    log(f"agent {n} transcript -> {os.path.basename(fp)}")
+
+                    sid = os.path.basename(fp)[:-6]
+                    cfg.setdefault("sessions", {})[str(n)] = sid
+                    save_cfg(name, cfg)
+
+        try:
+            chunk = os.read(fifo_fd, 65536)
+            if chunk:
+                fifo_buf += chunk
+        except BlockingIOError:
+            chunk = b""
+        except OSError:
+            chunk = b""
+        if chunk == b"":
+
+            try:
+                os.close(fifo_fd)
+            except Exception:
+                pass
+            try:
+                fifo_fd = os.open(fifo_path(name), os.O_RDONLY | os.O_NONBLOCK)
+            except Exception:
+                pass
+        while b"\n" in fifo_buf:
+            line, fifo_buf = fifo_buf.split(b"\n", 1)
+            s = line.decode("utf-8", "replace").strip()
+            if not s:
+                continue
+            addr, _, body = s.partition(" ")
+            targets = set(agents)
+            if addr in ("@both", "@beide", "@all", "@alle"): targets = set(agents)
+            elif addr.startswith("@") and addr[1:].isdigit() and int(addr[1:]) in agents:
+                targets = {int(addr[1:])}
+            else: body = s
+            body = body.strip()
+            if not body:
+                continue
+            append_feed(name, f"Operator→{'beide' if targets=={1,2} else f'@{list(targets)[0]}'}", body)
+            for n in sorted(targets):
+                deliver_to_agent(n, f"[Operator] {body}", "operator")
+            rounds = 0; paused = False; sealed = False; consec_done = 0; referee_pending = False
+
+        if referee_pending:
+            try:
+                rev, verdict, reason = referee_box.get_nowait()
+            except queue.Empty:
+                rev = None
+            else:
+                if rev == review_n:
+                    referee_pending = False
+                    if verdict == "PROGRESS":
+                        rounds = 0
+                        append_feed(name, "system", L(
+                            f"✓ Fortschritts-Check #{rev}: produktiv — {reason}. Weiter (kein Cap).",
+                            f"✓ progress check #{rev}: productive — {reason}. Continuing (no cap)."))
+                        log(f"review #{rev}: PROGRESS -> window reset")
+                    elif verdict == "CONVERGED":
+                        sealed = True
+                        append_feed(name, "system", L(
+                            f"✅ Fortschritts-Check #{rev}: Ziel erreicht — {reason}. Raum versiegelt.",
+                            f"✅ progress check #{rev}: goal reached — {reason}. Room sealed."))
+                        log(f"review #{rev}: CONVERGED -> sealed")
+                    else:
+                        paused = True
+                        nudge = f"phantom-room send {name} @both <text>"
+                        if verdict == "ERROR":
+                            append_feed(name, "system", L(
+                                f"⏸ Fortschritts-Check #{rev} nicht möglich ({reason}) — pausiert (fail-safe). Weiter mit: {nudge}",
+                                f"⏸ progress check #{rev} unavailable ({reason}) — paused (fail-safe). Resume with: {nudge}"))
+                        else:
+                            append_feed(name, "system", L(
+                                f"⏸ Fortschritts-Check #{rev}: festgefahren — {reason}. Operator-Nudge: {nudge}",
+                                f"⏸ progress check #{rev}: stalled — {reason}. Operator nudge: {nudge}"))
+                        log(f"review #{rev}: {verdict} -> paused")
+
+        if referee_pending and rounds >= cap * 5:
+            referee_pending = False
+            paused = True
+            append_feed(name, "system", L(
+                f"⏸ Fortschritts-Check überfällig — pausiert (fail-safe). Weiter mit: phantom-room send {name} @both <text>",
+                f"⏸ progress check overdue — paused (fail-safe). Resume with: phantom-room send {name} @both <text>"))
+            log("referee overdue -> paused")
+
+        for n in agents:
+            if files[n] is None:
+                continue
+            turns, _ = read_new_turns(files[n], tstate[n])
+            for text in turns:
+                is_done = DONE in text
+                shown = text.replace(DONE, "").strip()
+                if is_done:
+                    done[n] = True
+                    consec_done += 1
+                else:
+                    done[n] = False
+                    consec_done = 0
+                if not shown:
+
+                    continue
+                append_feed(name, f"Agent {n}", shown)
+                if paused or sealed:
+                    continue
+                if rounds >= cap and not referee_pending:
+                    if referee_on:
+
+                        review_n += 1
+                        referee_pending = True
+                        start_referee(referee_box, name, review_n)
+                        append_feed(name, "system", L(
+                            f"🧭 Fortschritts-Check #{review_n} (Runde {rounds}) läuft — kein starrer Cap, das Gespräch läuft weiter.",
+                            f"🧭 progress check #{review_n} (round {rounds}) running — no hard cap, the conversation keeps going."))
+                        log(f"review #{review_n} triggered at round {rounds}")
+                    else:
+
+                        paused = True
+                        append_feed(name, "system", L(
+                            f"⏸ Auto-Runden-Cap ({cap}) erreicht — Operator-Nudge nötig: phantom-room send {name} @both <text>",
+                            f"⏸ Auto-round cap ({cap}) reached — operator nudge needed: phantom-room send {name} @both <text>"))
+                        log("cap reached -> paused (referee off)")
+                        continue
+
+                fwd = re.sub(r"\s+", " ", shown).strip()
+                tag = "DONE-closing " if is_done else ""
+                for o in others(n):
+                    deliver_to_agent(o, f"[von Agent {n}] {fwd}", f"agent{n}")
+                rounds += 1
+                log(f"forward {tag}agent {n} -> {others(n)} (round {rounds}/{cap})")
+                if consec_done >= max(1, len(agents)):
+                    sealed = True
+                    append_feed(name, "system", L("✅ alle Agenten DONE — Runde versiegelt.", "✅ all agents DONE — round sealed."))
+                    log("all-DONE -> sealed")
+
+        time.sleep(1.0)
+
+def cmd_send(name, addr, text):
+    if addr not in ("@1", "@2", "@both", "@beide"):
+
+        text = (addr + " " + text).strip() if text else addr
+        addr = "@both"
+
+    try:
+        fd = os.open(fifo_path(name), os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as e:
+        print(f"send: room '{name}' not listening ({e.strerror}); is the broker up?")
+        return
+    try:
+        os.write(fd, f"{addr} {text}\n".encode("utf-8"))
+    finally:
+        os.close(fd)
+    print(f"sent to {addr}: {text}")
+
+FEED_COLORS = [
+    ("Agent 1",  "\033[1;38;2;70;160;255m"),
+    ("Agent 2",  "\033[1;38;2;255;160;55m"),
+    ("Agent 3",  "\033[1;38;2;120;225;130m"),
+    ("Agent 4",  "\033[1;38;2;235;120;235m"),
+    ("Operator", "\033[1;38;2;150;230;150m"),
+    ("system",   "\033[1;38;2;225;195;130m"),
+]
+RESET = "\033[0m"
+def cmd_feedview(name):
+
+    p = subprocess.Popen(["tail", "-n", "200", "-F", feed_path(name)], stdout=subprocess.PIPE, text=True)
+    try:
+        for line in p.stdout:
+            tag = line.split("]", 1)[0]
+            color = RESET
+            for k, c in FEED_COLORS:
+                if k in tag:
+                    color = c; break
+            sys.stdout.write(color + line.rstrip("\n") + RESET + "\n"); sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+
+def cmd_composer(name):
+    print("\033[1mphantom-room composer\033[0m — Prefix @1 / @2 / @both (Default: @both). Strg-C beendet die Eingabe.")
+    target = "@both"
+    while True:
+        try:
+            s = input(f"{target} ▸ ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(); break
+        if not s:
+            continue
+        if s in ("@1", "@2", "@both", "@beide"):
+            target = "@both" if s == "@beide" else s
+            continue
+        addr = target
+        if s.startswith(("@1 ", "@2 ", "@both ", "@beide ")):
+            a, _, rest = s.partition(" "); addr = "@both" if a == "@beide" else a; s = rest
+        with open(fifo_path(name), "w") as f:
+            f.write(f"{addr} {s}\n")
+
+def cmd_attach(name):
+
+    self = os.path.abspath(__file__)
+    view = f"phr-{name}-view"
+    if tmux_has(view):
+        tmux("kill-session", "-t", view)
+    tmux("new-session", "-d", "-s", view, "-x", "220", "-y", "50",
+         "bash", "-lc", f"{sys.executable} {self} feedview {name}")
+    tmux("split-window", "-v", "-l", "5", "-t", view,
+         "bash", "-lc", f"{sys.executable} {self} composer {name}")
+    tmux("select-pane", "-t", f"{view}.1")
+
+    foot = sh("bash", "-lc", "command -v foot")
+    cfgarg = []
+    ini = os.path.join(HOME, ".config", "foot", "phantom.ini")
+    if os.path.exists(ini):
+        cfgarg = [f"--config={ini}"]
+    if foot.returncode == 0:
+        env = os.environ.copy()
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        subprocess.Popen(["foot", *cfgarg, "--app-id=phantom-room", "--title=phantom-room",
+                          "tmux", "attach", "-t", view], env=env, start_new_session=True)
+        print(f"opened feed window (foot) for room '{name}'")
+    elif sys.stdin.isatty():
+        os.execvp("tmux", ["tmux", "attach", "-t", view])
+    else:
+        print(f"view session ready (tmux attach -t {view}); no foot + no tty to attach")
+
+def write_cockpit_conf():
+    os.makedirs(os.path.dirname(COCKPIT_CONF_PATH), exist_ok=True)
+    with open(COCKPIT_CONF_PATH, "w") as f:
+        f.write(COCKPIT_CONF)
+
+def cockpit_main_cmd():
+
+    ov = os.environ.get("PHANTOM_COCKPIT_MAIN_CMD")
+    if ov:
+        return ov
+    proj = os.path.join(PROJ_ROOT, slug_for(HOME))
+    resume = "--continue" if (os.path.isdir(proj) and any(f.endswith(".jsonl") for f in os.listdir(proj))) else ""
+    ctx = f"--append-system-prompt-file {CTX_FILE}" if os.path.exists(CTX_FILE) else ""
+    return (f"cd $HOME && export PHANTOM_LLM_WINDOW=1 PATH=\"$HOME/.local/bin:$PATH\" && "
+            f"exec {CLAUDE} {resume} {ctx}")
+
+def cockpit_ensure(session=COCKPIT):
+    write_cockpit_conf()
+    if sh("tmux", "has-session", "-t", session).returncode != 0:
+
+        tmux("new-session", "-d", "-s", session, "-n", "main", "-x", "100", "-y", "30",
+             "bash", "-lc", cockpit_main_cmd())
+    tmux("source-file", COCKPIT_CONF_PATH)
+
+def cockpit_add(name, session=COCKPIT):
+    cockpit_ensure(session)
+    wins = (tmux("list-windows", "-t", session, "-F", "#W").stdout or "").split()
+    if name in wins:
+        return
+    self = os.path.abspath(__file__)
+    tmux("new-window", "-d", "-t", session, "-n", name,
+         "bash", "-lc", f"{sys.executable} {self} feedview {name}")
+    tmux("split-window", "-v", "-l", "5", "-t", f"{session}:{name}",
+         "bash", "-lc", f"{sys.executable} {self} composer {name}")
+    tmux("select-pane", "-t", f"{session}:{name}.1")
+
+def cmd_cockpit(args):
+    action = args[0] if args else "up"
+    session = COCKPIT
+    if "--name" in args:
+        session = args[args.index("--name") + 1]
+    if action == "up":
+        cockpit_ensure(session)
+        if os.path.isdir(STATE):
+            for name in sorted(os.listdir(STATE)):
+                try:
+                    cfg = load_cfg(name)
+                except Exception:
+                    continue
+                if cfg.get("kind") == "multiagent":
+                    cockpit_add(name, session)
+        tmux("source-file", COCKPIT_CONF_PATH)
+        wins = (tmux("list-windows", "-t", session, "-F", "#W").stdout or "").split()
+        print(f"cockpit '{session}' ready — tabs: {wins}  (Alt+←/→ to switch)")
+    elif action == "add":
+        cockpit_add(args[1], session); print(f"added room tab '{args[1]}' to cockpit")
+    elif action == "new":
+        if len(args) < 2 or not args[1].strip():
+            print("usage: phantom-room cockpit new <name>"); return
+        name = re.sub(r"[^A-Za-z0-9_-]", "-", args[1].strip())[:30]
+
+        os.makedirs(room_dir(name), exist_ok=True)
+        open(feed_path(name), "a").close()
+        if not os.path.exists(fifo_path(name)):
+            try: os.mkfifo(fifo_path(name))
+            except FileExistsError: pass
+        tg_topic_ensure(name)
+        append_feed(name, "system", L(f"Raum '{name}' wird gestartet… (2 common agents)",
+                                       f"Room '{name}' starting… (2 common agents)"))
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "new", name],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        cockpit_add(name, session)
+        tmux("select-window", "-t", f"{session}:{name}")
+        print(f"creating room '{name}' (detached) + cockpit tab added")
+    elif action == "attach":
+        cockpit_ensure(session)
+        foot = sh("bash", "-lc", "command -v foot")
+        if foot.returncode == 0:
+            env = os.environ.copy()
+            env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+            env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+            cfgarg = []
+            ini = os.path.join(HOME, ".config", "foot", "phantom.ini")
+            if os.path.exists(ini):
+                cfgarg = [f"--config={ini}"]
+            appid = os.environ.get("PHANTOM_COCKPIT_APPID", "phantom-llm")
+            subprocess.Popen(["foot", *cfgarg, f"--app-id={appid}", f"--title={appid}",
+                              "tmux", "attach", "-t", session], env=env, start_new_session=True)
+            print(f"cockpit window opened (foot, app-id {appid})")
+        elif sys.stdin.isatty():
+            os.execvp("tmux", ["tmux", "attach", "-t", session])
+        else:
+            print(f"cockpit ready (tmux attach -t {session})")
+    else:
+        print("usage: phantom-room cockpit up | add <room> | attach [--name SESS]")
+
+SPECIALISTS = os.path.join(HOME, "phantGNOME", "specialists")
+
+def role_slug(role):
+    return re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-")[:60] or "rolle"
+
+def specialist_dir(slug):
+    return os.path.join(SPECIALISTS, slug)
+
+def onboard_brief(role, sdir):
+    return (
+        f"ONBOARDING als Spezialist für: '{role}'. Du bildest dich JETZT in kurzer Zeit zu echtem, AKTUELLEM "
+        f"Fachwissen fort. Mach 6–10 gezielte WebSearches zum heutigen Stand des Feldes (Kernmethoden, wichtigste "
+        f"Befunde, jüngste Entwicklungen, offene Fragen, Schlüssel-Player/Datenbanken). Synthetisiere das Gelernte "
+        f"in DIESEM Ordner ({sdir}) als knowledge.md — dicht strukturiert, mit Quellen-URLs UND heutigem Datum; dazu "
+        f"eine kurze provenance.md (welche Suchen/Quellen). Kein Geschwafel: das ist deine persistente Wissensbasis, "
+        f"auf die du und künftige Spezialisten dieser Rolle zugreifen. Wenn knowledge.md steht, melde dich mit <<DONE>>."
+    )
+
+def cmd_onboard(args):
+
+    if not args:
+        print('usage: phantom-room onboard "<role>" [--refresh]'); return
+    role = args[0]
+    refresh = "--refresh" in args
+    slug = role_slug(role)
+    sdir = specialist_dir(slug)
+    kfile = os.path.join(sdir, "knowledge.md")
+    if os.path.exists(kfile) and not refresh:
+        print(f"specialist '{slug}' already exists -> {kfile}  (use --refresh to update)"); return
+    os.makedirs(sdir, exist_ok=True)
+    with open(os.path.join(sdir, "brief.md"), "w") as f:
+        f.write(f"# Spezialist: {role}\n\n- slug: {slug}\n- onboarded: per WebSearch self-education\n")
+    ensure_trusted(sdir)
+    sess = ("phr-onb-" + slug)[:40]
+    if tmux_has(sess):
+        tmux("kill-session", "-t", sess)
+    env_exports = ('export XDG_RUNTIME_DIR=/run/user/$(id -u) '
+                   'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" '
+                   'PATH="$HOME/.local/bin:$PATH"')
+    cmd = f"cd {sdir} && {env_exports} && exec {CLAUDE} --permission-mode bypassPermissions"
+    tmux("new-session", "-d", "-s", sess, "-x", "200", "-y", "50", "bash", "-lc", cmd)
+    if wait_ready(sess) and accept_bypass(sess):
+        wait_ready(sess)
+    else:
+        accept_bypass(sess)
+    inject(sess, onboard_brief(role, sdir))
+    print(f"onboarding '{role}' as specialist '{slug}' (tmux {sess})")
+    print(f"knowledge -> {kfile} ; watch: tmux capture-pane -p -t {sess} | tail")
+
+def cmd_specialists(args):
+    if not os.path.isdir(SPECIALISTS):
+        print("no specialists yet (phantom-room onboard \"<role>\")"); return
+    for slug in sorted(os.listdir(SPECIALISTS)):
+        d = specialist_dir(slug)
+        if not os.path.isdir(d):
+            continue
+        k = os.path.join(d, "knowledge.md")
+        sz = os.path.getsize(k) if os.path.exists(k) else 0
+        print(f"{slug:40s} knowledge.md={'%d B' % sz if sz else 'PENDING'}")
+
+def _start_room_agent(name, cwd, a):
+
+    sess = a["session"]
+    if tmux_has(sess):
+        tmux("kill-session", "-t", sess)
+    ctx = f"--append-system-prompt-file {CTX_FILE}" if os.path.exists(CTX_FILE) else ""
+    env_exports = ('export XDG_RUNTIME_DIR=/run/user/$(id -u) '
+                   'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" '
+                   'PATH="$HOME/.local/bin:$PATH" PHANTOM_ROOM_AGENT=1')
+    claude_cmd = (f"cd {cwd} && {env_exports} && "
+                  f"exec {CLAUDE} --permission-mode bypassPermissions {ctx}")
+    tmux("new-session", "-d", "-s", sess, "-x", "200", "-y", "50", "bash", "-lc", claude_cmd)
+    if wait_ready(sess) and accept_bypass(sess):
+        wait_ready(sess)
+
+def cmd_addagent(name, role=None):
+
+    if not os.path.isdir(room_dir(name)):
+        print(f"no such room: {name}"); return
+    cfg = load_cfg(name)
+    cwd = cfg.get("cwd", os.path.join(ROOMS_ROOT, name))
+    agents = cfg.get("agents", [])
+    n = max([a["n"] for a in agents], default=0) + 1
+    a = {"n": n, "session": f"phr-{name}-a{n}", "marker": f"ROOMTAG-{name}-A{n}"}
+    if role:
+        a["role"] = role
+        a["kfile"] = os.path.join(specialist_dir(role_slug(role)), "knowledge.md")
+    ensure_trusted(cwd)
+    print(f"starting agent {n} ({'Spezialist ' + role if role else 'common'}) in room '{name}'…")
+    _start_room_agent(name, cwd, a)
+    total = len(agents) + 1
+    inject(a["session"], construct_msg(name, n, total, cwd, a["marker"], a.get("role"), a.get("kfile")))
+    agents.append(a); cfg["agents"] = agents; save_cfg(name, cfg)
+    kind = f"Spezialist {role}" if role else "common"
+    append_feed(name, "system", L(f"Agent {n} ({kind}) dem Raum hinzugefügt — jetzt {total} Agent(en).",
+                                   f"Agent {n} ({kind}) added to the room — now {total} agent(s)."))
+    print(f"added agent {n} ({kind}) to '{name}' (broker binds it in live)")
+
+def _wizard_pick_role(label):
+
+    kind = input(f"  {label}: (c)ommon oder (s)pezialist? [c]: ").strip().lower()
+    if not kind.startswith("s"):
+        return None
+    specs = [d for d in sorted(os.listdir(SPECIALISTS))
+             if os.path.isdir(specialist_dir(d))] if os.path.isdir(SPECIALISTS) else []
+    if specs:
+        print("    lokal vorhandene Spezialisten (wiederverwendbar):")
+        for i, sname in enumerate(specs, 1):
+            k = os.path.join(specialist_dir(sname), "knowledge.md")
+            sz = os.path.getsize(k) if os.path.exists(k) else 0
+            print(f"      [{i}] {sname}  ({'Wissensbasis ' + str(sz) + 'B' if sz else 'noch leer'})")
+    else:
+        print("    (noch keine lokalen Spezialisten)")
+    sel = input("    Nummer wählen ODER Name einer NEUEN Rolle (leer = common): ").strip()
+    if sel.isdigit() and specs and 1 <= int(sel) <= len(specs):
+        return specs[int(sel) - 1]
+    return sel or None
+
+def cmd_wizard(args):
+
+    direct = (args[0] if args else "").lower()
+
+    if direct == "addto" and len(args) > 1:
+        room = args[1]
+        if not os.path.isdir(room_dir(room)):
+            print(f"kein Raum: {room}"); input("[Enter] "); return
+        role = _wizard_pick_role(f"Neuer Agent für '{room}'")
+        cmd_addagent(room, role)
+        print(f"\n✅ Agent zu '{room}' hinzugefügt."); input("[Enter schließt] "); return
+    if direct == "renameto" and len(args) > 1:
+        room = args[1]
+        if not os.path.isdir(room_dir(room)):
+            print(f"kein Raum: {room}"); input("[Enter] "); return
+        new = re.sub(r"[^A-Za-z0-9_-]", "-", input(f"Neuer Name für '{room}': ").strip())[:30]
+        if new and new != room:
+            cmd_rename(room, new); print(f"\n✅ '{room}' → '{new}'.")
+        else:
+            print("abgebrochen.")
+        input("[Enter schließt] "); return
+    if direct == "add":
+        mode = "2"
+    elif direct == "new":
+        mode = "1"
+    else:
+        print("\033[1m◉ phantom — Raum / Agent anlegen\033[0m")
+        print("  [1] Neuen Raum anlegen")
+        print("  [2] Agent zu bestehendem Raum hinzufügen")
+        mode = (input("Auswahl [1]: ").strip() or "1")
+    if mode == "2":
+        rooms = [d for d in sorted(os.listdir(STATE)) if os.path.isdir(room_dir(d))] if os.path.isdir(STATE) else []
+        if not rooms:
+            print("keine Räume vorhanden."); return
+        for i, r in enumerate(rooms, 1):
+            print(f"  [{i}] {r}")
+        sel = input("Raum-Nummer: ").strip()
+        if not (sel.isdigit() and 1 <= int(sel) <= len(rooms)):
+            print("abgebrochen."); return
+        room = rooms[int(sel) - 1]
+        role = _wizard_pick_role("Neuer Agent")
+        cmd_addagent(room, role)
+        print(f"\n✅ Agent zu '{room}' hinzugefügt.")
+        input("[Enter schließt diesen Assistenten] ")
+        return
+    name = re.sub(r"[^A-Za-z0-9_-]", "-", input("Raum-Name: ").strip())[:30]
+    if not name:
+        print("kein Name — abgebrochen."); return
+    cnt = input("Wie viele Agenten? [1-4, default 2]: ").strip()
+    count = int(cnt) if (cnt.isdigit() and 1 <= int(cnt) <= 4) else 2
+    specs = [_wizard_pick_role(f"Agent {i + 1}") for i in range(count)]
+    roster = ", ".join((f"Spezialist {r}") if r else "common" for r in specs)
+    print(f"\n… starte Raum '{name}' mit {count} Agent(en): {roster} …")
+    cmd_new(name, agentspecs=specs)
+    try:
+        cockpit_add(name)
+    except Exception:
+        pass
+    print(f"\n✅ Raum '{name}' läuft und ist als Tab '{name}' da. Klick den Tab an.")
+    input("[Enter schließt diesen Assistenten] ")
+
+def cmd_present(args):
+
+    if len(args) < 2:
+        print("usage: phantom-room present <room> <artifact-path>"); return
+    room, rel = args[0], args[1]
+    try:
+        cwd = load_cfg(room).get("cwd", os.path.join(ROOMS_ROOT, room))
+    except Exception:
+        cwd = os.path.join(ROOMS_ROOT, room)
+    path = rel if os.path.isabs(rel) else os.path.join(cwd, rel)
+    if not os.path.exists(path):
+        print(f"present: not found: {path}"); return
+    ext = os.path.splitext(path)[1].lower()
+    base = os.path.basename(path)
+    try:
+        append_feed(room, "system", f"▶ Artefakt vorgeführt: {base}")
+    except Exception:
+        pass
+    gui = {".html", ".htm", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".webp"}
+    if ext in gui:
+        env = os.environ.copy()
+        env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        subprocess.Popen(["xdg-open", path], env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"presenting {base} in a desktop viewer (switch to Mode B to see it)")
+        return
+    pq = path.replace("'", "'\\''")
+    if ext == ".py":
+        inner = f"clear; echo '── demo: {base} ──'; python3 '{pq}'; echo; echo '[Enter schließt den Demo-Tab]'; read"
+    elif ext == ".sh" or os.access(path, os.X_OK):
+        inner = f"clear; echo '── demo: {base} ──'; bash '{pq}'; echo; echo '[Enter schließt den Demo-Tab]'; read"
+    else:
+        inner = f"less -R '{pq}'"
+    win = f"demo:{room}"
+    sh("tmux", "kill-window", "-t", f"{COCKPIT}:{win}")
+    tmux("new-window", "-t", COCKPIT, "-n", win, "bash", "-lc", inner)
+    tmux("select-window", "-t", f"{COCKPIT}:{win}")
+    print(f"presenting {base} in cockpit tab '{win}'")
+
+def cmd_clip(args):
+
+    pane = args[0] if args else None
+    try:
+        types = subprocess.run(["wl-paste", "--list-types"], capture_output=True, text=True).stdout
+    except Exception:
+        types = ""
+    if "image/" in types:
+        outdir = os.path.join(ROOMS_ROOT, "_pasted")
+        os.makedirs(outdir, exist_ok=True)
+        out = os.path.join(outdir, "paste-" + time.strftime("%Y%m%d-%H%M%S") + ".png")
+        subprocess.run(f"wl-paste --type image/png > '{out}'", shell=True)
+        if pane:
+            tmux("send-keys", "-t", pane, "-l", out + " ")
+        print(out)
+    else:
+        txt = subprocess.run(["wl-paste"], capture_output=True, text=True).stdout
+        if pane and txt:
+            tmux("set-buffer", "-b", "phclip", "--", txt)
+            tmux("paste-buffer", "-p", "-b", "phclip", "-t", pane)
+
+def cmd_status(args):
+
+    if not os.path.isdir(STATE):
+        print("no rooms."); return
+    any_room = False
+    for name in sorted(os.listdir(STATE)):
+        if not os.path.isdir(room_dir(name)):
+            continue
+        try:
+            cfg = load_cfg(name)
+        except Exception:
+            continue
+        any_room = True
+        broker = sh("pgrep", "-f", f"phantom-room broker {name}").returncode == 0
+        print(f"room '{name}'  broker={'UP' if broker else 'down'}")
+        for a in cfg.get("agents", []):
+            sess = a["session"]; n = a["n"]
+            if not tmux_has(sess):
+                print(f"   agent {n}: (down)"); continue
+            pane = tmux("capture-pane", "-p", "-t", sess).stdout or ""
+            low = pane.lower()
+            active = ("esc to interrupt" in low) or ("interrupt)" in low)
+            hint = ""
+            for l in reversed([x for x in pane.splitlines() if x.strip()]):
+                ll = l.lower()
+                if "shortcut" in ll or "bypass permissions on" in ll or "for agents" in ll:
+                    continue
+                hint = l.strip()[:72]; break
+            print(f"   agent {n}: {'ACTIVE — running a turn' if active else 'idle (waiting)'}   {hint}")
+    if not any_room:
+        print("no rooms.")
+
+def cmd_list():
+    if not os.path.isdir(STATE):
+        print("no rooms"); return
+    for name in sorted(os.listdir(STATE)):
+        if not os.path.isdir(room_dir(name)):
+            continue
+        try:
+            cfg = load_cfg(name)
+        except Exception:
+            continue
+        up = [a["n"] for a in cfg.get("agents", []) if tmux_has(a["session"])]
+        print(f"{name:20s} kind={cfg.get('kind'):10s} agents_up={up} cwd={cfg.get('cwd')}")
+
+def cmd_rename(old, new):
+
+    new = re.sub(r"[^A-Za-z0-9_-]", "-", new.strip())[:30]
+    if not new:
+        print("usage: phantom-room rename <old> <newname>"); return
+    if new == old:
+        print("same name"); return
+    if not os.path.isdir(room_dir(old)):
+        print(f"no such room: {old}"); return
+    if os.path.isdir(room_dir(new)):
+        print(f"target room already exists: {new}"); return
+
+    sh("pkill", "-f", f"phantom-room broker {old}")
+    sh("pkill", "-f", f"{os.path.basename(__file__)} broker {old}")
+    time.sleep(0.4)
+
+    os.rename(room_dir(old), room_dir(new))
+    cfg = load_cfg(new); cfg["name"] = new; save_cfg(new, cfg)
+
+    tg_topic_rename(old, new)
+
+    if tmux_has(COCKPIT):
+        wins = (tmux("list-windows", "-t", COCKPIT, "-F", "#W").stdout or "").split()
+        if old in wins:
+            tmux("rename-window", "-t", f"{COCKPIT}:{old}", new)
+            self = os.path.abspath(__file__)
+            tmux("respawn-pane", "-k", "-t", f"{COCKPIT}:{new}.0", "bash", "-lc",
+                 f"{sys.executable} {self} feedview {new}")
+            tmux("respawn-pane", "-k", "-t", f"{COCKPIT}:{new}.1", "bash", "-lc",
+                 f"{sys.executable} {self} composer {new}")
+
+    log = os.path.join(room_dir(new), "broker.log")
+    with open(log, "a") as lf:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "broker", new],
+                         stdout=lf, stderr=lf, stdin=subprocess.DEVNULL, start_new_session=True)
+    append_feed(new, "system", f"Room umbenannt: {old} → {new}")
+    print(f"renamed room {old} -> {new} (topic + tab + broker updated)")
+
+def cmd_stop(name):
+    cfg = load_cfg(name)
+    for a in cfg.get("agents", []):
+        if tmux_has(a["session"]):
+            tmux("kill-session", "-t", a["session"])
+    view = f"phr-{name}-view"
+    if tmux_has(view):
+        tmux("kill-session", "-t", view)
+
+    sh("pkill", "-f", f"phantom-room broker {name}")
+    sh("pkill", "-f", f"{os.path.basename(__file__)} broker {name}")
+    append_feed(name, "system", L("Raum gestoppt.", "Room stopped."))
+    tg_topic_close(name)
+    print(f"room '{name}' stopped")
+
+def cmd_delete(name):
+
+    import shutil
+    if os.path.isdir(room_dir(name)):
+        try:
+            cmd_stop(name)
+        except Exception:
+            pass
+    tok, grp = _tg_cfg()
+    if tok and grp is not None:
+        d = _topics_load(); rec = d.get(name)
+        if rec:
+            _tg_call("deleteForumTopic", {"chat_id": grp, "message_thread_id": rec["thread_id"]})
+            d.pop(name, None); _topics_save(d)
+    if tmux_has(COCKPIT):
+        sh("tmux", "kill-window", "-t", f"{COCKPIT}:{name}")
+    try:
+        shutil.rmtree(room_dir(name))
+    except Exception:
+        pass
+    print(f"room '{name}' deleted (stopped, topic removed, tab + state cleared)")
+
+def cmd_close(name):
+
+    try:
+        cmd_stop(name)
+    except Exception:
+        pass
+    if tmux_has(COCKPIT):
+        sh("tmux", "kill-window", "-t", f"{COCKPIT}:{name}")
+    print(f"room '{name}' closed (resumable: phantom-room resume {name})")
+
+def _attach_kind(name):
+    ext = os.path.splitext(name)[1].lower()
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"):
+        return "image"
+    if ext == ".pdf":
+        return "pdf"
+    if ext in (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"):
+        return "video"
+    return "file"
+
+def cmd_attachfile(args):
+
+    if len(args) < 2:
+        print("usage: phantom-room attachfile <room> <file> [note]"); return
+    name, srcf = args[0], args[1]
+    note = " ".join(args[2:]).strip() if len(args) > 2 else ""
+    if not os.path.exists(srcf):
+        print(f"attachfile: no such file: {srcf}"); return
+    try:
+        cfg = load_cfg(name)
+    except Exception:
+        print(f"attachfile: room '{name}' not found (start it: phantom-room new {name})"); return
+    cwd = cfg.get("cwd", os.path.join(ROOMS_ROOT, name))
+    inbox = os.path.join(cwd, "attachments")
+    os.makedirs(inbox, exist_ok=True)
+    base = os.path.basename(srcf.rstrip("/")) or "datei"
+    dst = os.path.join(inbox, base)
+    if os.path.exists(dst):
+        stem, ext = os.path.splitext(base)
+        i = 2
+        while os.path.exists(os.path.join(inbox, f"{stem}-{i}{ext}")):
+            i += 1
+        dst = os.path.join(inbox, f"{stem}-{i}{ext}")
+    try:
+        with open(srcf, "rb") as r, open(dst, "wb") as w:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                w.write(chunk)
+    except OSError as e:
+        print(f"attachfile: copy failed: {e}"); return
+    rel = os.path.relpath(dst, cwd)
+    hint = {
+        "image": "Sieh dir das Bild an (das Read-Tool kann Bilder lesen).",
+        "pdf": "Lies das PDF (Read-Tool mit pages).",
+        "video": "Das Video kannst du nicht direkt ansehen — nutze ffprobe/ffmpeg für Metadaten oder Einzelbilder.",
+    }.get(_attach_kind(base), "Sieh dir die Datei an.")
+    line = L(f"\U0001F4Ce Angehängt: {rel} (im Arbeitsordner)", f"\U0001F4Ce Attached: {rel} (in the working folder)") + (f" — {note}" if note else "")
+    append_feed(name, "system", line)
+    cmd_send(name, "@both", f"[Operator] {line}. {hint}")
+    print(f"attached {srcf} -> {dst}")
+
+def main():
+    os.makedirs(STATE, exist_ok=True)
+    os.makedirs(ROOMS_ROOT, exist_ok=True)
+    args = sys.argv[1:]
+    if not args:
+        print(__doc__); return
+    cmd = args[0]
+    if cmd == "new":
+        name = args[1]
+        cwd = args[args.index("--cwd") + 1] if "--cwd" in args else None
+        agentspecs = None
+        if "--agents" in args:
+            spec = args[args.index("--agents") + 1]
+            if spec.isdigit():
+                agentspecs = [None] * max(1, min(8, int(spec)))
+            else:
+                agentspecs = []
+                for tok in spec.split(","):
+                    t = tok.strip()
+                    if t.lower() in ("c", "common", ""):
+                        agentspecs.append(None)
+                    elif t.lower().startswith(("s:", "spec:")):
+                        agentspecs.append(t.split(":", 1)[1])
+                    else:
+                        agentspecs.append(t)
+        elif "--role1" in args or "--role2" in args:
+            r1 = args[args.index("--role1") + 1] if "--role1" in args else None
+            r2 = args[args.index("--role2") + 1] if "--role2" in args else None
+            agentspecs = [r1, r2]
+        cap = int(args[args.index("--cap") + 1]) if "--cap" in args else None
+        referee = False if "--no-referee" in args else (True if "--referee" in args else None)
+        cmd_new(name, cwd=cwd, resume=False, agentspecs=agentspecs, force="--force" in args, cap=cap, referee=referee)
+    elif cmd == "wizard":
+        try:
+            cmd_wizard(args[1:])
+        except Exception as e:
+            print(f"wizard error: {e}")
+            try: input("[Enter] ")
+            except Exception: pass
+    elif cmd == "addagent":
+        role = args[args.index("--role") + 1] if "--role" in args else None
+        cmd_addagent(args[1], role)
+    elif cmd == "resume":
+        cmd_new(args[1], resume=True)
+    elif cmd == "broker":
+        cmd_broker(args[1])
+    elif cmd == "send":
+        name = args[1]; addr = args[2] if len(args) > 2 else "@both"
+        text = " ".join(args[3:])
+        cmd_send(name, addr, text)
+    elif cmd == "attach":
+        cmd_attach(args[1])
+    elif cmd == "cockpit":
+        cmd_cockpit(args[1:])
+    elif cmd == "present":
+        cmd_present(args[1:])
+    elif cmd == "clip":
+        cmd_clip(args[1:])
+    elif cmd == "attachfile":
+        cmd_attachfile(args[1:])
+    elif cmd == "onboard":
+        cmd_onboard(args[1:])
+    elif cmd == "specialists":
+        cmd_specialists(args[1:])
+    elif cmd == "status":
+        cmd_status(args[1:])
+    elif cmd == "feedview":
+        cmd_feedview(args[1])
+    elif cmd == "composer":
+        cmd_composer(args[1])
+    elif cmd == "list":
+        cmd_list()
+    elif cmd == "rename":
+        if len(args) < 3:
+            print("usage: phantom-room rename <old> <newname>")
+        else:
+            cmd_rename(args[1], args[2])
+    elif cmd == "tgsync":
+
+        if len(args) > 1:
+            print(f"{args[1]} -> topic {tg_topic_ensure(args[1])}")
+        else:
+            for nm in sorted(os.listdir(STATE)):
+                if os.path.isdir(room_dir(nm)) and sh("pgrep", "-f", f"phantom-room broker {nm}").returncode == 0:
+                    print(f"{nm} -> topic {tg_topic_ensure(nm)}")
+    elif cmd == "close":
+        cmd_close(args[1])
+    elif cmd == "delete":
+        cmd_delete(args[1])
+    elif cmd == "stop":
+        cmd_stop(args[1])
+    else:
+        print(__doc__)
+
+if __name__ == "__main__":
+    main()

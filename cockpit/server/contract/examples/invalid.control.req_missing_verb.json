@@ -1,0 +1,12 @@
+{
+  "contract": "portal-contract/1",
+  "type": "req",
+  "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+  "ts": 1719900000000,
+  "nonce": "AAECAwQFBgcICQoLDA0ODw",
+  "principal": "owner",
+  "key_id": "AAECAwQFBgcICQoLDA0ODw",
+  "funding": "member-subsidized",
+  "args": {},
+  "sig": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw"
+}

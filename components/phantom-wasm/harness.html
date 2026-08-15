@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>phantom-wasm harness</title>
+  <style>
+    body { background:#222; color:#ccc; font-family:monospace; }
+    canvas { border:1px solid #555; image-rendering:pixelated; }
+    #log { white-space:pre; }
+  </style>
+</head>
+<body>
+  <h3>phantom-wasm synthetic SceneFrame harness</h3>
+  <canvas id="screen"></canvas>
+  <div id="log"></div>
+  <script type="module">
+    import init, { Compositor } from './pkg/phantom_wasm.js';
+
+    const log = (m) => { document.getElementById('log').textContent += m + '\n'; };
+
+    function makeFrame() {
+      const screenW = 320, screenH = 200;
+      const sw = 160, sh = 120, sx = 40, sy = 30;
+      const pix = sw * sh * 4;
+      const header = 28;
+      const surfHdr = 4+2+2+2+2+2+1+1+2 + (1*(2+2+2+2)) + 4;
+      const total = header + surfHdr + pix;
+      const buf = new ArrayBuffer(total);
+      const dv = new DataView(buf);
+      const u8 = new Uint8Array(buf);
+      let o = 0;
+
+      u8[0]=0x50; u8[1]=0x53; u8[2]=0x4E; u8[3]=0x31; o=4;
+      dv.setUint16(o,1,true); o+=2;
+      dv.setUint16(o,0x0001,true); o+=2;
+      dv.setUint32(o,7,true); o+=4;
+      dv.setUint32(o,1,true); o+=4;
+      dv.setUint16(o,screenW,true); o+=2;
+      dv.setUint16(o,screenH,true); o+=2;
+      dv.setUint16(o,1,true); o+=2;
+      dv.setUint16(o,0,true); o+=2;
+      dv.setUint32(o,pix,true); o+=4;
+
+      dv.setUint32(o,42,true); o+=4;
+      dv.setInt16(o,sx,true); o+=2;
+      dv.setInt16(o,sy,true); o+=2;
+      dv.setUint16(o,sw,true); o+=2;
+      dv.setUint16(o,sh,true); o+=2;
+      dv.setUint16(o,sw,true); o+=2;
+      u8[o]=0; o+=1;
+      u8[o]=0x01; o+=1;
+      dv.setUint16(o,1,true); o+=2;
+      dv.setUint16(o,0,true); o+=2;
+      dv.setUint16(o,0,true); o+=2;
+      dv.setUint16(o,sw,true); o+=2;
+      dv.setUint16(o,sh,true); o+=2;
+      dv.setUint32(o,pix,true); o+=4;
+
+      for (let y=0;y<sh;y++){
+        for (let x=0;x<sw;x++){
+          const i = o + (y*sw+x)*4;
+          u8[i]   = Math.floor(255*x/sw);
+          u8[i+1] = Math.floor(255*y/sh);
+          u8[i+2] = 0;
+          u8[i+3] = 255;
+        }
+      }
+      return new Uint8Array(buf);
+    }
+
+    async function main() {
+      await init();
+      const comp = new Compositor('screen');
+      log('Compositor created');
+      const frame = makeFrame();
+      comp.on_frame(frame);
+      log('frame painted, frame_count=' + comp.frame_count);
+      log('EXPECT: blue->green gradient rect (blue right, green down) on black.');
+    }
+    main().catch(e => log('ERROR: ' + e));
+</script>
+</body>
+</html>

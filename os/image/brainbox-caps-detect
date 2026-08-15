@@ -1,0 +1,88 @@
+#!/bin/sh
+BBX_ETC="${BBX_ETC:-/etc/brainbox}"
+[ -f "$BBX_ETC/service.env" ] && . "$BBX_ETC/service.env"
+[ -f "$BBX_ETC/site.conf" ]  && . "$BBX_ETC/site.conf"
+[ -f "$BBX_ETC/caps.env" ]   && . "$BBX_ETC/caps.env"
+SVC_HOME="${SERVICE_HOME:-$HOME}"; [ -n "$SVC_HOME" ] || SVC_HOME=/home/brainbox
+SVC_USER="${SERVICE_USER:-brainbox}"
+
+kvm_state(){
+  [ -e /dev/kvm ] || { echo absent; return; }
+  g="$(stat -c %G /dev/kvm 2>/dev/null || echo '?')"
+  m="$(stat -c %a /dev/kvm 2>/dev/null || echo 0)"
+  case "$m" in *[67]?) : ;; *) echo "unusable(mode=$m)"; return ;; esac
+  if id -nG "$SVC_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then echo yes
+  else echo "unusable($SVC_USER not in group $g)"; fi
+}
+KVM="$(kvm_state)"
+
+vmm_bin(){
+  [ -n "${PN_VMM_BIN:-}" ] && [ -x "${PN_VMM_BIN}" ] && { echo "$PN_VMM_BIN"; return; }
+  for p in \
+    "$SVC_HOME/brainarbeit/os/pn-vmm/target/release/pn-vmm" \
+    "$SVC_HOME/pn-vmm-build/target/release/pn-vmm" ; do
+    [ -x "$p" ] && { echo "$p"; return; }
+  done
+  command -v pn-vmm 2>/dev/null || true
+}
+VMM_BIN="$(vmm_bin)"; VMM=no; [ -n "$VMM_BIN" ] && VMM=yes
+
+SEAT_REL="components/phantom/target/release/phantom"
+SELF_REPO="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd || true)"
+
+seat_candidates(){
+  [ -n "${PHANTOM_BIN:-}" ] && echo "$PHANTOM_BIN"
+  [ -n "$SELF_REPO" ] && echo "$SELF_REPO/$SEAT_REL"
+  echo "$SVC_HOME/brainarbeit/$SEAT_REL"
+  for r in /opt/brainarbeit /srv/brainarbeit /usr/local/lib/brainarbeit /usr/lib/brainarbeit; do
+    echo "$r/$SEAT_REL"
+    echo "$r/bin/phantom"
+  done
+  echo /usr/local/bin/phantom
+  echo /usr/bin/phantom
+  command -v phantom 2>/dev/null
+}
+
+SEAT_BIN=""; SEAT_NOEXEC=""; SEAT_N=0
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  SEAT_N=$((SEAT_N+1))
+  if [ -f "$c" ] && [ -x "$c" ]; then SEAT_BIN="$c"; break; fi
+  if [ -f "$c" ] && [ -z "$SEAT_NOEXEC" ]; then SEAT_NOEXEC="$c"; fi
+done <<EOF
+$(seat_candidates)
+EOF
+SEAT=no; [ -n "$SEAT_BIN" ] && SEAT=yes
+
+C=0; CNOTE=""
+if [ "${CELLS_FORCED:-0}" = 1 ]; then
+  C="${CELLS_ENABLED:-0}"; CNOTE=" (pinned by site.conf)"
+elif [ "$KVM" = yes ] && [ "$VMM" = yes ]; then
+  case "$(uname -m)" in
+    x86_64|aarch64|arm64) C=1 ;;
+  esac
+fi
+S=0; [ "$SEAT" = yes ] && S=1
+
+mkdir -p "$BBX_ETC"
+OUT="$BBX_ETC/caps.env"
+TMP="$OUT.tmp.$$"
+{
+  if [ -f "$OUT" ]; then
+    grep -v -E '^[[:space:]]*(CELLS_ENABLED|SEAT_ENABLED|SEAT_BIN)=' "$OUT" || true
+  fi
+  echo "CELLS_ENABLED=$C"
+  echo "SEAT_ENABLED=$S"
+  if [ -n "$SEAT_BIN" ]; then echo "SEAT_BIN=$SEAT_BIN"; fi
+} > "$TMP" && chmod 0644 "$TMP" && mv -f "$TMP" "$OUT" \
+  || { rm -f "$TMP"; echo "[caps] FAILED to write $OUT" >&2; exit 1; }
+
+echo "[caps] arch=$(uname -m) kvm=$KVM pn-vmm=$VMM phantom=$SEAT -> CELLS_ENABLED=$C$CNOTE SEAT_ENABLED=$S"
+if [ -n "$VMM_BIN" ]; then echo "[caps] pn-vmm: $VMM_BIN"; fi
+if [ -n "$SEAT_BIN" ]; then
+  echo "[caps] phantom: $SEAT_BIN"
+elif [ -n "$SEAT_NOEXEC" ]; then
+  echo "[caps] phantom present but NOT EXECUTABLE: $SEAT_NOEXEC — repair the mode bits (chmod +x) or re-image."
+else
+  echo "[caps] no phantom in any of the $SEAT_N searched locations — the Bildschirm feature stays off."
+fi

@@ -1,0 +1,12 @@
+#!/bin/bash
+STATE="$HOME/.config/pn-breakglass/dev-session-id"
+SEED="REPLACE-WITH-SESSION-ID"
+PROJ="$HOME/.claude/projects/-home-USER"
+mkdir -p "$(dirname "$STATE")"; cd "$HOME" || exit 1
+ID="$(cat "$STATE" 2>/dev/null || echo "$SEED")"
+START=$(date +%s)
+claude --resume "$ID"
+N=$(find "$PROJ" -maxdepth 1 -name '*.jsonl' ! -name "$SEED.jsonl" -newermt "@$START" \
+      -printf '%T@ %f\n' 2>/dev/null | sort -n | tail -1 | awk '{print $2}' | sed 's/\.jsonl$//')
+[ -n "$N" ] && echo "$N" > "$STATE"
+echo; echo "claude beendet — Shell (tmux bleibt)."; exec bash -l

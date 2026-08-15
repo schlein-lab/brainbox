@@ -1,0 +1,25 @@
+[Unit]
+Description=portioneer brain keeper (pn-brainkeeper) — liveness / rotation / compaction ONLY
+After=pnd.service pn-llmd.service
+Requires=pnd.service
+Wants=pn-llmd.service
+
+[Service]
+Type=simple
+User=brain
+ExecStart=%h/portioneer/tools/pn-brainkeeper
+Slice=pn-interactive.slice
+Restart=always
+RestartSec=5
+MemoryAccounting=yes
+Environment=PN_BRAIN_PRINCIPAL=brain
+Environment=PN_KEEPER_TICK_S=30
+Environment=PN_LLM_SOCK=%t/pn-llmd.sock
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target

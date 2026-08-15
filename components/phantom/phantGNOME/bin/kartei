@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -u
+K="$HOME/phantGNOME/kartei"
+cmd="${1:-list}"; shift 2>/dev/null || true
+case "$cmd" in
+  list)   ls "$K" 2>/dev/null | grep -E '\.md$' | grep -vE '^(_|INDEX|README)' ;;
+  index)  cat "$K/INDEX.md" 2>/dev/null ;;
+  read|show) cat "$K/${1:?card name}.md" 2>/dev/null || echo "no card '$1' yet — create it: kartei new $1" ;;
+  grep|search) grep -rin "${1:?term}" "$K" 2>/dev/null ;;
+  new)    n="${1:?card name}"; [ -f "$K/$n.md" ] && { echo "$K/$n.md exists"; exit 0; }; \
+          cp "$K/_TEMPLATE.md" "$K/$n.md" && sed -i "s/<NAME>/$n/" "$K/$n.md" && \
+          echo "created $K/$n.md — edit it, then add a line to $K/INDEX.md" ;;
+  path)   echo "$K/${1:+$1.md}" ;;
+  help|*) echo "kartei <list | index | read NAME | grep TERM | new NAME | path [NAME]>  (cards in $K)" ;;
+esac

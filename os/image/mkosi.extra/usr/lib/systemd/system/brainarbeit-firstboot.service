@@ -1,0 +1,17 @@
+[Unit]
+Description=Brainarbeit first-boot (DATA seed + identity + Record + SAFE backlog)
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Before=multi-user.target
+ConditionPathExists=!/var/lib/brainarbeit/config/.firstboot-done
+RequiresMountsFor=/var/lib/brainarbeit
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/brainarbeit/firstboot.sh
+TimeoutStartSec=300
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

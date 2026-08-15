@@ -1,0 +1,12 @@
+
+HA_ENABLED=0
+
+CELLS_ENABLED=0
+
+NET_PROFILE=managed
+
+REPO_URL=https://github.com/schlein-lab/brainarbeit.git
+
+RELAY_ENABLED=0
+PRINTER_ENABLED=0
+NAS_ENABLED=0

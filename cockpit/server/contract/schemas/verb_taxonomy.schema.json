@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portal-contract/1/verb_taxonomy",
+  "title": "Verb taxonomy: ceremony-class map (contract.md §3, design §4.2)",
+  "description": "Machine-checkable map of EVERY contract verb to its ceremony class (read / low-stakes / irreversible) plus family and evt/req kind. Invariant 4 requires EVERY irreversible verb to run the full §6 ceremony. This file is the single source of truth a later phase's dispatcher loads to know which verbs must escalate.",
+  "type": "object",
+  "required": ["contract", "classes", "verbs"],
+  "properties": {
+    "contract": { "const": "portal-contract/1" },
+    "classes": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["read", "low-stakes", "irreversible", "none"] },
+      "description": "'none' = an evt/handshake sub-verb that carries no independent ceremony."
+    },
+    "verbs": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["family", "kind", "ceremony"],
+        "properties": {
+          "family": {
+            "type": "string",
+            "enum": ["conversation", "terminal", "screen", "app", "files", "artifact", "verb", "secret", "enroll", "profile", "placement"]
+          },
+          "kind": { "type": "string", "enum": ["req", "evt"] },
+          "ceremony": { "type": "string", "enum": ["read", "low-stakes", "irreversible", "none"] },
+          "interlock": {
+            "type": "string",
+            "enum": ["name-pid", "name-key"],
+            "description": "extra IBAN-style interlock this verb enforces (§3.11 / §2.4)."
+          },
+          "gated": {
+            "type": "boolean",
+            "description": "owner-open gate: DISABLED/fail-closed until an §11 question is answered."
+          },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

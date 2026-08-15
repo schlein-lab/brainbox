@@ -1,0 +1,60 @@
+#!/bin/sh
+set -u
+
+exec 9>/run/wyoming-guard.lock 2>/dev/null || exec 9>/tmp/wyoming-guard.lock
+if ! flock -n 9; then
+  echo "$(date -u +%FT%TZ) BLOCKIERT: ein Vorlauf haelt die Sperre noch — NICHTS geprueft" \
+    >> /home/user/wyoming-guard.log
+  exit 0
+fi
+
+V=/home/user/wyoming-venv/bin/python
+D=/home/user/wyoming-data
+PNRUN=/run/pn-init
+LOG=/home/user/wyoming-guard.log
+
+sagen() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$LOG"; }
+
+CONF=/etc/pn-init.conf
+hat_besitzer() {
+  if [ -r "$CONF" ]; then
+    awk -F'|' -v n="$1" '$1 == n { gefunden = 1 } END { exit !gefunden }' "$CONF" && return 0
+    return 1
+  fi
+  if [ -r "$PNRUN/services" ]; then
+    awk -v n="$1" '$1 == n { gefunden = 1 } END { exit !gefunden }' "$PNRUN/services" && return 0
+  fi
+  [ -s "/sys/fs/cgroup/pn-batch.slice/$1/cgroup.procs" ] && return 0
+  return 1
+}
+
+laeuft() { pgrep -f "$1" >/dev/null 2>&1; }
+
+notnetz_start() {
+  dienst="$1"; muster="$2"; shift 2
+  CG="/sys/fs/cgroup/pn-batch.slice/$dienst"
+  [ -d "$CG" ] || mkdir -p "$CG" 2>/dev/null
+  sagen "$dienst: PID 1 kennt ihn NICHT -> Notnetz-Start in eigenes Blatt. Bitte pruefen, warum PID 1 ihn nicht geladen hat ('pnctl list' nennt Deckel/Abschnitt)."
+  setsid --fork "$@" </dev/null >>"/home/user/$dienst.log" 2>&1 9>&- &
+  sleep 2
+  for p in $(pgrep -f "$muster" 2>/dev/null); do
+    echo "$p" > "$CG/cgroup.procs" 2>/dev/null
+  done
+}
+
+pruefe() {
+  dienst="$1"; muster="$2"; shift 2
+  if hat_besitzer "$dienst"; then
+    return 0
+  fi
+  laeuft "$muster" && return 0
+  notnetz_start "$dienst" "$muster" "$@"
+}
+
+pruefe wyoming-stt wyoming_faster_whisper \
+  "$V" -m wyoming_faster_whisper --uri tcp://127.0.0.1:10300 --model small --language de \
+       --data-dir "$D" --download-dir "$D"
+
+pruefe wyoming-tts wyoming_piper \
+  "$V" -m wyoming_piper --uri tcp://127.0.0.1:10200 --voice de_DE-thorsten-medium \
+       --data-dir "$D" --download-dir "$D"

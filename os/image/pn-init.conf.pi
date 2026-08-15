@@ -1,0 +1,27 @@
+
+
+earlyboot|oneshot|/usr/local/sbin/brainbox-earlyboot
+
+banner|sacred|/usr/local/sbin/brainbox-banner
+firstboot|oneshot|/usr/local/sbin/brainbox-firstboot.sh
+caps-detect|oneshot|/usr/local/sbin/brainbox-caps-detect
+netcfg|oneshot|/usr/local/sbin/brainbox-netcfg
+dbus|sacred|/usr/bin/dbus-daemon --system --nofork --nopidfile
+avahi|sacred|/usr/sbin/avahi-daemon --no-chroot
+sshd|sacred|/usr/sbin/sshd -D -e
+chronyd|sacred|/usr/sbin/chronyd -d
+breakglass|sacred user=1000|/usr/local/sbin/brainbox-breakglassd --port 8090 --session breakglass --cmd /usr/local/sbin/brainbox-breakglass
+getty-vga|sacred|/sbin/agetty --noclear tty1 linux
+getty-ser|sacred|/sbin/agetty -L 115200 ttyAMA0 vt100
+netpin|oneshot|/usr/local/bin/pn-netpin
+portioneer-run|oneshot|/usr/local/bin/pn-portioneer-run
+pn-cgtree|oneshot|/usr/local/bin/pn-cgtree
+pnd|sacred pnd user=1000 envfile=/etc/brainbox/pnd.env pndsock=/run/user/1000/pnd.sock env=PND_BROKER_SOCK=/run/portioneer/pnd-broker.sock env=PND_BROKER_GROUP=pnbroker env=PND_BROKER_UIDS=4003|/home/brainbox/portioneer/tools/pnd
+pn-cgmove|oneshot|/usr/local/bin/pn-cgmove
+pn-llmd|sacred user=1000 envfile=/etc/brainbox/secrets.env env=PN_LLM_POOL=1 env=PN_LLM_MODEL=sonnet env=PN_LLM_CMD=claude -p --model {model}|/home/brainbox/portioneer/tools/pn-llmd
+brainbox-setup|sacred|/usr/local/sbin/brainbox-setup serve
+brainbox-portal|sacred user=1000 envfile=/etc/brainbox/secrets.env|/usr/bin/python3 /home/brainbox/.local/bin/brainbox-portal serve
+cron||/usr/sbin/cron -f
+wyoming-stt|batch user=1000|/home/brainbox/wyoming-venv/bin/python -m wyoming_faster_whisper --uri tcp://127.0.0.1:10300 --model small --language de --data-dir /home/brainbox/wyoming-data --download-dir /home/brainbox/wyoming-data
+wyoming-tts|batch user=1000|/home/brainbox/wyoming-venv/bin/python -m wyoming_piper --uri tcp://127.0.0.1:10200 --voice de_DE-thorsten-medium --data-dir /home/brainbox/wyoming-data --download-dir /home/brainbox/wyoming-data
+pn-selftest|oneshot user=1000|/usr/bin/python3 /home/brainbox/.local/bin/pn-selftest --boot

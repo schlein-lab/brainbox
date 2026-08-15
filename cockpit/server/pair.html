@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Brainarbeit — Gerät koppeln</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f8fafc; --card:#ffffff; --bd:#e2e8f0; --bd2:#cbd5e1;
+    --fg:#0f172a; --mut:#64748b; --acc:#6f5fe6; --acc2:#8a7fff; --err:#ef4444; --ok:#16a34a;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#020617; --card:#0f172a; --bd:#1e293b; --bd2:#334155; --fg:#f1f5f9; --mut:#94a3b8; --acc:#8a7fff; --acc2:#a89fff; --ok:#34d399; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;
+    font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:26px 24px;
+    max-width:420px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.14)}
+  h1{font-size:19px;margin:0 0 4px;font-weight:700}
+  .sub{color:var(--mut);font-size:13.5px;margin:0 0 18px}
+  label{display:block;font-size:13px;color:var(--mut);margin:14px 0 6px;font-weight:600}
+  input[type=text]{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--bd2);
+    background:var(--bg);color:var(--fg);font:inherit}
+  input#totp{font:600 22px/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:6px;text-align:center}
+  .opt{display:flex;align-items:center;gap:9px;margin:16px 0 4px;font-size:13.5px;color:var(--fg);font-weight:500}
+  .opt input{width:17px;height:17px}
+  button{width:100%;margin-top:20px;padding:13px 16px;border-radius:10px;border:0;cursor:pointer;
+    background:var(--acc);color:#fff;font:600 15px/1 inherit}
+  button:disabled{opacity:.55;cursor:default}
+  .msg{margin-top:14px;font-size:13.5px;min-height:20px}
+  .msg.err{color:var(--err)} .msg.ok{color:var(--ok)}
+  .box{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:12px 13px;margin-top:8px}
+  .tok{font:600 13px ui-monospace,Menlo,Consolas,monospace;word-break:break-all;color:var(--fg)}
+  .foot{margin-top:16px;font-size:12.5px;color:var(--mut);line-height:1.6}
+  a{color:var(--acc)}
+  .who{font-size:13px;color:var(--mut);margin:2px 0 6px}
+  .who b{color:var(--fg)}
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <h1>Gerät koppeln</h1>
+  <div class="sub" id="sub">Prüfe den Kopplungscode …</div>
+  <div id="form" style="display:none">
+    <div class="who">Box: <b id="box">—</b> · Konto: <b id="who">—</b></div>
+    <label for="label">Gerätename</label>
+    <input type="text" id="label" placeholder="z. B. Mein Handy" autocomplete="off">
+    <div id="totpWrap" style="display:none">
+      <label for="totp">Zwei-Faktor-Code (aus deiner Authenticator-App)</label>
+      <input type="text" id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000">
+    </div>
+    <label class="opt"><input type="checkbox" id="sess"> Dieses Gerät auch im Browser anmelden</label>
+    <button id="go" onclick="redeem()">Koppeln</button>
+    <div class="msg" id="msg"></div>
+  </div>
+  <div id="done" style="display:none">
+    <div class="msg ok">✓ Gerät gekoppelt.</div>
+    <div class="msg" id="idState"></div>
+    <label>Zugangsschlüssel (nur EINMAL sichtbar)</label>
+    <div class="box"><span class="tok" id="tok"></span></div>
+    <button id="copy" onclick="copyTok()">Schlüssel kopieren</button>
+    <div class="foot">Thin-Clients hinterlegen ihn als Header <b>X-API-Key</b>. Bewahre ihn sicher auf —
+      er wird nicht erneut angezeigt. Verloren? Im Portal unter <b>Geräte</b> entkoppeln und neu koppeln.</div>
+    <div class="foot" id="portalLink" style="display:none"><a href="/">→ Zum Portal</a></div>
+  </div>
+  <div class="foot">Erst-Kontakt mit TLS-Warnung? <a href="/trust">Box-Zertifikat installieren</a>.</div>
+</div>
+<script>
+function qs(k){ return new URLSearchParams(location.search).get(k) || ""; }
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+const CODE = qs("code");
+let TOTP_REQ = false;
+let DEV = null;
+
+async function ensureDeviceKey(){
+  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if(!subtle) return null;
+  const hex = buf => [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
+  try{
+    const kp = await subtle.generateKey({name:"Ed25519"}, false, ["sign","verify"]);
+    const pub = await subtle.exportKey("raw", kp.publicKey);
+    return { keypair:kp, pubkeyHex:hex(pub) };
+  }catch(e){
+    try{
+      const kp = await subtle.generateKey({name:"ECDSA",namedCurve:"P-256"}, false, ["sign","verify"]);
+      const pub = await subtle.exportKey("raw", kp.publicKey);
+      return { keypair:kp, pubkeyHex:hex(pub), alg:"ECDSA-P256" };
+    }catch(e2){ return null; }
+  }
+}
+
+function saveDeviceKey(rec){
+  return new Promise(res=>{
+    try{
+      const rq = indexedDB.open("brainbox-device", 1);
+      rq.onupgradeneeded = () => { try{ rq.result.createObjectStore("keys"); }catch(e){} };
+      rq.onsuccess = () => {
+        try{
+          const tx = rq.result.transaction("keys","readwrite");
+          tx.objectStore("keys").put(rec, "device");
+          tx.oncomplete = () => res(true); tx.onerror = () => res(false);
+        }catch(e){ res(false); }
+      };
+      rq.onerror = () => res(false);
+    }catch(e){ res(false); }
+  });
+}
+
+async function init(){
+  const sub=document.getElementById("sub");
+  if(!CODE){ sub.textContent="Kein Kopplungscode. Öffne den QR-Code / Link vom Portal erneut."; return; }
+  let j;
+  try{ const r=await fetch("/api/pair/info?code="+encodeURIComponent(CODE),{cache:"no-store"}); j=await r.json(); }
+  catch(e){ j=null; }
+  if(!j || !j.ok){
+    sub.innerHTML='<span style="color:var(--err)">Code ungültig oder abgelaufen.</span> '+
+      'Bitte im Portal einen frischen QR-Code erzeugen.';
+    return;
+  }
+  document.getElementById("box").textContent = j.box || "Brainbox";
+  document.getElementById("who").textContent = j.principal || "—";
+  if(j.label) document.getElementById("label").value = j.label;
+  TOTP_REQ = !!j.totp_required;
+  if(TOTP_REQ) document.getElementById("totpWrap").style.display="";
+  sub.textContent = "Bestätige die Kopplung dieses Geräts.";
+  document.getElementById("form").style.display="";
+}
+
+async function redeem(){
+  const go=document.getElementById("go"), msg=document.getElementById("msg");
+  msg.className="msg"; msg.textContent="";
+  const totp=(document.getElementById("totp").value||"").trim();
+  if(TOTP_REQ && !totp){ msg.className="msg err"; msg.textContent="Bitte den 6-stelligen Code eingeben."; return; }
+  go.disabled=true; const o=go.textContent; go.textContent="Schlüssel …";
+  if(!DEV){ try{ DEV = await ensureDeviceKey(); }catch(e){ DEV=null; } }
+  go.textContent="Koppeln …";
+  const body={ code:CODE, label:(document.getElementById("label").value||"").trim(),
+    session:document.getElementById("sess").checked };
+  if(totp) body.totp=totp;
+  if(DEV && DEV.pubkeyHex) body.device_pubkey = DEV.pubkeyHex;
+  let j;
+  try{ const r=await fetch("/api/pair",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); j=await r.json(); }
+  catch(e){ j=null; }
+  if(!j || !j.ok){
+    go.disabled=false; go.textContent=o;
+    msg.className="msg err";
+    msg.textContent = (j && j.need_2fa) ? "Zwei-Faktor-Code fehlt oder ist falsch."
+      : ((j && j.error) || "Kopplung fehlgeschlagen. Ggf. neuen QR-Code erzeugen.");
+    if(j && j.need_2fa && !TOTP_REQ){ TOTP_REQ=true; document.getElementById("totpWrap").style.display=""; }
+    return;
+  }
+  document.getElementById("form").style.display="none";
+  document.getElementById("tok").textContent = j.token || "";
+  document.getElementById("done").style.display="";
+  document.getElementById("portalLink").style.display="";
+
+  if(DEV && DEV.keypair){ saveDeviceKey({ keypair:DEV.keypair, pubkeyHex:DEV.pubkeyHex, alg:DEV.alg||"Ed25519",
+    did:j.did||null, principal:j.principal||null, box:document.getElementById("box").textContent }); }
+  const idn = j.identitaet, idBox = document.getElementById("idState");
+  if(idBox){
+    if(idn && idn.eingerollt){
+      idBox.className="msg ok";
+      idBox.textContent="🔑 Geräteschlüssel eingerollt und freigegeben — dieses Gerät ist mit Schlüssel bekannt.";
+    } else if(!DEV){
+      idBox.className="msg err";
+      idBox.textContent="⚠ Kein Geräteschlüssel: dieser Browser hat keine WebCrypto-Unterstützung. Gekoppelt, aber ohne Schlüssel.";
+    } else if(DEV.alg==="ECDSA-P256"){
+      idBox.className="msg err";
+      idBox.textContent="⚠ Dein Browser kann keine Ed25519-Schlüssel — gekoppelt, aber ohne Geräteschlüssel. Auf einem aktuellen Browser (Safari 17+, aktuelles Chrome/Firefox) neu koppeln.";
+    } else if(idn && !idn.eingerollt){
+      idBox.className="msg err";
+      idBox.textContent="⚠ Ohne Geräteschlüssel (Grund: "+(idn.fehler||"unbekannt")+").";
+    }
+  }
+}
+
+function copyTok(){
+  const t=document.getElementById("tok").textContent;
+  navigator.clipboard && navigator.clipboard.writeText(t).then(
+    ()=>{ document.getElementById("copy").textContent="Kopiert ✓"; },
+    ()=>{}
+  );
+}
+init();
+</script>
+</body>
+</html>

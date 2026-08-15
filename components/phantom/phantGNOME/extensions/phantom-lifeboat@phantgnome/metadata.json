@@ -1,0 +1,8 @@
+{
+    "uuid": "phantom-lifeboat@phantgnome",
+    "name": "phantom Lifeboat (independent SPOF daemon)",
+    "description": "phantGNOME independent lifeboat. A tiny mode-extension that is NOT the same object as the phantom-ui umbrella, loaded by the ExtensionManager from the phantom session mode independently of the umbrella's load state. It mounts an always-present anchor + a re-enable affordance so even a dead, disabled, or OUT_OF_DATE umbrella leaves a way back to a usable desktop. Realizes FUSION-FRAMEWORK.md section 9.2 / MODES.md section 3,5.9 / STRESS #4. See also the in-umbrella secondary Lifeboat affordance.",
+    "shell-version": ["46"],
+    "session-modes": ["ubuntu", "phantom", "user"],
+    "url": "https://github.com/schlein-lab/phantGNOME"
+}

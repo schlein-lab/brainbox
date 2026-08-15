@@ -1,0 +1,18 @@
+{
+  "render": ["webgpu", "webgl2", "server-composite"],
+  "webgl2": true,
+  "webgpu": true,
+  "hw_decode": true,
+  "cores": 8,
+  "mem_mb": 16384,
+  "throttled": false,
+  "native": false,
+  "ssh-terminate": false,
+  "vpn-terminate": false,
+  "durable-store": true,
+  "secret-vault": true,
+  "wake-word": true,
+  "hardware-confirm": false,
+  "sig_algs": ["ed25519"],
+  "max_msg_bytes": 262144
+}

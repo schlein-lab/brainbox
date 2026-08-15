@@ -1,0 +1,31 @@
+#!/bin/sh
+CONF="${1:-/etc/brainbox/network.conf}"
+[ -f "$CONF" ] || exit 0
+. "$CONF"
+[ "${MODE:-dhcp}" = static ] || exit 0
+
+[ -n "${IFACE:-}" ] || IFACE=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+[ -n "${IFACE:-}" ] || IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ "$n" = lo ] || { echo "$n"; break; }; done)
+[ -n "${IP:-}" ] && [ -n "${PREFIX:-}" ] && [ -n "${IFACE:-}" ] || { echo "[netcfg] static config incomplete (need IP/PREFIX/IFACE)"; exit 1; }
+
+for c in udhcpc dhclient dhcpcd; do
+  command -v pkill >/dev/null 2>&1 && pkill -x "$c" 2>/dev/null
+done
+
+ip addr flush dev "$IFACE" 2>/dev/null
+ip addr add "$IP/$PREFIX" dev "$IFACE" || { echo "[netcfg] failed to add $IP/$PREFIX on $IFACE"; exit 1; }
+ip link set "$IFACE" up
+if [ -n "${GATEWAY:-}" ]; then
+  ip route replace default via "$GATEWAY" dev "$IFACE" || {
+    echo "[netcfg] failed to set default route via $GATEWAY on $IFACE (off-subnet gateway?)" >&2
+    exit 1
+  }
+fi
+dns="${DNS:-}"; [ -n "$dns" ] || dns="${GATEWAY:-}"
+if [ -n "$dns" ]; then
+  : > /etc/resolv.conf
+  for d in $(echo "$dns" | tr ',' ' '); do
+    [ -n "$d" ] && echo "nameserver $d" >> /etc/resolv.conf
+  done
+fi
+echo "[netcfg] static $IP/$PREFIX via ${GATEWAY:-none} dev $IFACE dns=${DNS:-${GATEWAY:-none}}"

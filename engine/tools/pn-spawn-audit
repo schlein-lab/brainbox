@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import sys
+import time
+
+CG_ROOT = "/sys/fs/cgroup"
+OUT = os.environ.get("PN_SPAWN_AUDIT_OUT", "/run/brainbox/spawn-audit.json")
+
+def _pids_of(comm):
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/comm" % name) as f:
+                if f.read().strip() == comm:
+                    out.append(int(name))
+        except OSError:
+            continue
+    return out
+
+def _cgroup_of(pid):
+
+    try:
+        with open("/proc/%d/cgroup" % pid) as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if line.startswith("0::"):
+                    return line[3:]
+    except OSError:
+        pass
+    return None
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+def _uid_of(pid):
+    try:
+        with open("/proc/%d/status" % pid) as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+def _etime(pid):
+    try:
+        st = os.stat("/proc/%d" % pid)
+        return int(time.time() - st.st_ctime)
+    except OSError:
+        return None
+
+def audit():
+    node = os.uname().nodename
+    pids = _pids_of("pn-vmm")
+
+    von_cg = {}
+    for p in pids:
+        cg = _cgroup_of(p)
+        von_cg.setdefault(cg, []).append(p)
+
+    cells = []
+    for p in sorted(pids):
+        cg = _cgroup_of(p)
+        cpu_max = _read(os.path.join(CG_ROOT, (cg or "").lstrip("/"), "cpu.max")) if cg else None
+        mem_max = _read(os.path.join(CG_ROOT, (cg or "").lstrip("/"), "memory.max")) if cg else None
+        geteilt = len(von_cg.get(cg, [])) > 1
+
+        hat_cpu_deckel = bool(cpu_max) and not cpu_max.split()[0] == "max"
+        hat_mem_deckel = bool(mem_max) and mem_max != "max"
+        eigene_gruppe = not geteilt
+        zugeteilt = eigene_gruppe and hat_cpu_deckel
+        cells.append({
+            "pid": p,
+            "uid": _uid_of(p),
+            "cgroup": cg,
+            "geteilter_topf": geteilt,
+            "cpu_max": cpu_max,
+            "memory_max": mem_max,
+            "hat_cpu_deckel": hat_cpu_deckel,
+            "hat_mem_deckel": hat_mem_deckel,
+            "zugeteilt": zugeteilt,
+            "laeuft_seit_s": _etime(p),
+        })
+
+    ohne = [c for c in cells if not c["zugeteilt"]]
+    bericht = {
+        "ts": int(time.time()),
+        "node": node,
+        "zellen_gesamt": len(cells),
+        "zugeteilt": len(cells) - len(ohne),
+        "ohne_deckel": len(ohne),
+        "cells": cells,
+    }
+    return bericht
+
+def _publish(bericht):
+    try:
+        os.makedirs(os.path.dirname(OUT), exist_ok=True)
+        tmp = OUT + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(bericht, f, indent=2)
+        os.replace(tmp, OUT)
+        return True
+    except OSError as e:
+        sys.stderr.write("pn-spawn-audit: konnte %s nicht schreiben: %s\n" % (OUT, e))
+        return False
+
+def main(argv):
+    als_json = "--json" in argv
+    b = audit()
+    if not ("--no-write" in argv):
+        _publish(b)
+    if als_json:
+        print(json.dumps(b, indent=2))
+        return 0
+
+    print("pn-spawn-audit @ %s" % b["node"])
+    print("  Zellen (pn-vmm) gesamt : %d" % b["zellen_gesamt"])
+    print("  mit Zuteilung (Deckel) : %d" % b["zugeteilt"])
+    print("  OHNE Deckel (Umgeher)  : %d%s" % (
+        b["ohne_deckel"],
+        "   <- steht das nicht auf 0, laeuft Rechenzeit an der Queue vorbei" if b["ohne_deckel"] else ""))
+    for c in b["cells"]:
+        marke = "OK " if c["zugeteilt"] else "!! "
+        print("    %spid %-7d uid %-5s cpu.max=%-14s mem.max=%-12s %s%s" % (
+            marke, c["pid"], c["uid"],
+            (c["cpu_max"] or "?"), (c["memory_max"] or "?"),
+            c["cgroup"] or "?",
+            "  [geteilter Topf]" if c["geteilter_topf"] else ""))
+
+    return 1 if b["ohne_deckel"] else 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

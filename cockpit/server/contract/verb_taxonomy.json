@@ -1,0 +1,61 @@
+{
+  "contract": "portal-contract/1",
+  "classes": ["read", "low-stakes", "irreversible", "none"],
+  "verbs": {
+    "conversation.say":         { "family": "conversation", "kind": "req", "ceremony": "read", "note": "entry point; downstream verbs carry their own class" },
+    "conversation.cancel":      { "family": "conversation", "kind": "req", "ceremony": "low-stakes" },
+    "conversation.disambiguate":{ "family": "conversation", "kind": "evt", "ceremony": "none", "note": "the disambiguation ask (§6.1)" },
+    "conversation.ack":         { "family": "conversation", "kind": "evt", "ceremony": "none", "note": "felt-latency earcon" },
+
+    "terminal.read":  { "family": "terminal", "kind": "req", "ceremony": "read" },
+    "terminal.open":  { "family": "terminal", "kind": "req", "ceremony": "low-stakes" },
+    "terminal.input": { "family": "terminal", "kind": "req", "ceremony": "low-stakes", "note": "rm-class intents SHOULD escalate (§6.4)" },
+    "terminal.close": { "family": "terminal", "kind": "req", "ceremony": "low-stakes" },
+
+    "screen.show":      { "family": "screen", "kind": "req", "ceremony": "low-stakes" },
+    "screen.placement": { "family": "screen", "kind": "evt", "ceremony": "none" },
+    "screen.hide":      { "family": "screen", "kind": "req", "ceremony": "low-stakes" },
+    "screen.region":    { "family": "screen", "kind": "req", "ceremony": "low-stakes" },
+
+    "app.sense": { "family": "app", "kind": "req", "ceremony": "read" },
+    "app.focus": { "family": "app", "kind": "req", "ceremony": "low-stakes" },
+    "app.click": { "family": "app", "kind": "req", "ceremony": "low-stakes" },
+    "app.type":  { "family": "app", "kind": "req", "ceremony": "low-stakes", "note": "SECRET-marked text goes via secret.* NOT here" },
+    "app.key":   { "family": "app", "kind": "req", "ceremony": "low-stakes" },
+    "app.open":  { "family": "app", "kind": "req", "ceremony": "low-stakes" },
+    "app.macro": { "family": "app", "kind": "req", "ceremony": "low-stakes" },
+
+    "files.drop": { "family": "files", "kind": "req", "ceremony": "low-stakes" },
+    "files.get":  { "family": "files", "kind": "req", "ceremony": "read" },
+    "files.list": { "family": "files", "kind": "req", "ceremony": "read" },
+
+    "artifact.produce":     { "family": "artifact", "kind": "req", "ceremony": "low-stakes" },
+    "artifact.provenance":  { "family": "artifact", "kind": "req", "ceremony": "read" },
+    "artifact.sync_ack":    { "family": "artifact", "kind": "req", "ceremony": "low-stakes" },
+    "artifact.ledger_tail": { "family": "artifact", "kind": "req", "ceremony": "read" },
+
+    "verb.mail_send":        { "family": "verb", "kind": "req", "ceremony": "irreversible" },
+    "verb.credential_enter": { "family": "verb", "kind": "req", "ceremony": "irreversible", "note": "secret-critical; verify+speak target before vault inject (§3.8)" },
+    "verb.delete":           { "family": "verb", "kind": "req", "ceremony": "irreversible" },
+    "verb.pay":              { "family": "verb", "kind": "req", "ceremony": "irreversible" },
+    "verb.commit":           { "family": "verb", "kind": "req", "ceremony": "irreversible" },
+    "verb.kill":             { "family": "verb", "kind": "req", "ceremony": "irreversible", "interlock": "name-pid", "note": "pn-init name<->pid interlock (§3.11)" },
+    "verb.ceremony_prompt":  { "family": "verb", "kind": "evt", "ceremony": "none" },
+    "verb.ceremony_confirm": { "family": "verb", "kind": "req", "ceremony": "none" },
+    "verb.ceremony_cancel":  { "family": "verb", "kind": "req", "ceremony": "none" },
+
+    "secret.list_names": { "family": "secret", "kind": "req", "ceremony": "read" },
+    "secret.inject":     { "family": "secret", "kind": "req", "ceremony": "none", "note": "only invoked by verb.credential_enter after §6 confirm; SECRET frame class" },
+
+    "enroll.request":  { "family": "enroll", "kind": "req", "ceremony": "none", "note": "self-signed proof-of-possession; TOFU-pending (§2.5)" },
+    "enroll.approve":  { "family": "enroll", "kind": "req", "ceremony": "irreversible", "interlock": "name-key", "note": "owner approval-gate; grants a principal" },
+    "enroll.delegate": { "family": "enroll", "kind": "req", "ceremony": "irreversible", "interlock": "name-key", "gated": true, "note": "DISABLED until owner answers §11 Q4 (fail-closed)" },
+    "enroll.revoke":   { "family": "enroll", "kind": "req", "ceremony": "irreversible", "interlock": "name-key" },
+    "enroll.list":     { "family": "enroll", "kind": "req", "ceremony": "read" },
+    "enroll.rotate":   { "family": "enroll", "kind": "req", "ceremony": "irreversible", "interlock": "name-key" },
+
+    "profile.advertise":   { "family": "profile", "kind": "req", "ceremony": "low-stakes" },
+    "profile.renegotiate": { "family": "profile", "kind": "req", "ceremony": "low-stakes" },
+    "placement.query":     { "family": "placement", "kind": "req", "ceremony": "read" }
+  }
+}

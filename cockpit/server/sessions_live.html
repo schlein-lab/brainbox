@@ -1,0 +1,2346 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sessions · Brainarbeit</title>
+<link rel="stylesheet" href="/static/xterm.css">
+<style>
+  
+
+  [hidden]{display:none!important}
+  :root{
+    --bg:#f6f7fb; --panel:#ffffff; --panel2:#f1f3f9; --sunken:#eef0f6; --line:#e3e7f0;
+    --tx:#0f172a; --mut:#5d6577; --faint:#8b93a6;
+    --acc:#6f5fe6; --acc2:#8a7fff; --accsoft:rgba(138,127,255,.13);
+    --ok:#16a34a; --warm:#22c55e; --warn:#d97706; --danger:#dc2626;
+    --r:12px; --r2:16px; --sh:0 1px 2px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.06);
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#0a0d14; --panel:#141924; --panel2:#1b2130; --sunken:#10141d; --line:#28303f;
+    --tx:#e8ecf5; --mut:#94a0b6; --faint:#66708a; --acc:#8a7fff; --acc2:#a89fff;
+    --accsoft:rgba(138,127,255,.16); --sh:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }}
+  :root[data-theme="dark"]{
+    --bg:#0a0d14; --panel:#141924; --panel2:#1b2130; --sunken:#10141d; --line:#28303f;
+    --tx:#e8ecf5; --mut:#94a0b6; --faint:#66708a; --acc:#8a7fff; --acc2:#a89fff; --accsoft:rgba(138,127,255,.16);}
+  :root[data-theme="light"]{
+    --bg:#f6f7fb; --panel:#ffffff; --panel2:#f1f3f9; --sunken:#eef0f6; --line:#e3e7f0;
+    --tx:#0f172a; --mut:#5d6577; --faint:#8b93a6; --acc:#6f5fe6; --acc2:#8a7fff;}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--tx);
+    font:14.5px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  button{font:inherit;cursor:pointer}
+  .btn{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);
+    color:var(--tx);border-radius:10px;padding:8px 13px;font-weight:600;transition:.12s;white-space:nowrap}
+  .btn:hover{border-color:var(--acc);color:var(--acc)}
+  .btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+  .btn.pri:hover{filter:brightness(1.08);color:#fff}
+  .btn.sm{padding:6px 10px;font-size:13px;border-radius:9px}
+  .btn.ghost{background:transparent}
+  .btn.danger:hover{border-color:var(--danger);color:var(--danger)}
+  .btn:disabled{opacity:.5;cursor:default;pointer-events:none}
+
+   
+  .shell{display:grid;grid-template-columns:1fr;height:100vh;overflow:hidden}
+  .shell.meta{grid-template-columns:340px 1fr}
+  .side{border-right:1px solid var(--line);background:var(--panel);display:none;flex-direction:column;min-height:0}
+  .shell.meta .side{display:flex}
+  #backBtn{display:none!important}
+  .vpnpanel{max-width:1100px;margin:14px 20px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:8px 12px;font-size:13px}
+  .vpnpanel>summary{cursor:pointer;font-weight:600;color:var(--fg);list-style:none}
+  .vpnpanel>summary::-webkit-details-marker{display:none}
+  .side-head{padding:16px 16px 10px;display:flex;flex-direction:column;gap:11px}
+  .side-head h1{font-size:17px;margin:0;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+  .side-head .sub{color:var(--mut);font-size:12.5px;margin:-4px 0 0}
+  .side-list{overflow-y:auto;padding:4px 12px 20px;flex:1;min-height:0}
+  .main{overflow-y:auto;min-height:0;position:relative}
+  .t-unread{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;
+    padding:0 5px;margin-left:7px;border-radius:9px;background:var(--danger,#e5484d);color:#fff;
+    font-size:11px;font-weight:800;vertical-align:middle;line-height:1}
+   
+  .sesshist-ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding-top:10px;
+    border-top:1px solid var(--line);font-size:11.5px;color:var(--mut)}
+  .cmt-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  .cmt-title{font-weight:700;font-size:13px}
+  .cad-ctl{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .cad-b{font-size:10.5px;padding:3px 7px;background:transparent;border:0;border-right:1px solid var(--line);
+    color:inherit;cursor:pointer;opacity:.65}
+  .cad-b:last-child{border-right:0}
+  .cad-b:hover{opacity:.9}
+  .cad-b.on{background:var(--acc,#8a7fff);color:#fff;opacity:1}
+  .cad-lab{font-size:10.5px;padding:3px 8px;color:var(--muted,#8a93a7);border-right:1px solid var(--line);white-space:nowrap;align-self:center;font-weight:600}
+  .cad-box{display:inline-flex;flex-direction:column;gap:3px;align-items:flex-start}
+  .cad-cap{font-size:10.5px;color:var(--muted,#8a93a7);font-weight:600;white-space:nowrap}
+  .cmt-list{display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 140px);overflow-y:auto}
+  .cmt-bubble{background:var(--sunken,rgba(138,127,255,.08));border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+  .cmt-hl{font-weight:700;font-size:13px;margin-bottom:2px}
+  .cmt-tx{font-size:12.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+  .cmt-next{color:var(--acc,#8a7fff);font-weight:600;font-size:12px;margin-top:4px}
+  .cmt-when{font-size:10.5px;opacity:.5;margin-top:4px;text-align:right}
+  .cmt-empty{font-size:12.5px;padding:6px 2px}
+  .scard-stat{margin-top:6px;font-size:11px;opacity:.6}
+  .pn-hovercard{position:fixed;z-index:9998;max-width:300px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;box-shadow:0 8px 28px rgba(0,0,0,.4);font-size:13px;line-height:1.4;pointer-events:none}
+  .pn-hovercard .hc-topic{font-weight:600;margin-bottom:3px}
+  .pn-hovercard .hc-status{font-size:12px}
+
+   
+  .scard{border:1px solid var(--line);background:var(--panel);border-radius:var(--r);padding:12px 13px;
+    margin-bottom:9px;cursor:pointer;transition:.12s}
+  .scard:hover{border-color:var(--acc2)}
+  .scard.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset;background:var(--accsoft)}
+  .scard .top{display:flex;align-items:center;gap:8px}
+  .scard .nm{font-weight:700;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--faint)}
+  .dot.warm{background:var(--warm);box-shadow:0 0 0 3px color-mix(in srgb,var(--warm) 22%,transparent)}
+  .scard .when{color:var(--faint);font-size:11.5px;margin-left:auto;flex:0 0 auto}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+  .chip{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;
+    padding:3px 8px;border-radius:20px;background:var(--sunken);color:var(--mut);border:1px solid var(--line)}
+  .chip.acc{background:var(--accsoft);color:var(--acc);border-color:transparent}
+  .chip.vpn{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok);border-color:transparent}
+  .empty{color:var(--mut);font-size:13px;padding:26px 12px;text-align:center}
+  .empty .big{font-size:15px;color:var(--tx);font-weight:600;margin-bottom:6px}
+
+   
+  .ws{display:flex;flex-direction:column;height:100vh;min-height:0}
+  .ws-head{padding:15px 20px;border-bottom:1px solid var(--line);background:var(--panel);
+    display:flex;flex-direction:column;gap:10px}
+  .ws-title{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+  .ws-title h2{margin:0;font-size:18px;letter-spacing:-.01em}
+  .ws-title .stat{font-size:12px;font-weight:600;color:var(--mut);padding:3px 9px;border-radius:20px;
+    background:var(--sunken);border:1px solid var(--line)}
+  .ws-title .stat.on{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent);border-color:transparent}
+  .ws-actions{display:flex;gap:7px;flex-wrap:wrap;margin-left:auto}
+  .equip{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .equip .chip{cursor:default;font-size:11.5px}
+
+  .ws-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:14px 16px 0;gap:12px}
+  .vpncard{border:1px solid var(--line);background:var(--panel2);border-radius:var(--r);padding:12px 14px}
+  .vpncard h4{margin:0 0 6px;font-size:13.5px;display:flex;align-items:center;gap:7px}
+  .vpncard .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .vpncard .authurl{font-size:12px;word-break:break-all;color:var(--acc);margin-top:6px}
+  .vpnnote{color:var(--mut);font-size:12px;margin-top:6px}
+  .voicecard{border:1px solid var(--line);background:var(--panel2);border-radius:var(--r);padding:16px 18px;max-width:640px}
+  .voicecard h4{margin:0 0 10px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .voicecard p{margin:0 0 10px;font-size:13.5px;line-height:1.5;color:var(--fg)}
+  .voicecard .voicehint{color:var(--mut);font-size:12.5px;margin-bottom:0}
+
+  .term-wrap{flex:1;min-height:180px;background:#0b0e15;border:1px solid var(--line);border-radius:var(--r);
+    overflow:hidden;padding:8px 8px 4px;display:flex;position:relative}
+  #term{width:100%;height:100%}
+  
+
+  .term-note{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:12px;text-align:center;padding:22px;
+    background:rgba(11,14,21,.95);color:#e8ecf5}
+  .term-note[hidden]{display:none}
+  .term-note .tn-ic{font-size:30px;line-height:1}
+  .term-note .tn-h{font-weight:700;font-size:15px}
+  .term-note .tn-d{font-size:13px;color:var(--mut);max-width:40em;line-height:1.55}
+  .taskbar{display:flex;gap:8px;padding:12px 0 16px;align-items:center}
+  .taskbar input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:11px 13px;color:var(--tx);font:inherit}
+  .taskbar input:focus{outline:none;border-color:var(--acc)}
+  .ws-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;
+    gap:14px;color:var(--mut);text-align:center;padding:40px}
+  .ws-empty .h{font-size:20px;font-weight:700;color:var(--tx)}
+
+   
+  .veil{position:fixed;inset:0;background:rgba(6,9,16,.55);backdrop-filter:blur(3px);z-index:40;
+    display:none;align-items:flex-start;justify-content:center;padding:34px 16px;overflow-y:auto}
+  .veil.on{display:flex}
+  .wiz{width:min(560px,100%);background:var(--panel);border:1px solid var(--line);border-radius:var(--r2);
+    box-shadow:var(--sh);padding:0;overflow:hidden;animation:pop .16s ease}
+  @keyframes pop{from{transform:translateY(8px);opacity:.6}to{transform:none;opacity:1}}
+  .wiz-head{padding:18px 22px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+  .wiz-head h3{margin:0;font-size:18px}
+  .wiz-head .x{margin-left:auto;border:0;background:transparent;color:var(--mut);font-size:20px;line-height:1}
+  .wiz-body{padding:8px 22px 4px;max-height:66vh;overflow-y:auto}
+  .fld{padding:13px 0;border-bottom:1px solid var(--line)}
+  .fld:last-child{border-bottom:0}
+  .fld>label{display:block;font-weight:700;font-size:13.5px;margin-bottom:8px}
+  .fld .hint{color:var(--mut);font-weight:400;font-size:12px}
+  .txt{width:100%;background:var(--sunken);border:1px solid var(--line);border-radius:10px;
+    padding:11px 13px;color:var(--tx);font:inherit}
+  .txt:focus{outline:none;border-color:var(--acc)}
+  .seg{display:flex;flex-wrap:wrap;gap:7px}
+  .opt{border:1px solid var(--line);background:var(--sunken);border-radius:10px;padding:9px 12px;
+    font-weight:600;font-size:13px;color:var(--tx);display:flex;flex-direction:column;gap:1px;min-width:64px}
+  .opt small{font-weight:400;color:var(--mut);font-size:11px}
+  .opt.on{border-color:var(--acc);background:var(--accsoft);color:var(--acc)}
+  .opt.on small{color:var(--acc)}
+  .rangewrap{display:flex;align-items:center;gap:12px}
+  .rangewrap input[type=range]{flex:1;accent-color:var(--acc)}
+  .rangelab{font-size:12.5px;color:var(--mut);min-width:172px}
+  .rangelab b{color:var(--tx)}
+  .dur{display:flex;gap:8px;align-items:center}
+  .dur input{width:90px}
+  .dur select,.txt.sel{background:var(--sunken);border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;color:var(--tx);font:inherit}
+  .toggles{display:flex;flex-direction:column;gap:7px}
+  .tg{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;
+    border:1px solid var(--line);border-radius:10px;background:var(--sunken)}
+  .tg .l{display:flex;flex-direction:column}
+  .tg .l small{color:var(--mut);font-size:11.5px}
+  .sw{position:relative;width:42px;height:24px;flex:0 0 auto}
+  .sw input{opacity:0;width:0;height:0}
+  .sw span{position:absolute;inset:0;background:var(--line);border-radius:20px;transition:.15s}
+  .sw span:before{content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;
+    border-radius:50%;transition:.15s}
+  .sw input:checked+span{background:var(--acc)}
+  .sw input:checked+span:before{transform:translateX(18px)}
+  .wiz-foot{padding:14px 22px;border-top:1px solid var(--line);display:flex;gap:10px;align-items:center}
+  .wiz-foot .grow{flex:1}
+  .wiz-err{color:var(--danger);font-size:12.5px}
+  .grant{margin:6px 0 4px;padding:12px 14px;border:1px solid var(--acc);border-radius:12px;
+    background:var(--accsoft)}
+  .grant-h{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--acc);font-weight:700;margin-bottom:8px}
+  .grant-row{display:flex;flex-wrap:wrap;gap:6px}
+  .grant-line{margin-top:9px;font-size:12.5px;color:var(--tx);line-height:1.55}
+  .grant-line b{color:var(--mut);font-weight:700}
+
+  .modetabs{display:flex;gap:4px;background:var(--sunken);padding:4px;border-radius:12px;margin-bottom:4px}
+  .modetabs .mt{flex:1;border:0;background:transparent;color:var(--mut);font-weight:700;padding:8px;border-radius:9px;font-size:13.5px}
+  .modetabs .mt.on{background:var(--panel);color:var(--acc);box-shadow:var(--sh)}
+  .mcard{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:12px 13px;margin-bottom:9px;cursor:pointer;transition:.12s}
+  .mcard:hover{border-color:var(--acc2)}
+  .mcard.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset;background:var(--accsoft)}
+  .mcard .top{display:flex;align-items:center;gap:8px}
+  .mcard .nm{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mcard .pill{margin-left:auto;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:var(--sunken);color:var(--mut)}
+  .mcard .pill.run{background:var(--accsoft);color:var(--acc)} .mcard .pill.pause{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
+  .mbar{height:7px;border-radius:5px;background:var(--sunken);overflow:hidden;display:flex;margin-top:9px}
+  .mbar i{height:100%} .mbar .r{background:var(--acc)} .mbar .d{background:var(--ok)} .mbar .e{background:var(--danger)}
+  .mcard .ct{font-size:11.5px;color:var(--mut);margin-top:7px;display:flex;gap:10px;flex-wrap:wrap}
+  .wsmeta{padding:16px 20px 40px}
+  .wsmeta h2{margin:0 0 4px;font-size:19px}
+  .mrow{display:flex;align-items:center;gap:9px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;background:var(--panel)}
+  .mrow .tp{flex:1;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mrow .ts{font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;flex:0 0 auto}
+  .ts.pending{background:var(--sunken);color:var(--mut)} .ts.running{background:var(--accsoft);color:var(--acc)}
+  .ts.done{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
+  .ts.error{background:color-mix(in srgb,var(--danger) 15%,transparent);color:var(--danger)}
+  .addtask{display:flex;gap:8px;margin:12px 0}
+  .addtask input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--tx);font:inherit}
+  .gstrip{border:1px solid var(--line);border-radius:12px;padding:11px 12px;margin-bottom:12px;background:var(--panel2)}
+  .gstrip h4{margin:0 0 8px;font-size:12.5px;display:flex;align-items:center;gap:6px}
+  .gstrip .g-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .gstrip select{background:var(--sunken);border:1px solid var(--line);border-radius:8px;padding:7px 9px;color:var(--tx);font:inherit;font-size:12.5px}
+  .gstrip .glist{font-size:12px;color:var(--mut);margin-top:8px;line-height:1.6}
+  #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(16px);z-index:60;
+    background:#111827;color:#fff;padding:11px 18px;border-radius:11px;font-weight:600;opacity:0;
+    transition:.2s;pointer-events:none;box-shadow:var(--sh)}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{background:var(--danger)}
+
+   
+  .tblwrap{padding:18px 20px 30px}
+  .tblhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .tblhead h2{margin:0;font-size:19px;letter-spacing:-.01em}
+  .tbltabs{display:flex;gap:4px;background:var(--sunken);padding:4px;border-radius:12px}
+  .tbltabs button{border:0;background:transparent;color:var(--mut);font-weight:700;padding:7px 14px;border-radius:9px;font-size:13px;cursor:pointer}
+  .tbltabs button.on{background:var(--panel);color:var(--acc);box-shadow:var(--sh)}
+  .tblhead .sp{flex:1}
+  .tscroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--panel)}
+  table.stbl{width:100%;border-collapse:collapse;font-size:13.5px}
+  .stbl th{position:sticky;top:0;background:var(--panel2);color:var(--mut);font-size:11.5px;text-transform:uppercase;
+    letter-spacing:.04em;text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer;
+    user-select:none;white-space:nowrap}
+  .stbl th:hover{color:var(--acc)}
+   
+  .stbl td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+  .stbl td.t-mut, .stbl .t-act, .stbl .st{white-space:nowrap}
+  .stbl tbody tr{cursor:pointer;transition:.1s}
+  .stbl tbody tr:hover{background:var(--accsoft)}
+  .stbl tbody tr:last-child td{border-bottom:0}
+  .stbl .t-title{font-weight:700;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+  .stbl .t-sid{color:var(--faint);font-size:11px;font-weight:400}
+  .stbl .t-mut{color:var(--mut)}
+  .stbl .t-act{display:flex;gap:6px;justify-content:flex-end}
+  .stbl .st{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:2px 9px;
+    border-radius:20px;background:var(--sunken);color:var(--mut)}
+  .stbl .st.on{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent)}
+  .stbl .st.frozen{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
+   
+  .rcell{display:flex;flex-direction:column;gap:2px;font-size:11.5px;min-width:200px}
+  .rrow{display:flex;align-items:center;gap:6px;white-space:nowrap}
+  .rlab{color:var(--mut);width:30px;font-weight:700}
+  .rabs{color:var(--tx);font-variant-numeric:tabular-nums}
+  .rpa{color:var(--mut);font-variant-numeric:tabular-nums}
+  .rpm{color:var(--faint);font-size:10.5px}
+  .rbar{display:inline-block;width:44px;height:5px;border-radius:3px;background:var(--sunken);overflow:hidden}
+  .rbar>i{display:block;height:100%}
+   
+  .hwiz{width:min(1000px,100%);background:var(--panel);border:1px solid var(--line);border-radius:var(--r2);
+    box-shadow:var(--sh);overflow:hidden;animation:pop .16s ease}
+  .hwiz .wiz-head{justify-content:space-between}
+  #hterm{height:min(64vh,560px);padding:8px 10px;background:#0b0e15}
+  @media(max-width:860px){
+    .shell{grid-template-columns:1fr}
+    .side{display:none} .side.show{display:flex;position:absolute;inset:0;z-index:20;width:100%}
+    .cmt-list{max-height:46vh}
+    .mobtab{display:inline-flex}
+  }
+  .mobtab{display:none}
+</style>
+<style>
+.term-row{flex:1;min-height:0;display:flex;gap:12px;align-items:stretch}
+.term-row .term-wrap{flex:1 1 auto;min-width:0}
+.term-row .voicelog{flex:0 0 min(360px,36%);margin:0}
+.term-row .vlog-body{max-height:none;flex:1}
+@media(max-width:900px){.term-row{flex-direction:column}.term-row .voicelog{flex:0 0 auto;max-height:38vh}}
+.voicelog{display:flex;flex-direction:column;min-height:0;flex:1;margin:10px 0 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+.vlog-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;font-size:13px;font-weight:600;color:var(--mut);border-bottom:1px solid var(--line)}
+.vlog-live{color:var(--ok);font-size:11px;font-weight:600}
+.vlog-body{overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;max-height:52vh}
+.vlog-empty{color:var(--faint);font-size:13px;padding:14px 2px}
+.vmsg{display:flex;gap:8px;align-items:flex-start;font-size:14px;line-height:1.42}
+.vmsg .who{flex:0 0 auto;font-size:11px;font-weight:700;opacity:.7;min-width:26px;padding-top:2px}
+.vmsg.u .txt{color:var(--tx)}
+.vmsg.a{background:var(--accsoft);border-radius:8px;padding:6px 9px;margin:-2px 0}
+.vmsg.a .txt{color:var(--tx)}
+.vmsg .txt{white-space:pre-wrap;word-break:break-word}
+</style>
+<script src="/portal-nav.js" defer></script></head>
+<body>
+<div class="shell">
+  <aside class="side" id="side">
+    <div class="side-head">
+      <div class="modehdr" style="font-weight:700;font-size:15px;margin-bottom:2px">🗂 Sessions</div>
+      <p class="sub" id="sideSub">Jede Session wird zuerst <b>ausgestattet</b> — Modell, Autonomie, Rechte, VPN. Wer das <b>🧬 Orchestrator-Recht</b> hat, spawnt daraus eigene Sub-Sessions.</p>
+      <button class="btn pri" id="newBtn">＋ Neue Session</button>
+    </div>
+    <div class="side-list" id="mlist" hidden></div>
+    <div class="side-list" id="list"><div class="empty">lädt…</div></div>
+  </aside>
+
+  <main class="main" id="main">
+    <details class="vpnpanel" id="vpnPanel" hidden><summary>🔒 VPN &amp; Zugänge — Owner-Verwaltung</summary><div id="mlistS"></div></details>
+    <details class="thpanel" id="thPanel" open>
+      <summary>&#128173; Gedanken <span id="thCount"></span> <span class="thhint">unverbindlich notieren &middot; KI formuliert auf Wunsch aus &middot; Session nur auf Klick</span></summary>
+      <input id="thInput" placeholder="Schnell notieren &hellip; (Enter speichert)" autocomplete="off">
+      <div id="thList"></div>
+    </details>
+    <style>
+      .thpanel{margin:0 0 10px;border:1px solid rgba(140,150,170,.25);border-radius:10px;padding:6px 10px}
+      .thpanel summary{cursor:pointer;font-weight:600}
+      .thpanel .thhint{font-weight:400;font-size:11.5px;opacity:.55;margin-left:6px}
+      .thpanel #thInput{width:100%;box-sizing:border-box;margin:8px 0 4px;padding:7px 9px;border-radius:8px;border:1px solid rgba(140,150,170,.3);background:transparent;color:inherit;font:inherit}
+      .thnote{border-top:1px solid rgba(140,150,170,.18);padding:5px 0}
+      .throw{display:flex;align-items:center;gap:6px}
+      .thraw{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .thchip{font-size:11px;border:1px solid rgba(140,150,170,.3);border-radius:999px;padding:1px 7px;opacity:.9;white-space:nowrap}
+      .thchip.run{color:#eab308}.thchip.ok{color:#22c55e}.thchip.sp{color:#60a5fa}
+      .therr{font-size:11.5px;color:#f87171;opacity:.85}
+      .thedit{margin:6px 0 4px;display:flex;flex-direction:column;gap:6px}
+      .thorig{font-size:12px;opacity:.6}
+      .thta{width:100%;box-sizing:border-box;min-height:110px;border-radius:8px;border:1px solid rgba(140,150,170,.3);background:transparent;color:inherit;padding:7px 9px;font:inherit}
+      .thoq{font-size:12px;opacity:.75}
+      .thbtns{display:flex;gap:6px;flex-wrap:wrap}
+      .thempty{opacity:.6;font-size:12.5px;padding:4px 0}
+      .thmore{margin-top:6px}
+    </style>
+    <div class="tblwrap" id="tblView" hidden>
+      <div class="tblhead">
+        <h2>🗂 Sessions</h2>
+        <div class="tbltabs" id="tblTabs">
+          <button data-tab="active" class="on">Aktiv</button>
+          <button data-tab="archive">Archiv <span id="archCount"></span></button>
+        </div>
+        <span class="sp"></span>
+        <button class="btn sm" onclick="APP.markAllRead()" title="Ungelesen-Zähler aller Sessions leeren — der Verlauf bleibt vollständig erhalten">✓ Alle gelesen</button>
+        <button class="btn sm" id="archAllBtn" title="Alle nicht laufenden Sessions ins Archiv verschieben — nichts wird gelöscht">🧹 Alte archivieren</button>
+        <button class="btn pri sm" onclick="APP.openWizard()">＋ Neue Session</button>
+      </div>
+      <div class="tscroll"><table class="stbl">
+        <thead><tr>
+          <th data-k="title">Titel</th>
+          <th data-k="warm">Status</th>
+          <th data-k="model">Modell · Denk-Tiefe</th>
+          <th style="cursor:default">Ressourcen (jetzt)</th>
+          <th data-k="last_active">Zuletzt aktiv</th>
+          <th style="text-align:right;cursor:default">Aktionen</th>
+        </tr></thead>
+        <tbody id="tblBody"></tbody>
+      </table></div>
+    </div>
+    <div class="ws-empty" id="wsEmpty">
+      <div class="h">Willkommen</div>
+      <div>Lege links eine Session an. Du stattest sie mit Modell, Autonomie, Rechten<br>und optional einem eigenen VPN aus — und arbeitest dann mit dem Agenten.</div>
+      <button class="btn pri" onclick="APP.openWizard()">＋ Erste Session anlegen</button>
+    </div>
+    <div class="ws" id="ws" hidden>
+      <div class="ws-head">
+        <div class="ws-title">
+          <button class="btn sm mobtab" id="backBtn">←</button>
+          <button class="btn sm" id="ovBtn" title="Zurück zur Session-Übersicht">🗂 Übersicht</button>
+          <h2 id="wsName">—</h2>
+          <span class="stat" id="wsStat">—</span>
+          <div class="ws-actions">
+            <button class="btn sm" id="histBtn" title="Gesprächs-Verlauf dieser Session als Chat-Blasen neben dem Terminal (an/aus)">💬 Verlauf</button>
+            <button class="btn sm" id="explainBtn" title="Erklär mir, was hier passiert: ein Beobachter liest die jüngsten Züge dieser Session und erklärt sie in 2–4 Sätzen ohne Jargon — das Ergebnis erscheint als 🔍 im Verlauf und auf der Karte. Läuft nur auf Knopfdruck.">🔍 Erklären</button>
+            <button class="btn sm" id="rightsBtn">🛡 Rechte</button>
+            <button class="btn sm" id="voiceRouteBtn" hidden>🎙 Als Voice-Session</button>
+            <select class="btn sm" id="castSel" hidden></select>
+            <button class="btn sm" id="castBtn" title="Dieses Terminal live auf TV/Monitor spiegeln (Chromecast/Nest) — nur ansehen, tippen bleibt hier">📺 Spiegeln</button>
+            <button class="btn sm" id="editBtn">🛡 Rechte &amp; Ausstattung</button>
+            <button class="btn sm" id="renBtn">✎ Umbenennen</button>
+            <button class="btn sm" id="keepBtn">📌 Behalten</button>
+            <button class="btn sm" id="archBtn" title="Session ins Archiv verschieben — nichts wird gelöscht, unter „Archiv“ weiter einsehbar">🗄 Archivieren</button>
+            <button class="btn sm" id="pauseBtn">⏸ Pause</button>
+            <button class="btn sm" id="powerBtn" title="microVM herunterfahren/hochfahren: CPU + RAM werden frei, Verlauf & Dateien bleiben (Gespräch läuft beim Start weiter). Anders als Löschen wird NICHTS gelöscht.">⏻ Aus</button>
+            <button class="btn sm" id="kaBtn" title="Wachhalten: die Box startet diese Session nach jedem Portal-Neustart automatisch wieder — für die gewählte Frist (48h/72h/für immer).">⏰</button>
+            <button class="btn sm" id="deskBtn" title="Desktop aktivieren: die Session wächst zu einer Office-VM mit Bildschirm und mehr RAM — das Gespräch läuft nahtlos weiter (dauert einen Moment)">🖥 Desktop</button>
+            <button class="btn sm" id="deskOpenBtn" hidden title="Den laufenden Desktop-Bildschirm in einem neuen Tab öffnen">🖥 Öffnen</button>
+            <button class="btn sm" id="appsBtn" hidden title="Programme für diesen Desktop suchen und installieren (Flatpak, landet auf dem persistenten Arbeits-Volume)">🛍 Apps</button>
+            <button class="btn sm" id="reloadTermBtn" title="Terminal neu verbinden — hilft bei Hängern/Lag (z. B. nach VPN-Login oder langer Pause). Startet den Agenten NICHT neu, nur die Anzeige.">⟳ Terminal</button>
+            <button class="btn sm" id="shareFolderBtn" title="Austausch-Ordner dieser Session: Pfad kopieren und im Windows-Explorer öffnen (Win+R → einfügen → Enter). Dateien hier landen in der Session unter ~/austausch — und umgekehrt.">📁 Ordner</button>
+            <button class="btn sm" id="restartBtn">⟳ Agent neu</button>
+            <button class="btn sm danger" id="killBtn" title="Löschen (weg = weg): zerstört die microVM, löscht ihre Disk (gesamter Verlauf) UND entfernt die Session aus der Liste — sie verschwindet endgültig, kein Wiederanschalten. Unwiderbringlich, mit doppelter Sicherheitsabfrage. Nur Ausschalten (später fortsetzbar)? → „⏻ Aus“.">🗑 Löschen</button>
+          </div>
+        </div>
+        <div class="equip" id="wsEquip"></div>
+        
+        <div class="equip" id="deskInfo" hidden></div>
+      </div>
+      <div class="ws-body">
+        <div class="vpncard" id="vpnCard" hidden></div>
+        <div class="voicecard" id="voiceNote" hidden>
+          <h4>🎙 Dein Sprach-Assistent (Nabu)</h4>
+          <p>Das ist der Assistent, mit dem du <b>per Sprache</b> redest — rund um die Uhr bereit, mit
+             täglicher frischer Sitzung (der gestrige Faden wird als Gedächtnisnotiz mitgenommen). Er läuft
+             in einer eigenen isolierten microVM.</p>
+          <p>Hier kannst du seine <b>Rechte setzen</b> — Internet, Websuche, Webseiten abrufen und die
+             Geräte im Haus. Klick oben auf <b>🛡 Rechte</b>. Änderungen wirken <b>sofort</b> auf das
+             laufende Gespräch (kein Neustart); beim nächsten Zuruf weiß er Bescheid.</p>
+          <p class="voicehint">Kein Terminal, kein Ausschalten und kein Löschen — dieser Assistent wird
+             automatisch bereitgehalten und darf nicht versehentlich abgeschaltet werden.</p>
+        </div>
+        <div class="term-row">
+          <div class="term-wrap"><div id="term"></div>
+            <div class="term-note" id="termNote" hidden>
+              <div class="tn-ic" id="termNoteIc">🔌</div>
+              <div class="tn-h" id="termNoteH">Terminal nicht erreichbar</div>
+              <div class="tn-d" id="termNoteD"></div>
+              <button class="btn pri" id="termNoteBtn">🔄 Erneut versuchen</button>
+            </div>
+          </div>
+          <div class="voicelog" id="voiceLog" hidden>
+            <div class="vlog-head"><span>💬 Verlauf</span><span class="vlog-live" id="voiceLogLive" hidden>● live</span></div>
+            <div class="vlog-body" id="voiceLogBody"><div class="vlog-empty">Lade Verlauf …</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="wsmeta" id="wsMeta" hidden></div>
+    <div class="ws-empty" id="metaEmpty" hidden>
+      <div class="h">Dauerjobs</div>
+      <div>Ein Dauerjob läuft dauerhaft: er verteilt eine Aufgaben-Liste auf viele<br>gleichartig ausgestattete Agenten — höchstens N gleichzeitig, der Rest wartet.<br>Ideal fürs Reproduction-Projekt. Externe Knoten können Aufgaben nachreichen.</div>
+      <button class="btn pri" onclick="APP.openMetaWizard()">＋ Ersten Dauerjob anlegen</button>
+    </div>
+  </main>
+</div>
+
+
+<div class="veil" id="deskOvl">
+  <div class="wiz" style="max-width:440px;padding:18px 22px">
+    <h3 id="deskHead" style="margin:0 0 6px">🖥 Desktop wird aktiviert …</h3>
+    <div id="deskSteps" style="display:flex;flex-direction:column;gap:6px;margin:12px 0"></div>
+    <p id="deskErr" hidden style="color:#e66;white-space:pre-wrap;margin:8px 0"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn sm" id="deskClose" hidden>Schließen</button>
+    </div>
+  </div>
+</div>
+<div class="veil" id="appOvl">
+  <div class="wiz" style="max-width:560px;padding:18px 22px">
+    <h3 style="margin:0 0 10px">🛍 Programme für diesen Desktop</h3>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <input class="btn sm" id="appQ" placeholder="Suchen auf Flathub … (z.B. LibreOffice, Code)" style="flex:1;text-align:left">
+      <button class="btn sm" id="appQGo">Suchen</button>
+    </div>
+    <div id="appBusy" hidden style="margin:8px 0;padding:8px;border:1px solid var(--line);border-radius:8px">⏳ <span id="appBusyTxt"></span></div>
+    <p id="appErr" hidden style="color:#e66;white-space:pre-wrap;margin:8px 0"></p>
+    <div id="appResults" style="display:flex;flex-direction:column;gap:6px;max-height:34vh;overflow-y:auto"></div>
+    <h4 style="margin:14px 0 6px">Installiert</h4>
+    <div id="appInstalled" style="display:flex;flex-direction:column;gap:6px;max-height:20vh;overflow-y:auto"><span style="opacity:.6">—</span></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+      <button class="btn sm" id="appClose">Schließen</button>
+    </div>
+  </div>
+</div>
+<div class="veil" id="veil">
+  <div class="wiz">
+    <div class="wiz-head"><h3 id="wizTitle">Neue Session ausstatten</h3><button class="x" id="wizX">✕</button></div>
+    <div class="wiz-body">
+      <div class="fld">
+        <label>Name</label>
+        <input class="txt" id="wName" placeholder="z. B. Jahresabschluss, Website-Relaunch …" autocomplete="off">
+      </div>
+      <div class="fld">
+        <label>🧠 Modell</label>
+        <div class="seg" id="wModel"></div>
+      </div>
+      <div class="fld">
+        <label>🧪 Laufzeit <span class="hint">— Standard-Agent, Fach-Runtime (Biomni) oder Codex (OpenAI)</span></label>
+        <div class="seg" id="wRuntime"></div>
+      </div>
+      <div class="fld">
+        <label>⚡ Denk-Tiefe <span class="hint">— „ultracode" = sehr hoch/maximal für schwere Arbeit</span></label>
+        <div class="seg" id="wEffort"></div>
+      </div>
+      <div class="fld">
+        <label>🎚 Bestätigungsstufe <span class="hint">— wie viel du per Handy-Code (2FA) bestätigst</span></label>
+        <div class="rangewrap">
+          <select id="wAuto"></select>
+          <span class="rangelab" id="wAutoLab"></span>
+        </div>
+      </div>
+      <div class="fld">
+        <label>🛡 Rechte <span class="hint">— Grundprofil, dann fein per Haken</span></label>
+        <div class="seg" id="wPreset" style="margin-bottom:10px"></div>
+        <div class="toggles">
+          <label class="tg"><span class="l">🌐 Internet (allgemein)<small>Netzzugriff nach draußen</small></span>
+            <span class="sw"><input type="checkbox" id="cNet"><span></span></span></label>
+          <label class="tg"><span class="l">🧨 Internes Netz / LAN<small>Voll-Entsandbox: Box, Router & Geräte erreichbar</small></span>
+            <span class="sw"><input type="checkbox" id="cInternal"><span></span></span></label>
+          <label class="tg"><span class="l">🔎 Websuche<small>WebSearch-Werkzeug</small></span>
+            <span class="sw"><input type="checkbox" id="cWs"><span></span></span></label>
+          <label class="tg"><span class="l">📄 Webseiten abrufen<small>WebFetch-Werkzeug</small></span>
+            <span class="sw"><input type="checkbox" id="cWf"><span></span></span></label>
+        </div>
+      </div>
+      <div class="fld">
+        <label>🔒 Eigenes VPN <span class="hint">— gibt dieser Session einen eigenen Tunnel</span></label>
+        <div class="dur">
+          <label class="sw" style="width:42px"><input type="checkbox" id="wVpnOn"><span></span></label>
+          <select id="wVpn" class="txt sel" style="flex:1" disabled></select>
+        </div>
+        <div class="vpnnote" id="wVpnNote"></div>
+      </div>
+      <div class="fld">
+        <label>🧬 Orchestrator <span class="hint">— darf eigene Sub-Sessions spawnen</span></label>
+        <div class="dur">
+          <label class="sw" style="width:42px"><input type="checkbox" id="wOrch"><span></span></label>
+          <input class="txt" id="wOrchMax" type="number" min="0" max="64" value="5" style="flex:1" placeholder="max. gleichzeitig" disabled>
+        </div>
+        <div class="vpnnote">Mit diesem Recht kann die Session per <b>metajob</b> weitere vollwertige Worker-Sessions starten — höchstens „max." gleichzeitig, der Rest wartet in der Queue.</div>
+      </div>
+      <div class="fld" id="wResBlk" hidden>
+        <label>🧰 Ressourcen <span class="hint">— Owner: RAM erhöhen (Boot-Parameter · wirkt beim nächsten Start · kein Live-Kill)</span></label>
+        <div class="dur"><input class="txt" id="wRam" type="number" min="512" max="65536" step="256" style="flex:1" placeholder="RAM in MB"></div>
+        <div class="vpnnote" id="wResHint"></div>
+      </div>
+      <div class="fld" id="wKitsFld">
+        <label>🧰 Werkzeug-Kisten <span class="hint">— fertig gebaute Programm-Sammlungen aus dem Software-Regal, schreibgeschützt unter <code>/opt/kits/&lt;id&gt;/bin</code> eingehängt</span></label>
+        <div id="wKits" class="seclist" style="display:flex;flex-direction:column;gap:5px;max-height:170px;overflow:auto"></div>
+        <div class="vpnnote">Die Kiste wird beim <b>Start der Zelle</b> eingehängt (Änderung ⇒ Neustart der Session, Verlauf bleibt). Sie belegt keinen Platz in der Session und ist sofort da — für alles andere installiert der Agent selbst nach (<code>apt</code>/<code>pip</code>).</div>
+      </div>
+      <div class="fld" id="wSecretsFld">
+        <label>🔐 Tresor-Freigaben <span class="hint">— einzelne Geheimnisse (z. B. SSH-Schlüssel) NUR dieser Session; nie der ganze Tresor</span></label>
+        <div id="wSecrets" class="seclist" style="display:flex;flex-direction:column;gap:5px;max-height:150px;overflow:auto"></div>
+      </div>
+      <div class="grant" id="wGrant"></div>
+    </div>
+    <div class="wiz-foot">
+      <span class="wiz-err" id="wizErr"></span>
+      <span class="grow"></span>
+      <button class="btn ghost" id="wizCancel">Abbrechen</button>
+      <button class="btn pri" id="wizGo">Anlegen &amp; Ausstatten</button>
+    </div>
+  </div>
+</div>
+
+
+<div class="veil" id="mveil">
+  <div class="wiz">
+    <div class="wiz-head"><h3>Neuer Dauerjob</h3><button class="x" id="mwizX">✕</button></div>
+    <div class="wiz-body">
+      <div class="fld"><label>Name</label>
+        <input class="txt" id="mName" placeholder="z. B. Reproduction-Projekt" autocomplete="off"></div>
+      <div class="fld"><label>🧠 Modell <span class="hint">— für jeden Teil-Agenten</span></label><div class="seg" id="mModel"></div></div>
+      <div class="fld"><label>⚡ Denk-Tiefe</label><div class="seg" id="mEffort"></div></div>
+      <div class="fld"><label>🎚 Bestätigungsstufe</label>
+        <div class="rangewrap"><select id="mAuto"></select>
+        <span class="rangelab" id="mAutoLab"></span></div></div>
+      <div class="fld"><label>🛡 Rechte-Profil</label><div class="seg" id="mPreset"></div></div>
+      <div class="fld"><label>🔒 Account-VPN <span class="hint">— alle Teil-Agenten laufen durch diesen Tunnel</span></label>
+        <div class="dur"><label class="sw" style="width:42px"><input type="checkbox" id="mVpnOn"><span></span></label>
+        <select id="mVpn" class="txt sel" style="flex:1" disabled></select></div>
+        <div class="vpnnote" id="mVpnNote"></div></div>
+      <div class="fld"><label>⚙ Max. gleichzeitig <span class="hint">— mehr wandern in die Warteschlange</span></label>
+        <input class="txt" id="mMax" type="number" min="1" max="64" value="5" style="width:120px"></div>
+      <div class="fld"><label>📋 Aufgaben <span class="hint">— eine pro Zeile; später jederzeit ergänzbar</span></label>
+        <textarea class="txt" id="mTasks" rows="5" placeholder="Aufgabe 1&#10;Aufgabe 2&#10;…"></textarea></div>
+    </div>
+    <div class="wiz-foot"><span class="wiz-err" id="mwizErr"></span><span class="grow"></span>
+      <button class="btn ghost" id="mwizCancel">Abbrechen</button>
+      <button class="btn pri" id="mwizGo">Dauerjob starten</button></div>
+  </div>
+</div>
+
+
+<div class="veil" id="hveil">
+  <div class="hwiz">
+    <div class="wiz-head"><h3>🖥 Cluster-Terminal <span style="font-size:12px;color:var(--faint);font-weight:400">— Shell auf dem Login-Node durch den VPN-Tunnel</span></h3>
+      <button class="btn sm" id="hClose">✕ Schließen</button></div>
+    <div id="hterm"></div>
+  </div>
+</div>
+<div class="veil" id="rveil">
+  <div class="wiz" style="width:min(460px,100%)">
+    <div class="wiz-head"><h3 id="rTitle">🛡 Rechte anpassen</h3><button class="x" id="rX">✕</button></div>
+    <div class="wiz-body">
+      <div class="fld"><label>Grundprofil</label><div class="seg" id="rPreset"></div></div>
+      <div class="fld"><label>Feineinstellung <span class="hint">— per Haken</span></label>
+        <div class="toggles">
+          <label class="tg"><span class="l">🌐 Internet (allgemein)<small>Netzzugriff nach draußen — wirkt LIVE</small></span>
+            <span class="sw"><input type="checkbox" id="rNet"><span></span></span></label>
+          <label class="tg"><span class="l">🧨 Internes Netz / LAN<small>Voll-Entsandbox: Box, Router & Geräte erreichbar — wirkt LIVE</small></span>
+            <span class="sw"><input type="checkbox" id="rInternal"><span></span></span></label>
+          <label class="tg"><span class="l">🔎 Websuche<small>WebSearch</small></span>
+            <span class="sw"><input type="checkbox" id="rWs"><span></span></span></label>
+          <label class="tg"><span class="l">📄 Webseiten abrufen<small>WebFetch</small></span>
+            <span class="sw"><input type="checkbox" id="rWf"><span></span></span></label>
+          <label class="tg"><span class="l">🎛 Geräte<small>Verbundene Geräte im Haus (Drucker, Smart-Home, Lautsprecher …) — wirkt LIVE</small></span>
+            <span class="sw"><input type="checkbox" id="rDev"><span></span></span></label>
+        </div>
+      </div>
+      <div class="fld"><label>🧬 Orchestrator <span class="hint">— darf Sub-Sessions spawnen</span></label>
+        <div class="dur"><label class="sw" style="width:42px"><input type="checkbox" id="rOrch"><span></span></label>
+        <input class="txt" id="rOrchMax" type="number" min="0" max="64" value="5" style="flex:1" placeholder="max. gleichzeitig" disabled></div></div>
+      <div class="fld" id="rSecretsFld">
+        <label>🔐 Tresor-Freigaben <span class="hint">— einzelne Geheimnisse (z. B. SSH-Schlüssel) NUR dieser Session; nie der ganze Tresor</span></label>
+        <div id="rSecrets" class="seclist" style="display:flex;flex-direction:column;gap:5px;max-height:150px;overflow:auto"></div>
+        <div class="hint" style="margin-top:4px">Schlüssel werden beim <b>Start der Zelle</b> in einen RAM-Bereich injiziert — eine neue Freigabe ist erst nach einem Neustart der Session da (Verlauf bleibt).</div>
+      </div>
+      <div class="vpnnote">Wirkt sofort auf die laufende Session — der Agent wird mit den neuen Rechten neu gestartet.</div>
+    </div>
+    <div class="wiz-foot"><span class="wiz-err" id="rErr"></span><span class="grow"></span>
+      <button class="btn ghost" id="rCancel">Abbrechen</button>
+      <button class="btn pri" id="rGo">Übernehmen (live)</button></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/xterm.js"></script>
+<script src="/static/addon-fit.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const wsUrl = p => (location.protocol==="https:"?"wss://":"ws://")+location.host+p;
+function toast(m,e){const t=$("#toast");t.textContent=m;t.className="show"+(e?" err":"");setTimeout(()=>t.className=e?"err":"",2100);}
+async function jget(u){const r=await fetch(u,{credentials:"same-origin"});return r.json();}
+
+const Files={
+  sid:null, sub:"", unc:"", el:null,
+  open(sid, sess){
+    if(!sid){toast("Keine Session gewählt",true);return;}
+    this.sid=sid; this.sub="";
+    this.unc=(sess&&sess.share&&(sess.share.unc||sess.share.path))||"";
+    this.build(); this.load("");
+  },
+  close(){ if(this.el){this.el.remove(); this.el=null;} document.removeEventListener("keydown",this._esc); },
+  build(){
+    this.close();
+    const ov=document.createElement("div");
+    ov.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:900;display:flex;align-items:center;justify-content:center";
+    ov.addEventListener("click",e=>{if(e.target===ov)this.close();});
+    const box=document.createElement("div");
+    box.style.cssText="background:var(--panel,#1c1f26);color:inherit;border:1px solid var(--line,#333);border-radius:12px;width:min(680px,94vw);max-height:82vh;display:flex;flex-direction:column;overflow:hidden";
+    const head=document.createElement("div");
+    head.style.cssText="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line,#333)";
+    this.crumb=document.createElement("div");
+    this.crumb.style.cssText="flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+    const up=document.createElement("input"); up.type="file"; up.multiple=true; up.style.display="none";
+    up.addEventListener("change",()=>this.upload(up.files));
+    const upBtn=document.createElement("button"); upBtn.className="btn sm"; upBtn.textContent="⬆ Hochladen";
+    upBtn.onclick=()=>up.click();
+    const x=document.createElement("button"); x.className="btn sm"; x.textContent="✕"; x.onclick=()=>this.close();
+    head.append(this.crumb, upBtn, up, x);
+    this.list=document.createElement("div");
+    this.list.style.cssText="flex:1;overflow-y:auto;padding:6px 6px";
+    const foot=document.createElement("div");
+    foot.style.cssText="display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid var(--line,#333);font-size:12px;opacity:.85";
+    if(this.unc){
+      const u=document.createElement("span"); u.textContent=this.unc;
+      u.style.cssText="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+      const cp=document.createElement("button"); cp.className="btn sm"; cp.textContent="Netzlaufwerk-Pfad kopieren";
+      cp.onclick=()=>{try{navigator.clipboard.writeText(this.unc).then(()=>toast("Pfad kopiert — in Windows: Win+R, einfügen, Enter"));}catch(e){window.prompt("Pfad kopieren:",this.unc);}};
+      foot.append(u,cp);
+    } else {
+      foot.textContent="Dateien hier landen in der Session unter ~/austausch — und umgekehrt.";
+    }
+    box.append(head,this.list,foot); ov.append(box);
+    document.body.append(ov); this.el=ov;
+    this._esc=(e)=>{if(e.key==="Escape")this.close();};
+    document.addEventListener("keydown",this._esc);
+  },
+  fmtSize(n){ if(n>=1048576)return (n/1048576).toFixed(1)+" MiB"; if(n>=1024)return (n/1024).toFixed(0)+" KiB"; return n+" B"; },
+  fmtTime(t){ const d=new Date(t*1000),p=n=>String(n).padStart(2,"0"); return p(d.getDate())+"."+p(d.getMonth()+1)+". "+p(d.getHours())+":"+p(d.getMinutes()); },
+  async load(sub){
+    this.sub=sub||"";
+    this.crumb.textContent="📁 austausch"+(this.sub?" / "+this.sub.split("/").join(" / "):"");
+    this.list.innerHTML="<div style='padding:14px;opacity:.7'>lade…</div>";
+    let d=null;
+    try{ d=await (await fetch("/api/session/files?sid="+encodeURIComponent(this.sid)+"&sub="+encodeURIComponent(this.sub))).json(); }catch(e){}
+    if(!d||d.ok===false){ this.list.innerHTML="<div style='padding:14px'>"+((d&&d.error)||"Fehler beim Laden")+"</div>"; return; }
+    this.list.innerHTML="";
+    const row=(icon,name,meta,cb)=>{
+      const r=document.createElement("div");
+      r.style.cssText="display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;cursor:pointer";
+      r.onmouseenter=()=>r.style.background="rgba(120,140,255,.12)"; r.onmouseleave=()=>r.style.background="";
+      const i=document.createElement("span"); i.textContent=icon;
+      const n=document.createElement("span"); n.textContent=name;
+      n.style.cssText="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+      const m=document.createElement("span"); m.textContent=meta; m.style.cssText="opacity:.6;font-size:12px;white-space:nowrap";
+      r.append(i,n,m); r.onclick=cb; this.list.append(r); return r;
+    };
+    if(this.sub){
+      const parent=this.sub.split("/").slice(0,-1).join("/");
+      row("⬆","..","",()=>this.load(parent));
+    }
+    if(!(d.entries||[]).length){ this.list.append(Object.assign(document.createElement("div"),{textContent:"— leer —"})).style.cssText="padding:14px;opacity:.6"; }
+    (d.entries||[]).forEach(e=>{
+      const rel=(this.sub?this.sub+"/":"")+e.name;
+      if(e.dir) row("📁",e.name,this.fmtTime(e.mtime),()=>this.load(rel));
+      else row("📄",e.name,this.fmtSize(e.size)+" · "+this.fmtTime(e.mtime),
+               ()=>{window.location="/api/session/file?sid="+encodeURIComponent(this.sid)+"&sub="+encodeURIComponent(rel);});
+    });
+    if(d.truncated){ const t=document.createElement("div"); t.textContent="… Liste gekürzt (500)"; t.style.cssText="padding:8px 12px;opacity:.6"; this.list.append(t); }
+  },
+  async upload(files){
+    if(!files||!files.length)return;
+    for(const f of files){
+      if(f.size>256*1048576){toast(f.name+": größer als 256 MiB — bitte übers Netzlaufwerk",true);continue;}
+      toast("Lade hoch: "+f.name+" …");
+      try{
+        const r=await fetch("/api/session/file?sid="+encodeURIComponent(this.sid)+"&sub="+encodeURIComponent(this.sub)+"&name="+encodeURIComponent(f.name),
+                            {method:"POST",body:f});
+        const d=await r.json();
+        if(d&&d.ok)toast("Hochgeladen: "+f.name); else toast((d&&d.error)||("Fehler bei "+f.name),true);
+      }catch(e){toast("Netzfehler bei "+f.name,true);}
+    }
+    this.load(this.sub);
+  },
+};
+const SCAD={
+  LEVELS:[["echtzeit","Echtzeit"],["haeufig","häufig"],["selten","selten"],["nie","nie"]],
+  POLL:{echtzeit:30000,haeufig:60000,selten:300000,nie:0},
+  get(k,d){return localStorage.getItem("pp-cad-"+k)||d||"haeufig";},
+  set(k,v){localStorage.setItem("pp-cad-"+k,v);},
+  pollMs(l){return this.POLL[l]!=null?this.POLL[l]:60000;},
+  control(key,def,onChange,caption){
+
+    const cur=this.get(key,def);
+    const box=document.createElement("div"); box.className="cad-box";
+    if(caption){const c=document.createElement("div"); c.className="cad-cap"; c.textContent=caption; box.appendChild(c);}
+    const wrap=document.createElement("div"); wrap.className="cad-ctl";
+    wrap.title=caption?(caption+" — Echtzeit · häufig · selten · nie"):"Wie oft aktualisieren";
+    this.LEVELS.forEach(([v,lab])=>{const b=document.createElement("button"); b.className="cad-b"+(v===cur?" on":""); b.textContent=lab; b.setAttribute("data-v",v);
+      b.onclick=(e)=>{e.stopPropagation(); this.set(key,v); wrap.querySelectorAll(".cad-b").forEach(x=>x.classList.toggle("on",x.getAttribute("data-v")===v)); if(onChange)onChange(v);};
+      wrap.appendChild(b);});
+    box.appendChild(wrap);
+    return box;
+  }
+};
+
+function mdSafe(t){
+
+  let h=esc(t||"");
+  h=h.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+  h=h.replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+  h=h.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g,'$1<i>$2</i>');
+  return h.replace(/\n/g,'<br>');
+}
+function hhmm(ts){const d=new Date(ts*1000),p=n=>String(n).padStart(2,"0");return p(d.getHours())+":"+p(d.getMinutes());}
+function fmtWhen(ts){
+  if(!ts)return""; const d=new Date(ts*1000),now=new Date(),p=n=>String(n).padStart(2,"0");
+  const hm=p(d.getHours())+":"+p(d.getMinutes());
+  if(d.toDateString()===now.toDateString())return hm;
+  const dm=p(d.getDate())+"."+p(d.getMonth()+1)+".";
+  return (d.getFullYear()===now.getFullYear()?dm:dm+d.getFullYear())+" "+hm; }
+async function jpost(u,b){const r=await fetch(u,{method:"POST",credentials:"same-origin",
+  headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})});return r.json();}
+
+const Hover={
+  tmr:null, host:null, sid:null,
+  _mk(){ if(!this.host){ this.host=document.createElement("div"); this.host.className="pn-hovercard"; this.host.style.display="none"; document.body.appendChild(this.host);} return this.host; },
+  enter(sid,title,anchor){
+    clearTimeout(this.tmr); this.sid=sid;
+    this.tmr=setTimeout(()=>this._show(sid,title,anchor),450);
+  },
+  leave(){ clearTimeout(this.tmr); setTimeout(()=>{ if(this.host)this.host.style.display="none"; },200); },
+  async _show(sid,title,anchor){
+    const h=this._mk(); const r=anchor.getBoundingClientRect();
+    h.textContent=""; const t=document.createElement("div"); t.className="hc-topic"; t.textContent=title||"…";
+    const s=document.createElement("div"); s.className="hc-status muted"; s.textContent="lädt …";
+    h.appendChild(t); h.appendChild(s);
+    h.style.display="block"; h.style.left=Math.min(window.innerWidth-320,r.right+8)+"px"; h.style.top=r.top+"px";
+    let d; try{ d=await jget("/api/session/hovercard?sid="+encodeURIComponent(sid)); }catch(e){ d=null; }
+    if(this.sid!==sid||!d||!d.ok){ if(d&&d.state==="off")h.style.display="none"; return; }
+    if(d.topic)t.textContent=d.topic;
+    s.textContent=d.status||(d.state==="pending"?"wird zusammengefasst …":"");
+  }
+};
+function rel(ts){if(!ts)return"";const s=Math.max(0,Math.floor(Date.now()/1000-ts));
+  if(s<60)return"gerade";if(s<3600)return Math.floor(s/60)+" min";if(s<86400)return Math.floor(s/3600)+" h";
+  return Math.floor(s/86400)+" d";}
+try{const t=localStorage.getItem("pp-theme")||localStorage.getItem("theme");
+  if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t);}catch(e){}
+
+const APP = {
+  board:null, sel:null, term:null, fit:null, ws:null, connId:0, edit:null,
+  _openAt:0, _recoN:0, _kickN:0,
+  tab:"active", sortK:"last_active", sortDir:-1,
+  mode:"sessions", metas:[], msel:null, uservpn:null, _mpoll:null, voiceRoute:null,
+  models:[], efforts:[], presets:[], presetMeta:{}, autonomy:{}, autonomyShort:{}, autonomyExp:{}, autonomyOrder:[1,2,4], vpns:[], autoDefault:2, presetDefault:"standard",
+
+  async boot(){
+    $("#newBtn").onclick=()=>this.openWizard();
+    $("#wizX").onclick=$("#wizCancel").onclick=()=>this.closeWizard();
+    $("#wizGo").onclick=()=>this.submitWizard();
+    $("#veil").onclick=e=>{if(e.target===$("#veil"))this.closeWizard();};
+
+    $("#editBtn").onclick=()=>{const s=this.session(this.sel);(s&&s.voice)?this.openRights():this.openWizard(this.sel);};
+    $("#renBtn").onclick=()=>this.rename();
+    $("#keepBtn").onclick=()=>this.keep();
+    $("#pauseBtn").onclick=()=>this.togglePause();
+    $("#killBtn").onclick=()=>this.killSession();
+    $("#powerBtn").onclick=()=>this.powerSession(this.sel, !this.session(this.sel).warm);
+    { const ka=$("#kaBtn"); if(ka)ka.onclick=()=>this.keepaliveMenu(this.sel); }
+    $("#deskBtn").onclick=()=>this.deskToggle(this.sel);
+    $("#appsBtn").onclick=()=>this.openApps();
+    $("#ovBtn").onclick=()=>this.showTable();
+    $("#archBtn").onclick=()=>this.archive(this.sel,true);
+    $("#archAllBtn").onclick=()=>this.archiveAll();
+    $("#histBtn").onclick=()=>this.toggleHist();
+    { const xb=$("#explainBtn"); if(xb)xb.onclick=()=>this.explainSession(this.sel); }
+
+    if(window.parent!==window){
+      document.addEventListener("keydown",e=>{ if(e.ctrlKey&&e.code==="Space"){
+        e.preventDefault();e.stopPropagation();
+        if(!e.repeat)window.parent.postMessage({type:"pp-ptt",down:true},"*"); }},true);
+      document.addEventListener("keyup",e=>{ if(e.code==="Space"||e.key==="Control")
+        window.parent.postMessage({type:"pp-ptt",down:false},"*"); },true);
+    }
+    document.querySelectorAll("#tblTabs button").forEach(b=>b.onclick=()=>{
+      this.tab=b.dataset.tab;
+      document.querySelectorAll("#tblTabs button").forEach(x=>x.classList.toggle("on",x===b));
+      $("#archAllBtn").hidden=(this.tab==="archive");
+      this.renderTable();});
+    document.querySelectorAll(".stbl th[data-k]").forEach(th=>th.onclick=()=>{
+      const k=th.dataset.k;
+      if(this.sortK===k)this.sortDir*=-1;else{this.sortK=k;this.sortDir=(k==="last_active"||k==="warm")?-1:1;}
+      this.renderTable();});
+    $("#restartBtn").onclick=()=>this.restartAgent();
+    {const rb=$("#reloadTermBtn"); if(rb)rb.onclick=()=>this.reloadTerm();}
+    {const sb=$("#shareFolderBtn"); if(sb)sb.onclick=()=>Files.open(this.sel,this.session(this.sel));}
+
+    {const b=$("#termNoteBtn"); if(b)b.onclick=()=>{
+      this._recoN=0; this._kickN=0; this.termNote(false);
+      if(this.sel)this.connect(this.sel);};}
+    $("#backBtn").onclick=()=>$("#side").classList.add("show");
+    $("#wAuto").onchange=()=>{this.autoLab();this.updateGrant();};
+    $("#wVpnOn").onchange=()=>{$("#wVpn").disabled=!$("#wVpnOn").checked;this.vpnNote();this.updateGrant();};
+    $("#wVpn").onchange=()=>{this.vpnNote();this.updateGrant();};
+    ["#cNet","#cWs","#cWf","#cInternal"].forEach(id=>{const el=$(id);if(el)el.onchange=()=>this.updateGrant();});
+    $("#wOrch").onchange=()=>{$("#wOrchMax").disabled=!$("#wOrch").checked;};
+    $("#rOrch").onchange=()=>{$("#rOrchMax").disabled=!$("#rOrch").checked;};
+    $("#mwizX").onclick=$("#mwizCancel").onclick=()=>$("#mveil").classList.remove("on");
+    $("#mveil").onclick=e=>{if(e.target===$("#mveil"))$("#mveil").classList.remove("on");};
+    $("#mwizGo").onclick=()=>this.submitMetaWizard();
+    $("#mAuto").onchange=()=>this.mAutoLab();
+    $("#mVpnOn").onchange=()=>{$("#mVpn").disabled=!$("#mVpnOn").checked;};
+    $("#rightsBtn").onclick=()=>this.openRights();
+    $("#voiceRouteBtn").onclick=()=>this.toggleVoiceRoute();
+    $("#castBtn").onclick=()=>this.castTerm();
+    $("#rX").onclick=$("#rCancel").onclick=()=>$("#rveil").classList.remove("on");
+    $("#rveil").onclick=e=>{if(e.target===$("#rveil"))$("#rveil").classList.remove("on");};
+    $("#rGo").onclick=()=>this.saveRights();
+    $("#hClose").onclick=()=>this.closeHpcTerm();
+    $("#hveil").onclick=e=>{if(e.target===$("#hveil"))this.closeHpcTerm();};
+    try{this.uservpn=await jget("/api/uservpn");}catch(e){this.uservpn={allowed:[],vpns:[],is_admin:false};}
+    window.addEventListener("message",(e)=>{ const d=e.data||{};
+      if(d.type==="pp-open-session" && d.sid){ if(this.mode!=="sessions"&&this.setMode)this.setMode("sessions");
+        if(this.session(d.sid)) this.select(d.sid); else this.refresh(false).then(()=>this.select(d.sid)); } });
+    await this.refresh(true);
+
+    this._applySessTick=()=>{
+      if(this._sessTimer){ clearTimeout(this._sessTimer); this._sessTimer=null; }
+      const SP={echtzeit:6000,haeufig:20000,selten:90000,nie:300000};
+      const step=()=>{ const ms=SP[SCAD.get("sesshist","echtzeit")]||6000;
+        if(document.hidden){ this._sessTimer=setTimeout(step, ms); return; }
+        this.refresh(false); if(this.mode==="meta")this.refreshMeta(false);
+        this._sessTimer=setTimeout(step, ms); };
+      const ms0=SP[SCAD.get("sesshist","echtzeit")]||6000; this._sessTimer=setTimeout(step, ms0);
+    };
+    this._applySessTick();
+  },
+
+  async markRead(sid){
+    try{await jpost("/api/session/seen",{sid});}catch(e){}
+    toast("✓ als gelesen markiert");this.refresh();},
+  async markAllRead(){
+    let r;try{r=await jpost("/api/session/seen",{all:true});}catch(e){r=null;}
+    toast(r&&r.ok?("✓ "+(r.marked||0)+" Session(s) als gelesen markiert"):"Fehler");this.refresh();},
+  async refresh(first){
+    let d;try{d=await jget("/api/session/board");}catch(e){return;}
+    if(!d||!d.ok)return;
+    this.board=d; this.models=d.models||[]; this.efforts=d.efforts||[]; this.runtimes=d.runtimes||[];
+    this.runtimeModels=d.runtime_models||{};
+    this.presets=d.presets||[]; this.presetMeta=d.preset_meta||{}; this.autonomy=d.autonomy_levels||{}; this.vpns=d.vpns||[];
+    this.autonomyShort=d.autonomy_short||{}; this.autonomyExp=d.autonomy_experience||{};
+    this.autonomyOrder=(d.autonomy_order&&d.autonomy_order.length)?d.autonomy_order:[1,2,4];
+    this.autoDefault=(d.autonomy_default!=null?d.autonomy_default:2); this.presetDefault=d.default_preset||"standard";
+    this.fillAutoSelect("#wAuto"); this.fillAutoSelect("#mAuto");
+    if(this.uservpn&&this.uservpn.is_admin){try{this.voiceRoute=await jget("/api/voice/route");}catch(e){}}
+    this.renderList(); this.renderTable();
+    if(first)this.renderOwnerStrips();
+    if(this.sel){const s=this.session(this.sel); if(s)this.renderWs(s); else this.sel=null;}
+    if(first && !this.sel) this.showTable();
+  },
+
+  session(sid){return (this.board.sessions||[]).find(s=>s.sid===sid);},
+  async keepaliveMenu(sid){
+
+    let has=false;
+    try{ const cur=await jget("/api/watchdog/keepalive"); const es=cur&&cur.entries;
+      if(Array.isArray(es))has=es.some(e=>(e&&(e.sid||e))===sid);
+      else if(es&&typeof es==="object")has=Object.keys(es).some(k=>k.split("/").pop()===sid);
+    }catch(e){}
+    const w=window.prompt("Wachhalten: Stunden (z.B. 48 oder 72), 'immer' oder 'aus'"+(has?"\nAktuell: AKTIV":""), has?"aus":"72");
+    if(w==null)return;
+    const v=w.trim().toLowerCase();
+    let hours;
+    if(v==="immer"||v==="forever")hours=null;
+    else if(v==="aus"||v==="off"||v==="0")hours=0;
+    else{ hours=parseFloat(v); if(isNaN(hours)||hours<0){toast("Bitte Stunden, 'immer' oder 'aus'",true);return;} }
+    let r=null; try{ r=await jpost("/api/watchdog/keepalive",{sid,hours}); }catch(e){}
+    if(r&&r.ok)toast(hours===0?"⏰ Wachhalten aus":"⏰ Wachhalten aktiv "+(hours===null?"(für immer)":"("+hours+" h)"));
+    else toast((r&&r.error)||"Wachhalten fehlgeschlagen (Admin nötig?)",true);
+  },
+  copyShareFolder(){
+
+    const s=this.session(this.sel); const rec=s&&s.share;
+    const unc=rec&&(rec.unc||rec.path);
+    if(!unc){toast("Kein Austausch-Ordner fuer diese Session (Share-Dienst aus?)",true);return;}
+    const done=()=>toast("Pfad kopiert: "+unc+" — in Windows: Win+R, einfuegen, Enter");
+    try{navigator.clipboard.writeText(unc).then(done,()=>{window.prompt("Pfad kopieren:",unc);});}
+    catch(e){window.prompt("Pfad kopieren:",unc);}
+  },
+
+  railActive(){
+
+    try{
+      const on = localStorage.getItem("pp-ui-msgr");
+      const wide = window.matchMedia && window.matchMedia("(min-width: 1101px)").matches;
+      const framed = window.parent && window.parent !== window;
+      return framed && wide && (on === null || on === "1");
+    }catch(e){ return false; }
+  },
+  renderList(){
+    const el=$("#list"), list=(this.board.sessions||[]).filter(s=>!s.archived);
+    if(!list.length){el.innerHTML='<div class="empty"><div class="big">Noch keine Session</div>Lege oben eine an, statte sie aus und leg los.</div>';this._listSig=null;return;}
+
+    const lsig=this.sel+"|"+JSON.stringify(list.map(s=>{const o=Object.assign({},s);delete o.res;return o;}));
+    if(lsig===this._listSig)return; this._listSig=lsig;
+    el.innerHTML="";
+    list.forEach(s=>{
+      const c=document.createElement("div");
+      c.className="scard"+(s.sid===this.sel?" sel":"");
+      c.onclick=()=>this.select(s.sid);
+      const chips=[];
+      if(s.unread)chips.push(`<span class="chip" style="background:var(--danger);color:#fff">💬 ${s.unread>50?"50+":s.unread} neu</span>`);
+      if(s.voice)chips.push(`<span class="chip acc">🎙 Sprachsteuerung</span>`);
+      if(s.model||(s.runtime&&s.runtime!=="claude-tmux"))chips.push(`<span class="chip acc">🧠 ${this.brainLab(s)}</span>`);
+      if(s.effort)chips.push(`<span class="chip">⚡ ${this.effortLab(s.effort)}</span>`);
+      if(s.autonomy!=null)chips.push(`<span class="chip">🎚 ${esc(this.autoShort(s.autonomy))}</span>`);
+      if(s.preset)chips.push(`<span class="chip" title="${esc(this.presetDesc(s.preset))}">🛡 ${esc(this.presetLab(s.preset))}</span>`);
+      if(s.vpn)chips.push(`<span class="chip vpn">🔒 ${s.vpn}</span>`);
+      if(s.progress&&s.progress.tail){const pa=s.progress.age_s|0;const stale=(pa>900&&s.warm);
+        chips.push(`<span class="chip" ${stale?'style="color:var(--warn)"':''} title="${esc(s.progress.tail)}">📋 ${esc(this.progLine(s.progress.tail))} · ${this.progAge(pa)}</span>`);}
+      if(s.observer&&s.observer.text){const oa=s.observer.age_s|0;
+        chips.push(`<span class="chip" ${s.observer.problem?'style="color:var(--warn)"':''} title="Kommentator: ${esc(s.observer.text)}">🔍 ${esc(this.obsLine(s.observer.text))} · ${this.progAge(oa)}</span>`);}
+      if(!s.provisioned)chips.push(`<span class="chip" style="color:var(--warn)">nicht ausgestattet</span>`);
+      const stat=[];
+      if(s.created)stat.push("seit "+rel(s.created));
+      if(s.msgs)stat.push(s.msgs+" Nachr.");
+      c.innerHTML=`<div class="top"><span class="dot ${s.warm?'warm':''}"></span>
+        <span class="nm">${esc(s.title||s.sid)}</span>
+        <span class="when">${s.warm?'aktiv':rel(s.last_active)}</span></div>
+        <div class="chips">${chips.join("")}</div>
+        ${stat.length?`<div class="scard-stat">${stat.join(" · ")}</div>`:""}`;
+      if(localStorage.getItem("pp-bi-hover")!=="0"){
+        c.addEventListener("mouseenter",()=>Hover.enter(s.sid,s.title,c));
+        c.addEventListener("mouseleave",()=>Hover.leave());
+      }
+      el.appendChild(c);
+    });
+  },
+  renderOwnerStrips(){
+
+    const el=$("#mlistS"),wrap=$("#vpnPanel");if(!el)return;
+    if(!(this.uservpn&&this.uservpn.is_admin)){if(wrap)wrap.hidden=true;el.innerHTML="";return;}
+    if(wrap)wrap.hidden=false;
+    el.innerHTML=this.grantStripHtml()+this.vpnTunnelHtml();
+    this.wireGrant();this.wireVpnTunnels();
+  },
+
+  obsLine(t){const l=String(t).trim().split("\n")[0].trim();return l.length>64?l.slice(0,63)+"\u2026":l;},
+  progLine(t){const ls=String(t).trim().split("\n");const l=(ls[ls.length-1]||"").trim();return l.length>64?l.slice(0,63)+"\u2026":l;},
+  progAge(a){return a<90?"gerade eben":(a<3600?Math.round(a/60)+" min":(Math.round(a/3600*10)/10)+" h");},
+  modelLab(id){const m=this.models.find(x=>x.id===id);return m?m.label:id;},
+
+  rtLabel(rt){const r=(this.runtimes||[]).find(x=>x.id===rt);return r?String(r.label).replace(/\s*\(.*\)$/,""):rt;},
+  brainLab(s){const rt=(s&&s.runtime)||"claude-tmux";
+    if(rt==="claude-tmux"||rt==="voice-repl")return this.modelLab((s&&s.model)||this.defModel());
+    return (s&&s.model)?this.modelLabFor(rt,s.model):this.rtLabel(rt);},
+  rtModels(rt){const rm=this.runtimeModels||{};return Object.prototype.hasOwnProperty.call(rm,rt)?(rm[rt]||[]):this.models;},
+  modelLabFor(rt,id){const m=this.rtModels(rt).find(x=>x.id===id);return m?m.label:id;},
+  rtDefModel(rt,ms){const d=this.defModel();return ms.some(m=>m.id===d)?d:((ms[0]&&ms[0].id)||"");},
+
+  defModel(){return (this.board&&this.board.default_model)||(this.models[0]&&this.models[0].id)||"opus";},
+  defMetaModel(){const d=this.board&&this.board.default_meta_model;if(d)return d;
+    return this.models.some(x=>x.id==="sonnet")?"sonnet":this.defModel();},
+  effortLab(id){const m=this.efforts.find(x=>x.id===id);return m?m.label:id;},
+
+  PRESET_ALIAS:{trusted:"erweitert",remote:"fernzugriff",full:"voll",doktorand:"fernzugriff"},
+  presetKey(id){return (id&&this.PRESET_ALIAS[id])||id||"";},
+  presetLab(id){const m=(this.presetMeta||{})[this.presetKey(id)];return (m&&m.label)||id||"";},
+  presetDesc(id){const m=(this.presetMeta||{})[this.presetKey(id)];return (m&&m.desc)||"";},
+
+  presetOpts(){return (this.presets||[]).map(p=>({id:p,label:this.presetLab(p),title:this.presetDesc(p)}));},
+  presetCur(v){const k=this.presetKey(v);return (k&&this.presets.includes(k))?k:this.presetDefault;},
+
+  rtProv(rt){
+    return rt==="codex"?"codex":(rt==="gemini"?"gemini":"claude"); },
+  select(sid){
+    this.sel=sid; $("#side").classList.remove("show");
+    this._equipSig=this._deskSig=null;
+    const s=this.session(sid); if(!s)return;
+    $("#wsEmpty").hidden=true; $("#tblView").hidden=true; $("#ws").hidden=false;
+    this._recoN=0; this._kickN=0; this.termNote(false);
+    if(this.railActive()){try{window.parent.postMessage({pp:"open-sid",sid:sid,provider:this.rtProv(s.runtime),model:s.model||""},"*");}catch(e){}}
+    this.renderList(); this.renderWs(s);
+    this.connect(sid);
+    try{jpost("/api/session/seen",{sid});}catch(e){}
+    try{parent.postMessage({type:"pp-session-selected",sid},"*");}catch(e){}
+  },
+
+  renderWs(s){
+
+    $("#wsName").textContent=s.title||s.sid;
+    const voice=!!s.voice;
+
+    const stopOnly=["archBtn","pauseBtn","powerBtn","restartBtn","killBtn","explainBtn"];
+    stopOnly.forEach(id=>{const b=$("#"+id); if(b)b.style.display=voice?"none":"";});
+    ["editBtn","renBtn","keepBtn","castBtn","castSel","deskBtn","deskOpenBtn","appsBtn"].forEach(id=>{const b=$("#"+id); if(b)b.style.display="";});
+    { const eb=$("#editBtn"); if(eb) eb.title=voice
+        ?"Rechte & Ausstattung der Sprachsession — Änderungen wirken sofort auf das laufende Gespräch (ohne Neustart)":""; }
+
+    { const rb=$("#rightsBtn"); if(rb) rb.style.display="none"; }
+    { const vrb=$("#voiceRouteBtn"); if(vrb){
+        const canRoute=!voice&&this.uservpn&&this.uservpn.is_admin;
+        vrb.style.display=canRoute?"":"none";
+        if(canRoute){
+          const active=!!(this.voiceRoute&&this.voiceRoute.session===s.sid);
+          vrb.textContent=active?"🎙 Voice aktiv — lösen":"🎙 Als Voice-Session";
+          vrb.classList.toggle("pri",active);
+          vrb.title=active?"Diese Session ist gerade deine Voice-Session. Klick = zurück auf die reguläre Tages-Session."
+                          :"Diese Session ab jetzt per Sprache steuern — deine Voice-Session für heute (nachts 03:00 und nach 1 h ohne Zuruf automatisch zurück auf die Tages-Session).";
+        }
+    } }
+    $("#voiceNote").hidden=true;
+    this.syncHist();
+    { const tw=document.querySelector(".term-wrap"); if(tw)tw.style.display=""; }
+    { const tb=document.querySelector(".taskbar"); if(tb)tb.style.display=voice?"none":""; }
+    const st=$("#wsStat");
+    { const stTxt=voice?(s.warm?"🎙 bereit · rund um die Uhr · microVM":"🎙 Sprach-Assistent · microVM")
+                       :(s.warm?"🔒 Agent läuft · microVM":"🔒 microVM · kalt");
+      const stTitle=voice?"Der Sprach-Assistent läuft in einer eigenen isolierten microVM und wird automatisch bereitgehalten."
+                         :"Diese Session läuft in einer eigenen nested microVM (echte Isolationsgrenze).";
+      const stCls="stat"+(s.warm?" on":"");
+
+      if(st.textContent!==stTxt)st.textContent=stTxt;
+      if(st.title!==stTitle)st.title=stTitle;
+      if(st.className!==stCls)st.className=stCls; }
+    const eq=[];
+    eq.push(`<span class="chip acc">🧠 ${this.brainLab(s)}</span>`);
+    eq.push(`<span class="chip">⚡ ${this.effortLab(s.effort||"medium")}</span>`);
+    if(!voice)eq.push(`<span class="chip">🎚 ${esc(this.autoShort(s.autonomy!=null?s.autonomy:this.autoDefault))}</span>`);
+    eq.push(`<span class="chip" title="${esc(this.presetDesc(s.preset||this.presetDefault))}">🛡 ${esc(this.presetLab(s.preset||this.presetDefault))}</span>`);
+    if(voice){
+      const c=s.caps||{};
+      eq.push(`<span class="chip ${c.net_general==='allow'?'vpn':''}">🌐 ${c.net_general==='allow'?'Internet an':'Internet aus'}</span>`);
+      eq.push(`<span class="chip">🔎 ${c.websearch!=='deny'?'Websuche an':'Websuche aus'}</span>`);
+      eq.push(`<span class="chip">🎛 ${c.device_connect==='allow'?'Geräte an':'Geräte aus'}</span>`);
+      if(this.voiceRoute&&this.voiceRoute.session){
+        const tgt=this.voiceRoute.session, ts=(this.board.sessions||[]).find(x=>x.sid===tgt);
+        eq.push(`<span class="chip acc">🎯 hört heute auf: ${esc(ts?(ts.title||tgt):tgt)}</span>`);
+      }
+    } else {
+      eq.push(`<span class="chip ${s.vpn?'vpn':''}">🔒 ${s.vpn?esc(s.vpn):"kein VPN"}</span>`);
+    }
+
+    (s.kits||[]).forEach(k=>eq.push(`<span class="chip" title="Werkzeug-Kiste aus dem Software-Regal — schreibgeschützt unter /opt/kits/${esc(k)}/bin eingehängt">🧰 ${esc(k)}</span>`));
+    { const eqh=eq.join("");
+      if(eqh!==this._equipSig){ this._equipSig=eqh; $("#wsEquip").innerHTML=eqh; } }
+    if(!voice){
+      { const pb=$("#pauseBtn"); if(pb){pb.textContent=s.paused?"▶ Fortsetzen":"⏸ Pause"; pb.disabled=!s.warm;} }
+      { const po=$("#powerBtn"); if(po){po.textContent=s.warm?"⏻ Aus":"▶ An"; po.title=s.warm?"microVM herunterfahren — CPU + RAM frei, Verlauf bleibt":"microVM hochfahren — Gespräch läuft weiter";} }
+      { const kb=$("#killBtn"); if(kb)kb.disabled=false; }
+    }
+    this.updDesk();
+
+    const vc=$("#vpnCard");
+    if(!voice && s.vpn){vc.hidden=false; if(vc.dataset.sid!==s.sid){vc.dataset.sid=s.sid; this.renderVpnCard(s);} }
+    else {vc.hidden=true; vc.dataset.sid="";}
+  },
+
+  histOn(){ try{return localStorage.getItem("pp-hist2")!=="0";}catch(e){return true;} },
+  toggleHist(){ try{localStorage.setItem("pp-hist2",this.histOn()?"0":"1");}catch(e){} this.syncHist(); },
+
+  async explainSession(sid){
+    if(!sid)return toast("Keine Session gewählt",true);
+    const b=$("#explainBtn");
+    const reset=()=>{if(b){b.disabled=false;b.textContent="🔍 Erklären";}};
+    if(b){b.disabled=true;b.textContent="🔍 liest mit …";}
+    let r; try{r=await jpost("/api/session/erklaer",{sid});}catch(e){r=null;}
+    if(!r||(r.ok===false&&!r.running)){reset();toast((r&&r.error)||"Beobachter nicht erreichbar",true);return;}
+    if(!this.histOn())this.toggleHist();
+    for(let i=0;i<90;i++){
+      await new Promise(res=>setTimeout(res,5000));
+      if(this.sel!==sid){reset();return;}
+      let p; try{p=await jpost("/api/session/erklaer",{sid,poll:1});}catch(e){continue;}
+      if(p&&p.running)continue;
+      reset();
+      if(p&&p.ok===false&&p.error)toast(p.error,true);
+      else this.loadHist&&this.loadHist();
+      return;
+    }
+    reset(); toast("Der Beobachter braucht ungewöhnlich lange — das Ergebnis erscheint im Verlauf.",true);
+  },
+  railCmtVisible(){
+
+    if(!this.railActive())return false;
+    try{
+      const o=JSON.parse(localStorage.getItem("pp-rail-widgets")||"null")||[];
+      if(o.indexOf("boardcmt")>=0)return true;
+      return localStorage.getItem("pp-rail-auto-sessions")!=="0"
+        && localStorage.getItem("pp-rail-auto-sessions-boardcmt")!=="0";
+    }catch(e){return true;}
+  },
+  syncHist(){
+    const s=this.session(this.sel), ws=$("#ws");
+    const on=this.histOn()&&!!s&&!(ws&&ws.hidden)&&!this.railCmtVisible();
+    { const hb=$("#histBtn"); if(hb)hb.classList.toggle("pri",this.histOn()); }
+    { const vl=$("#voiceLog"); if(vl)vl.hidden=!on; }
+    if(!on){this.stopHist();return;}
+    if(this._histTimer&&this._histSid===s.sid)return;
+    this.stopHist(); this._histSid=s.sid; this._histCur=0; this._histTurns=[]; this._histRSig=null;
+    { const body=$("#voiceLogBody"); if(body)body.innerHTML='<div class="vlog-empty">Lade Verlauf …</div>'; }
+    this.loadHist();
+    this._histTimer=setInterval(()=>{
+      const w=$("#ws");
+      if((w&&w.hidden)||this.sel!==this._histSid||!this.histOn()){this.syncHist();return;}
+      this.loadHist();
+    },5000);
+  },
+  stopHist(){ if(this._histTimer){clearInterval(this._histTimer);this._histTimer=null;} this._histSid=null; },
+  async loadHist(){
+    const sid=this._histSid, s=this.session(sid); if(!s)return;
+    try{
+      if(s.voice){
+        const r=await jget("/api/voice/history?n=80");
+        if(this._histSid!==sid)return;
+        this._histTurns=(r&&r.turns)||[];
+        this.renderHist(!!(r&&r.busy), r&&r.warm===false);
+      } else {
+        const r=await jget("/api/transcript?sid="+encodeURIComponent(sid)+"&since="+(this._histCur|0));
+        if(this._histSid!==sid)return;
+        const t=((r&&r.turns)||[]).filter(x=>(x.text||"").trim());
+        if(t.length){ this._histTurns=this._histTurns.concat(t).slice(-200); this._histCur=(r.next!=null?r.next:this._histCur); }
+        this.renderHist(false,false);
+      }
+    }catch(e){}
+  },
+  renderHist(busy,asleep){
+    const body=$("#voiceLogBody"),live=$("#voiceLogLive"); if(!body)return;
+    if(live)live.hidden=!busy;
+    const t=this._histTurns||[];
+
+    const hsig=t.length+"|"+(t.length?String(t[t.length-1].ts||"")+String((t[t.length-1].text||"").length):"")+"|"+busy+"|"+asleep;
+    if(hsig===this._histRSig)return; this._histRSig=hsig;
+    if(!t.length){
+      body.innerHTML='<div class="vlog-empty">'+(asleep
+        ?"Der Assistent ruht gerade — sprich ihn an, dann läuft das Gespräch hier mit."
+        :"Noch kein Verlauf — schreib oder sprich mit dem Agenten, das Gespräch läuft hier mit.")+'</div>';
+      return;
+    }
+    const atBottom=Math.abs(body.scrollHeight-body.clientHeight-body.scrollTop)<48;
+    body.innerHTML=t.map(x=>'<div class="vmsg '+(x.role==="user"?"u":"a")+'"><span class="who">'
+      +(x.role==="user"?"Du":(x.role==="observer"?"🔍 Kommentator":"🤖"))+'</span><span class="txt">'+mdSafe(x.text)+'</span>'
+      +(x.ts?'<span class="vts" style="opacity:.55;font-size:11px;margin-left:6px;white-space:nowrap">'+fmtWhen(x.ts)+'</span>':'')+'</div>').join("");
+    if(atBottom)body.scrollTop=body.scrollHeight;
+  },
+
+  autoNorm(l){const v=parseInt(l,10);return ({0:1,1:1,2:2,3:2,4:4,5:4})[v]||1;},
+  autoShort(l){const n=this.autoNorm(l);return this.autonomyShort[String(n)]||((this.autonomy[String(n)]||"").split("—")[0].trim())||String(n);},
+
+  fillAutoSelect(sel){const el=$(sel); if(!el)return; const order=this.autonomyOrder||[1,2,4];
+    el.innerHTML=order.map(l=>`<option value="${l}">${esc(this.autoShort(l))}</option>`).join("");},
+  autoExp(l){const n=this.autoNorm(l);return this.autonomyExp[String(n)]||this.autonomy[String(n)]||"";},
+
+  termNote(show,head,detail,icon){
+    const n=$("#termNote"); if(!n)return;
+    if(!show){n.hidden=true;return;}
+    const h=$("#termNoteH"),d=$("#termNoteD"),i=$("#termNoteIc");
+    if(i)i.textContent=icon||"🔌";
+    if(h)h.textContent=head||"Terminal nicht erreichbar";
+    if(d)d.textContent=detail||"";
+    n.hidden=false;
+  },
+  wsStat(txt){const st=$("#wsStat");if(st){st.textContent=txt;st.className="stat";}},
+
+  reasonText(r){
+    const k=String(r||"").trim();
+    const m={"taken-over":"Die Session wurde auf einem anderen Screen übernommen.",
+             "cell-restart":"Die Session-VM wurde neu gestartet.",
+             "boot-error":"Die Session-VM konnte nicht gestartet werden.",
+             "boot-failed":"Die Session-VM ist nicht hochgekommen."};
+    return m[k]||k;
+  },
+  reloadTerm(){
+
+    if(!this.sel){toast("Keine Session ausgewählt",true);return;}
+    try{if(this.ws)this.ws.close();}catch(e){}
+    this._recoN=0;this._kickN=0;this.termNote(false);
+    this.connect(this.sel);
+    toast("⟳ Terminal neu geladen");
+  },
+  connect(sid){
+    const s=this.session(sid);
+    const myId=++this.connId;
+    if(this.ws){try{this.ws.onclose=null;this.ws.close();}catch(e){}}
+    if(!this.term){
+      if(typeof Terminal==="undefined"){$("#wsStat").textContent="xterm fehlt";return;}
+      this.term=new Terminal({fontSize:13,fontFamily:"'JetBrains Mono',ui-monospace,monospace",cursorBlink:true,
+        theme:{background:"#0b0e15",foreground:"#e8ecf5",cursor:"#8a7fff"}});
+      try{this.fit=new FitAddon.FitAddon();this.term.loadAddon(this.fit);}catch(e){}
+      this.term.open($("#term"));
+      this.term.onData(d=>{if(this.ws&&this.ws.readyState===1)this.ws.send(d);});
+      window.addEventListener("resize",()=>this.doFit());
+    }
+    this.term.reset(); this.doFit();
+    this.termNote(false);
+    let opened=false;
+    const ws=new WebSocket(wsUrl("/ws/term?target="+((s&&s.voice)?"voice":"cockpit")+"&sid="+encodeURIComponent(sid)));
+    ws.binaryType="arraybuffer"; this.ws=ws;
+    ws.onopen=()=>{if(myId!==this.connId)return;
+      opened=true; this._openAt=Date.now();
+      this.sendResize();this.term.focus();
+
+      setTimeout(()=>{if(myId===this.connId&&ws.readyState===1){this._recoN=0;this._kickN=0;}},5000);};
+    ws.onmessage=e=>{if(myId!==this.connId)return;
+      if(typeof e.data==="string")this.term.write(e.data);else this.term.write(new Uint8Array(e.data));};
+    ws.onclose=(e)=>{if(myId!==this.connId)return;
+      const why=this.reasonText(e&&e.reason);
+      if(e&&e.code===4001){
+        this.term.write("\r\n[Ein anderer Screen hat die Session übernommen — dort läuft sie weiter.]\r\n");
+        this.wsStat("⏸ auf anderem Screen übernommen");
+        this.termNote(true,"Die Session läuft auf einem anderen Screen",
+          "Sie wurde dort geöffnet und läuft weiter — hier geht nichts verloren. "
+          +"Mit „Erneut versuchen“ holst du sie auf diesen Screen zurück.","⏸");
+        return;}
+      if(e&&e.code===4003){
+        this.wsStat("⚠ Session konnte nicht starten");
+        this.termNote(true,"Terminal nicht erreichbar (Sitzung konnte nicht starten)",
+          (why?"Grund: "+why+" ":"Die Session-VM ist nicht gestartet. ")
+          +"Schalte die Session mit „⏻ An“ ein — oder prüfe unter "
+          +"„Rechte & Ausstattung“, ob genug Speicher zugeteilt ist.","⚠");
+        return;}
+      if(e&&e.code===4004){
+
+        this.wsStat("⚠ Terminal nicht verfügbar");
+        this.termNote(true,"Terminal nicht verfügbar",
+          (why||"Diese Box kann gerade kein Terminal öffnen.")
+          +" Das ändert sich nicht von allein — sobald das Fehlende da ist, hilft „Erneut versuchen“.","🔌");
+        return;}
+      if(e&&e.code===4002){
+
+        this._kickN=(this._kickN||0)+1;
+        if(this._kickN>=4){
+          this.wsStat("⚠ Neustart klappt nicht");
+          this.termNote(true,"Terminal nicht erreichbar (Sitzung startet immer wieder neu)",
+            (why?"Grund: "+why+" ":"")+"Die Session-VM hat sich "+this._kickN
+            +"-mal neu gestartet, ohne bereit zu werden. Schalte sie mit „⏻ Aus“ und wieder "
+            +"„⏻ An“ — oder prüfe die Speicher-Zuteilung.","↻");
+          return;}
+        const dk=this.backoff(this._kickN);
+        this.wsStat("↻ Session startet neu … (Versuch "+this._kickN+" von 4)");
+        this.term.write("\r\n[Session startet neu — neuer Versuch in "+Math.round(dk/1000)+"s…]\r\n");
+        setTimeout(()=>{if(myId===this.connId)this.connect(sid);},dk);
+        return;}
+
+      const fast=(!opened)||((Date.now()-(this._openAt||0))<2500);
+      this._recoN=fast?((this._recoN||0)+1):0;
+      if(this._recoN>=4){
+        this.wsStat("⚠ Terminal nicht erreichbar");
+        this.termNote(true,"Terminal nicht erreichbar"+(opened?"":" (Sitzung konnte nicht starten)"),
+          why?("Grund: "+why)
+            :(opened?"Die Verbindung ist mehrfach direkt nach dem Verbinden abgerissen — die Session "
+                    +"läuft, aber ihr Terminal bleibt nicht stehen."
+                   :"Die Box hat die Terminal-Verbindung abgewiesen, bevor sie zustande kam — nach "
+                    +this._recoN+" Versuchen aufgegeben. Meist heisst das: die Session ist nicht an, "
+                    +"oder auf dieser Box fehlt noch das Terminal-Programm."),
+          "🔌");
+        return;}
+      const d=this.backoff(this._recoN);
+      this.wsStat("… getrennt — neuer Versuch "+this._recoN+" von 4");
+      this.term.write("\r\n[getrennt"+(why?" — "+why:"")+" — neu in "+Math.round(d/1000)+"s…]\r\n");
+      setTimeout(()=>{if(myId===this.connId)this.connect(sid);},d);};
+  },
+
+  backoff(n){
+    const base=Math.min(15000,1000*Math.pow(2,Math.max(0,(n||1)-1)));
+    return Math.round(base*(0.85+Math.random()*0.30));
+  },
+  doFit(){try{if(this.fit){this.fit.fit();this.sendResize();}}catch(e){}},
+  sendResize(){if(this.ws&&this.ws.readyState===1&&this.term)this.ws.send(JSON.stringify({t:"r",rows:this.term.rows,cols:this.term.cols}));},
+
+  async rename(){
+    const s=this.session(this.sel);if(!s)return;
+    const t=prompt("Neuer Name:",s.title||"");if(t==null)return;
+    const r=await jpost("/api/sessions/rename",{sid:this.sel,title:t});
+
+    if(r&&r.ok){await this.refresh(false);toast("Umbenannt");}
+    else toast((r&&r.error)||"Umbenennen fehlgeschlagen",true);
+  },
+  async keep(){
+    const r=await jpost("/api/sessions/keep",{sid:this.sel});
+    if(r&&r.ok){await this.refresh(false);toast((r&&r.note)||"📌 Behalten — vor Auto-Aufräumen geschützt");}
+    else toast((r&&r.error)||"Fehler",true);
+  },
+  async toggleVoiceRoute(){
+    const s=this.session(this.sel); if(!s||s.voice)return;
+    const active=!!(this.voiceRoute&&this.voiceRoute.session===s.sid);
+    let r; try{ r=await jpost("/api/voice/route",{session:active?"":s.sid}); }
+    catch(e){ toast("Konnte Voice-Session nicht setzen",true); return; }
+    if(r&&r.ok===false){ toast(r.error||"Nicht erlaubt",true); return; }
+    try{ this.voiceRoute=await jget("/api/voice/route"); }catch(e){}
+    const cur=this.session(this.sel); if(cur)this.renderWs(cur);
+    this.renderTable();
+    toast(active?"🎙 Voice zurück auf die Tages-Session":"🎙 Diese Session ist jetzt deine Voice-Session (heute)");
+  },
+  async castTerm(){
+    const s=this.session(this.sel); if(!s)return;
+    if(s.voice){
+
+      toast("Spiegeln der Sprachsession geht noch nicht — ihre Terminal-Lane ist an die Cast-Quelle nicht angebunden.",true);
+      return;
+    }
+    const sel=$("#castSel");
+    let t; try{t=await jget("/api/cast/targets");}catch(e){toast("Cast-Ziele nicht ladbar");return;}
+    const live=((t&&t.casts)||[]).find(c=>c.alive&&c.term_sid===this.sel);
+    if(live){
+      if(confirm("Spiegelung auf \u201e"+(live.name||live.device)+"\u201c beenden?")){
+        await jpost("/api/cast/stop",{device:live.device});toast("\ud83d\udcfa Spiegelung beendet");
+      }
+      sel.hidden=true;return;
+    }
+    if(sel.hidden){
+      const devs=(t&&t.devices)||[];
+      if(!devs.length){toast("Kein Cast-Ger\u00e4t gefunden \u2014 Chromecast/Nest im Ger\u00e4te-Reiter anlegen");return;}
+      sel.innerHTML='<option value=\"\">\u2014 TV/Monitor w\u00e4hlen \u2014</option>'+
+        devs.map(d=>'<option value=\"'+esc(d.addr)+'\">'+esc(d.name)+'</option>').join("");
+      sel.hidden=false;toast("Ziel w\u00e4hlen, dann nochmal \ud83d\udcfa Spiegeln");return;
+    }
+    const dev=sel.value;
+    if(!dev){sel.hidden=true;return;}
+    sel.hidden=true;
+    const r=await jpost("/api/cast/start",{device:dev,source:{type:"term",id:this.sel},fps:6});
+    if(r&&r.ok)toast("\ud83d\udcfa Spiegelung startet \u2014 der Stream braucht ein paar Sekunden");
+    else toast((r&&r.error)||"Spiegeln fehlgeschlagen");
+  },
+  async restartAgent(){
+    if(!confirm("Agent dieser Session neu starten? (läuft mit aktueller Ausstattung neu hoch)"))return;
+    await jpost("/api/session/provision",{sid:this.sel,restart:true});
+    toast("Agent startet neu…");setTimeout(()=>this.connect(this.sel),700);
+  },
+  async togglePause(){
+    const s=this.session(this.sel);if(!s)return;
+    const to=!s.paused;
+    const r=await jpost("/api/session/pause",{sid:this.sel,paused:to});
+    if(r&&r.ok){await this.refresh(false);
+      toast(to?(r.hard?"⏸ Session eingefroren (Kernel-Freeze — sofort, nicht umgehbar)":"⏸ Session pausiert (kooperativ)"):"▶ Session fortgesetzt");}
+    else toast((r&&r.error)||"Fehler");
+  },
+  async killSession(sid){
+    sid=sid||this.sel;
+    const s=this.session(sid);if(!s)return;
+    const nm=s.title||sid;
+
+    if(!confirm("🗑 LÖSCHEN von „"+nm+"“?\n\n‼️ WEG = WEG, UNWIDERBRINGLICH:\n• die microVM wird zerstört (SIGKILL)\n• ihre Disk wird komplett gelöscht — GESAMTER VERLAUF & ALLE DATEIEN\n• die Session VERSCHWINDET aus der Liste — kein Wiederanschalten\n• auch alle Unter-Sessions\n\nEs gibt KEIN Zurück. (Nur ausschalten & später fortsetzen? → „⏻ Aus“.)\n\nWeiter zur Sicherheits­abfrage?"))return;
+    const typed=prompt("Endgültig löschen: zum Bestätigen bitte  LÖSCHEN  eintippen (Session „"+nm+"“):");
+    if((typed||"").trim().toUpperCase()!=="LÖSCHEN"){toast("Abgebrochen — nichts wurde gelöscht");return;}
+
+    let totp="";
+    for(let attempt=0;attempt<4;attempt++){
+      const body={sid}; if(totp)body.totp=totp;
+      const r=await jpost("/api/session/kill",body);
+      if(r&&r.ok){if(this.sel===sid)this.sel=null;await this.refresh(false);
+        const w=(r.workers_killed&&r.workers_killed.length)?(" + "+r.workers_killed.length+" Unter-Session(s)"):"";
+        toast("🗑 Session gelöscht"+w+" — VM zerstört, Disk gelöscht, aus Liste entfernt.");return;}
+      if(r&&r.need_2fa_enrollment){
+        alert("🔒 Löschen ist gesperrt.\n\n"+((r&&r.error)||"2FA ist nicht eingerichtet.")+"\n\nRichte zuerst einen zweiten Faktor ein:\n"+((r&&r.enroll_hint)||"Einstellungen → Sicherheit → 2FA"));return;}
+      if(r&&r.need_2fa){
+        totp=(prompt(((r&&r.error)||"2FA-Code erforderlich zum Löschen.")+"\n\n6-stelligen Code aus deiner Authenticator-App eingeben:")||"").trim();
+        if(!totp){toast("Abgebrochen — nichts wurde gelöscht");return;}
+        continue;}
+      toast((r&&r.error)||"Fehler",true);return;
+    }
+    toast("2FA fehlgeschlagen — nichts wurde gelöscht",true);
+  },
+
+  async deskToggle(sid){
+    sid=sid||this.sel; const s=this.session(sid); if(!s)return;
+    const st=await jget("/api/session/desktop?sid="+encodeURIComponent(sid)).catch(()=>null)||{};
+    const on=!st.active;
+    if(!on&&!confirm("🖥 Desktop beenden?\n\nDie Session läuft als schlanke Terminal-VM weiter (RAM wird frei). Installierte Programme und Dateien bleiben auf dem Arbeits-Volume erhalten — beim nächsten Aktivieren ist alles wieder da."))return;
+    const r=await jpost("/api/session/desktop",{sid,on});
+    if(!(r&&r.ok)){toast("🖥 "+((r&&r.reason)||"Desktop-Wechsel nicht möglich"),true);return;}
+    if(r.already){
+      await this.refresh(false); this.updDesk();
+      if(on){toast("🖥 Desktop läuft bereits — wird angezeigt");
+        if(r.cell)window.open("/vnc3?cell="+encodeURIComponent(r.cell),"_blank");}
+      return;
+    }
+    this.deskWatch(sid,on);
+  },
+  deskWatch(sid,on){
+    const ovl=$("#deskOvl"),head=$("#deskHead"),steps=$("#deskSteps"),err=$("#deskErr"),cls=$("#deskClose");
+    ovl.classList.add("on");err.hidden=true;cls.hidden=true;
+    head.textContent=on?"🖥 Desktop wird aktiviert …":"🖥 Desktop wird beendet …";
+    const PH={start:"Vorbereiten & prüfen",sichern:"Gespräch sichern",
+              neustart:on?"Neustart als Office-VM (mehr RAM, Bildschirm)":"Neustart als schlanke Terminal-VM",
+              arbeitsflaeche:"Arbeitsfläche starten (Fenster, Bildschirm-Lane)"};
+    const order=on?["start","sichern","neustart","arbeitsflaeche"]:["start","sichern","neustart"];
+    clearInterval(this._deskT);
+    cls.onclick=()=>{ovl.classList.remove("on");};
+    this._deskT=setInterval(async()=>{
+      const st=await jget("/api/session/desktop?sid="+encodeURIComponent(sid)).catch(()=>null);
+      if(!st)return;
+      const ph=st.phase||"start", done=(ph==="bereit"||ph==="aus");
+      steps.innerHTML=order.map(k=>{
+        const past=done||order.indexOf(k)<order.indexOf(ph), cur=!done&&k===ph;
+        return `<div style="opacity:${past||cur?1:.45}">${past?"✅":cur?"⏳":"◽"} ${PH[k]}${cur&&st.detail?`<div style="font-size:12px;opacity:.7;margin-left:22px">${esc(st.detail)}</div>`:""}</div>`;
+      }).join("");
+      if(ph==="fehler"){
+        clearInterval(this._deskT);
+        head.textContent="🖥 Desktop-Wechsel fehlgeschlagen";
+        err.textContent=st.error||"Unbekannter Fehler";err.hidden=false;cls.hidden=false;
+        this.updDesk(st);await this.refresh(false);return;
+      }
+      if(done){
+        clearInterval(this._deskT);ovl.classList.remove("on");
+        this.updDesk(st);await this.refresh(false);
+        if(on&&st.active){toast("🖥 Desktop bereit — Bildschirm öffnet sich");
+          if(st.cell)window.open("/vnc3?cell="+encodeURIComponent(st.cell),"_blank");}
+        else toast(on?"🖥 Desktop-Start unvollständig — Details über den Desktop-Knopf":"🖥 Desktop beendet — Session läuft schlank weiter");
+      }
+    },1500);
+  },
+  async updDesk(st){
+    const b=$("#deskBtn"),ob=$("#deskOpenBtn"),ab=$("#appsBtn");if(!b)return;
+    if(st===undefined)st=await jget("/api/session/desktop?sid="+encodeURIComponent(this.sel)).catch(()=>null);
+    if(!st)return;
+
+    const _srow=this.session(this.sel)||{};
+    const dsig=JSON.stringify([this.sel,!!st.active,st.cell||"",st.mem_mb,st.vcpus,st.work_gb_provisioned,_srow.disk_mb]);
+    if(dsig===this._deskSig)return; this._deskSig=dsig;
+    b.textContent=st.active?"🖥 Desktop aus":"🖥 Desktop";
+    b.title=st.active?"Desktop beenden — zurück zur schlanken Terminal-VM (Programme + Dateien bleiben auf dem Arbeits-Volume)"
+                     :"Desktop aktivieren: die Session wächst zu einer Office-VM mit Bildschirm und mehr RAM — das Gespräch läuft nahtlos weiter (dauert einen Moment)";
+    if(ob){ob.hidden=!st.active;
+      ob.onclick=()=>{if(st.cell)window.open("/vnc3?cell="+encodeURIComponent(st.cell),"_blank");};}
+    if(ab)ab.hidden=!st.active;
+
+    { const di=$("#deskInfo");
+      if(di){ const bits=[];
+        if(st.mem_mb!=null)bits.push("🧠 RAM "+st.mem_mb+" MB");
+        if(st.vcpus!=null)bits.push("⚙ "+st.vcpus+" vCPU");
+        if(st.work_gb_provisioned!=null){
+          const g=st.work_gb_provisioned, gs=(g%1?g.toFixed(1):String(Math.round(g)));
+          bits.push("💾 Arbeits-Volume "+gs+" GB (wächst nach Bedarf mit der Ausstattung; belegt nur wirklich Geschriebenes)");
+        }
+        di.hidden=!bits.length;
+        di.innerHTML=bits.map(t=>'<span class="chip">'+esc(t)+'</span>').join("");
+
+        if(st.mem_mb!=null){
+          const bump=document.createElement("button");
+          bump.className="btn sm"; bump.textContent="＋1 GB";
+          bump.title="Dieser Session dauerhaft 1 GB RAM mehr geben — die microVM startet dazu neu (Verlauf und Dateien bleiben).";
+          bump.onclick=async()=>{
+            const cur=+st.mem_mb||0;
+            if(!confirm("Dieser Session dauerhaft 1 GB RAM mehr geben ("+cur+" → "+(cur+1024)+" MB)?\n"+
+                        "Die microVM startet dazu neu — Verlauf und Dateien bleiben.\n"+
+                        "Hinweis: Ist das RAM-Budget der Box voll, bleibt die VM aus, bis anderswo Platz ist (VM verkleinern/ausschalten)."))return;
+            let r=null; try{ r=await jpost("/api/session/provision",{sid:this.sel,mem_mb:cur+1024,restart:true}); }catch(e){}
+            if(r&&r.ok!==false){
+              toast(r.rebooted?"microVM startet mit +1 GB neu — Verlauf bleibt":"+1 GB vorgemerkt — wirkt beim naechsten Start");
+              this._deskSig=null; this.refresh(false);
+            } else toast((r&&r.error)||"RAM-Erhoehung nicht moeglich");
+          };
+          di.appendChild(bump);
+          di.hidden=false;
+        }
+
+        {
+          const s=this.session(this.sel)||{};
+          const dcur=(+s.disk_mb||0)||512;
+          const DMAX=16384;
+          const chip=document.createElement("span");
+          chip.className="chip";
+          chip.textContent="💽 Session-Platte "+(dcur>=1024?(dcur/1024)+" GB":dcur+" MB");
+          chip.title="Das /root-Delta dieser Session: Gespräch, Dateien und Arbeitsstand. Wächst in-place beim Start und wird nie wieder kleiner.";
+          di.appendChild(chip);
+          const dbump=document.createElement("button");
+          dbump.className="btn sm";
+          dbump.textContent="＋1 GB";
+          if(dcur>=DMAX){
+            dbump.disabled=true;
+            dbump.title="Deckel erreicht ("+(DMAX/1024)+" GB) — mehr gibt die Ausstattung nicht her.";
+          } else {
+            dbump.title="Dieser Session dauerhaft 1 GB Plattenplatz mehr geben — die microVM startet dazu neu (Verlauf und Dateien bleiben).";
+            dbump.onclick=async()=>{
+              const ziel=Math.min(dcur+1024,DMAX);
+
+              if(!confirm("Dieser Session dauerhaft 1 GB Plattenplatz mehr geben ("+dcur+" → "+ziel+" MB)?\n"+
+                          "Die microVM startet dazu neu — Verlauf und Dateien bleiben.\n"+
+                          "Vor dem Vergrößern läuft ein Dateisystem-Check auf dem Abbild; der Neustart kann deshalb länger dauern als bei RAM.\n"+
+                          "Hinweis: Die Platte wird nie wieder kleiner."))return;
+              dbump.disabled=true;
+              let r=null; try{ r=await jpost("/api/session/provision",{sid:this.sel,disk_mb:ziel,restart:true}); }catch(e){}
+              if(r&&r.ok!==false){
+                toast(r.rebooted?"microVM startet mit +1 GB Platte neu — Verlauf bleibt"
+                                :"+1 GB Platte vorgemerkt — wirkt beim nächsten Start");
+                this._deskSig=null; this.refresh(false);
+              } else { dbump.disabled=false; toast((r&&r.error)||"Vergrößern der Platte nicht möglich"); }
+            };
+          }
+          di.appendChild(dbump);
+          di.hidden=false;
+        }
+      } }
+  },
+
+  openApps(){
+    const ovl=$("#appOvl");ovl.classList.add("on");
+    $("#appClose").onclick=()=>{ovl.classList.remove("on");clearInterval(this._appT);};
+    const go=async()=>{
+      const q=$("#appQ").value.trim();if(q.length<2)return;
+      $("#appErr").hidden=true;
+      $("#appResults").innerHTML='<span style="opacity:.6">Suche …</span>';
+      const r=await jget("/api/session/appsearch?q="+encodeURIComponent(q)).catch(()=>null);
+      if(!r||!r.ok){$("#appResults").innerHTML="";this.appErr((r&&r.error)||"Suche fehlgeschlagen");return;}
+      $("#appResults").innerHTML=(r.results||[]).map(a=>
+        `<div style="display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+           <div style="flex:1;min-width:0"><b>${esc(a.name)}</b>
+             <div style="font-size:12px;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.summary||a.id)}</div></div>
+           <button class="btn sm" data-app="${esc(a.id)}">Installieren</button></div>`).join("")
+        ||'<span style="opacity:.6">Nichts gefunden.</span>';
+      $("#appResults").querySelectorAll("button[data-app]").forEach(btn=>{
+        btn.onclick=()=>this.appOp("install",btn.dataset.app);});
+    };
+    $("#appQGo").onclick=go;
+    $("#appQ").onkeydown=e=>{if(e.key==="Enter")go();};
+    this.appRefresh();
+  },
+  appErr(msg){const e=$("#appErr");e.textContent=msg;e.hidden=false;},
+  async appRefresh(){
+    const st=await jget("/api/session/app?sid="+encodeURIComponent(this.sel)).catch(()=>null)||{};
+    const busy=st.phase==="laeuft";
+    $("#appBusy").hidden=!busy;
+    if(busy)$("#appBusyTxt").textContent=st.detail||"Aktion läuft …";
+    if(st.phase==="fehler"&&st.error)this.appErr(st.error);
+    const inst=$("#appInstalled");
+    inst.innerHTML=(st.installed&&st.installed.length)?st.installed.map(a=>
+      `<div style="display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+         <div style="flex:1"><b>${esc(a.name)}</b> <span style="font-size:12px;opacity:.6">${esc(a.id)}</span></div>
+         <button class="btn sm danger" data-rm="${esc(a.id)}">Entfernen</button></div>`).join("")
+      :'<span style="opacity:.6">'+(busy?"…":"Noch keine Programme installiert.")+"</span>";
+    inst.querySelectorAll("button[data-rm]").forEach(btn=>{
+      btn.onclick=()=>{if(confirm("„"+btn.dataset.rm+"“ entfernen? Programm-Daten auf dem Arbeits-Volume bleiben erhalten."))this.appOp("remove",btn.dataset.rm);};});
+    return busy;
+  },
+  async appOp(op,appId){
+    $("#appErr").hidden=true;
+    const r=await jpost("/api/session/app",{sid:this.sel,op,app_id:appId});
+    if(!(r&&r.ok)){this.appErr((r&&r.reason)||"Aktion nicht möglich");return;}
+    toast(op==="install"?"🛍 Installation gestartet — kann einige Minuten dauern":"🛍 Wird entfernt …");
+    clearInterval(this._appT);
+    this._appT=setInterval(async()=>{
+      const busy=await this.appRefresh();
+      if(!busy){clearInterval(this._appT);toast("🛍 Fertig");}
+    },3000);
+    this.appRefresh();
+  },
+  async powerSession(sid,on){
+    sid=sid||this.sel;
+    const s=this.session(sid);if(!s)return;
+    if(!on&&!confirm("⏻ Session „"+(s.title||sid)+"“ herunterfahren?\n\nDie microVM wird gestoppt — CPU + RAM werden frei (spart Ressourcen). Verlauf & Dateien BLEIBEN erhalten; beim nächsten Start läuft das Gespräch weiter. (Nicht zu verwechseln mit Löschen, das alles entfernt.)"))return;
+    toast(on?"▶ Fahre hoch…":"⏻ Fahre herunter…");
+    const r=await jpost("/api/session/power",{sid,on:!!on});
+    if(r&&r.ok){await this.refresh(false);toast(on?"▶ Gestartet — Gespräch wird fortgesetzt":"⏻ Heruntergefahren — CPU + RAM frei, Verlauf bleibt");}
+    else toast((r&&r.error)||"Fehler",true);
+  },
+
+  showTable(){
+    $("#wsEmpty").hidden=true;$("#ws").hidden=true;$("#wsMeta").hidden=true;$("#metaEmpty").hidden=true;
+    $("#tblView").hidden=false;this.renderTable();this.stopHist();
+    if(this.railActive()){try{window.parent.postMessage({pp:"open-sid",sid:null},"*");}catch(e){}}
+  },
+  renderTable(){
+    const tb=$("#tblBody");if(!tb||!this.board)return;
+    const all=this.board.sessions||[];
+    const arch=all.filter(s=>s.archived), act=all.filter(s=>!s.archived);
+    $("#archCount").textContent=arch.length?("("+arch.length+")"):"";
+    document.querySelectorAll(".stbl th[data-k]").forEach(th=>{
+      th.textContent=th.textContent.replace(/ [↑↓]$/,"")+(th.dataset.k===this.sortK?(this.sortDir<0?" ↓":" ↑"):"");});
+    let rows=(this.tab==="archive")?arch:act;
+    const k=this.sortK,dir=this.sortDir;
+    rows=rows.slice().sort((a,b)=>{let va,vb;
+      if(k==="title"){va=String(a.title||a.sid).toLowerCase();vb=String(b.title||b.sid).toLowerCase();}
+      else if(k==="model"){va=String(a.model||"")+String(a.effort||"");vb=String(b.model||"")+String(b.effort||"");}
+      else if(k==="warm"){va=(a.warm?2:0)-(a.paused?1:0);vb=(b.warm?2:0)-(b.paused?1:0);}
+      else{va=a[k]||0;vb=b[k]||0;}
+      return (va<vb?-1:va>vb?1:0)*dir;});
+    if(!rows.length){
+      tb.innerHTML=`<tr><td colspan="6" class="t-mut" style="text-align:center;padding:26px;cursor:default">${
+        this.tab==="archive"?"Archiv ist leer.":"Keine aktiven Sessions — oben „＋ Neue Session“ drücken."}</td></tr>`;
+      return;}
+    const _tblHtml=rows.map(s=>{
+      if(s.voice){
+        const vst=s.warm?'<span class="st on">🎙 bereit</span>':'<span class="st">🎙 Assistent</span>';
+        return `<tr data-sid="${esc(s.sid)}">
+          <td><div class="t-title">${esc(s.title||s.sid)}${s.unread?`<span class="t-unread" data-a="seen" data-sid="${esc(s.sid)}" title="${s.unread} ungelesen — klicken: als gelesen markieren">${s.unread>99?'99+':s.unread}</span>`:''}</div><div class="t-sid">Sprachsteuerung · tägliche Sitzung</div></td>
+          <td title="Die Sprachsession bleibt immer warm — Aus/Archiv/Löschen gibt es hier bewusst nicht.">${vst}</td>
+          <td class="t-mut">${esc(this.brainLab(s))} · ${esc(this.effortLab(s.effort||"medium"))}</td>
+          <td>${this.resCell(s.res)}</td>
+          <td class="t-mut">${s.warm?"aktiv":"—"}</td>
+          <td><div class="t-act">
+            <button class="btn sm pri" data-a="open" data-sid="${esc(s.sid)}">Öffnen</button>
+            <button class="btn sm" data-a="screen" data-sid="${esc(s.sid)}" title="Den laufenden Desktop dieser Session öffnen — läuft keiner, sagt die Box das ehrlich">🖥 Desktop</button>
+            <button class="btn sm" data-a="equip" data-sid="${esc(s.sid)}" title="Rechte & Ausstattung — wirken sofort auf das laufende Gespräch">🛡 Rechte &amp; Ausst.</button>
+          </div></td></tr>`;
+      }
+      const st=s.warm?(s.paused?'<span class="st frozen">⏸ eingefroren</span>':'<span class="st on">● microVM läuft</span>')
+                     :'<span class="st">○ aus</span>';
+      const me=s.provisioned
+        ?`${esc(this.brainLab(s))} · ${esc(this.effortLab(s.effort||"medium"))}`
+        :'<span style="color:var(--warn)">nicht ausgestattet</span>';
+      const marks=(s.vpn?" 🔒":"")+(s.kept?" 📌":"");
+      const arc=this.tab==="archive"
+        ?`<button class="btn sm" data-a="rest" data-sid="${esc(s.sid)}">↩ Wiederherstellen</button>`
+        :`<button class="btn sm ghost" data-a="arch" data-sid="${esc(s.sid)}" title="Ins Archiv — nichts wird gelöscht">🗄</button>`;
+      const pwr=s.warm
+        ?`<button class="btn sm" data-a="off" data-sid="${esc(s.sid)}" title="microVM herunterfahren — CPU + RAM werden frei, Verlauf bleibt (Wiederaufnahme beim nächsten Start)">⏻ Aus</button>`
+        :`<button class="btn sm" data-a="on" data-sid="${esc(s.sid)}" title="microVM hochfahren — Gespräch läuft weiter">▶ An</button>`;
+      return `<tr data-sid="${esc(s.sid)}">
+        <td><div class="t-title">${esc(s.title||s.sid)}${s.unread?`<span class="t-unread" data-a="seen" data-sid="${esc(s.sid)}" title="${s.unread} ungelesen — klicken: als gelesen markieren">${s.unread>99?'99+':s.unread}</span>`:''}${marks}</div><div class="t-sid">${esc(s.sid)}</div></td>
+        <td>${st}</td><td class="t-mut">${me}</td>
+        <td>${this.resCell(s.res)}</td>
+        <td class="t-mut" title="${s.last_active?new Date(s.last_active*1000).toLocaleString("de-DE"):""}">${s.warm?"aktiv":esc(rel(s.last_active))}</td>
+        <td><div class="t-act">
+          <button class="btn sm pri" data-a="open" data-sid="${esc(s.sid)}">Öffnen</button>
+          <button class="btn sm" data-a="screen" data-sid="${esc(s.sid)}" title="Den laufenden Desktop dieser Session in einem neuen Tab öffnen — läuft keiner, sagt die Box das ehrlich">🖥 Desktop</button>
+          <button class="btn sm" data-a="equip" data-sid="${esc(s.sid)}" title="Rechte & Ausstattung dieser Session bearbeiten">🛡 Rechte &amp; Ausst.</button>
+          ${pwr}
+          ${arc}
+          <button class="btn sm danger" data-a="kill" data-sid="${esc(s.sid)}" title="Löschen (weg = weg: VM + Disk + aus Liste)">🗑</button>
+        </div></td></tr>`;}).join("");
+
+    if(_tblHtml===this._tblSig)return;
+    if(tb.matches&&tb.matches(":hover"))return;
+    this._tblSig=_tblHtml;
+    tb.innerHTML=_tblHtml;
+    tb.querySelectorAll("tr[data-sid]").forEach(tr=>tr.onclick=()=>this.select(tr.dataset.sid));
+    tb.querySelectorAll("[data-a]").forEach(b=>b.onclick=e=>{e.stopPropagation();
+      const sid=b.dataset.sid,a=b.dataset.a;
+      if(a==="open")this.select(sid);
+      else if(a==="arch")this.archive(sid,true);
+      else if(a==="rest")this.archive(sid,false);
+      else if(a==="on")this.powerSession(sid,true);
+      else if(a==="off")this.powerSession(sid,false);
+      else if(a==="screen")this.showScreen(sid);
+      else if(a==="equip"){const sx=this.session(sid);
+        if(sx&&sx.voice){this.select(sid);this.openRights();}
+        else this.openWizard(sid);}
+      else if(a==="kill")this.killSession(sid);
+      else if(a==="seen")this.markRead(sid);});
+  },
+
+  resCell(r){
+    if(!r||!r.running)return '<span class="t-mut" style="color:var(--faint)">—</span>';
+    const bar=(pct,warn)=>{const p=Math.max(0,Math.min(100,pct||0));
+      const col=p>=90?"var(--danger)":(p>=70?"var(--warn)":"var(--ok)");
+      return `<span class="rbar" title="${warn||''}"><i style="width:${p}%;background:${col}"></i></span>`;};
+    const line=(lab,abs,pa,pm)=>`<div class="rrow"><span class="rlab">${lab}</span>`+
+      `<span class="rabs">${abs}</span>`+(pa!=null?`<span class="rpa">${pa}%</span>${bar(pa)}`:'')+
+      (pm!=null?`<span class="rpm" title="Anteil der ganzen Maschine">· ${pm}% <span class="ru">Masch.</span></span>`:'')+`</div>`;
+    const gb=v=>v>=1024?(v/1024).toFixed(1)+" GB":v+" MB";
+    let h='<div class="rcell">';
+    if(r.ram_mb!=null)h+=line("RAM", gb(r.ram_mb)+(r.ram_alloc_mb?" / "+gb(r.ram_alloc_mb):""), r.ram_pct_alloc, r.ram_pct_machine);
+    if(r.cpu_pct_core!=null)h+=line("CPU", r.cpu_pct_core+'% <span class="ru">Kern</span>', null, r.cpu_pct_machine);
+    else h+='<div class="rrow"><span class="rlab">CPU</span><span class="rabs t-mut" style="color:var(--faint)">misst…</span></div>';
+    if(r.disk_mb!=null)h+=line("Disk", gb(r.disk_mb)+(r.disk_cap_mb?" / "+gb(r.disk_cap_mb):""), r.disk_pct_alloc, r.disk_pct_machine);
+    return h+'</div>';
+  },
+  async showScreen(sid){
+
+    const st=await jget("/api/session/desktop?sid="+encodeURIComponent(sid)).catch(()=>null)||{};
+    if(st.active&&st.cell){window.open("/vnc3?cell="+encodeURIComponent(st.cell),"_blank");return;}
+    toast("Diese Session hat keinen aktiven Desktop — 🖥 Desktop startet einen.");
+  },
+  async archive(sid,on){
+    if(!sid)return;
+    const r=await jpost("/api/session/archive",{sid,on:!!on});
+    if(!(r&&r.ok)){toast((r&&r.error)||"Fehler",true);return;}
+    if(on&&this.sel===sid){this.sel=null;this.showTable();}
+    await this.refresh(false);
+    toast(on?"🗄 Archiviert — unter „Archiv“ weiterhin einsehbar":"↩ Wiederhergestellt");
+  },
+  async archiveAll(){
+    const act=((this.board&&this.board.sessions)||[]).filter(s=>!s.archived);
+    const old=act.filter(s=>!s.warm);
+    if(!old.length){toast("Nichts zu archivieren — alle übrigen Sessions laufen gerade");return;}
+    const stay=act.length-old.length;
+    if(!confirm(`${old.length} alte Session(s) ins Archiv verschieben${stay?` (${stay} laufende bleiben)`:""}?\n\nNichts wird gelöscht — alles bleibt unter „Archiv“ einsehbar und wiederherstellbar.`))return;
+    for(const s of old){try{await jpost("/api/session/archive",{sid:s.sid,on:true});}catch(e){}}
+    if(this.sel&&old.some(s=>s.sid===this.sel))this.sel=null;
+    await this.refresh(false);this.showTable();
+    toast(`🧹 ${old.length} Session(s) archiviert`);
+  },
+
+  openSession(sid){ if(!sid)return; this.select(sid); },
+  async openRights(){
+    if(!this.sel)return;
+    const s=this.session(this.sel)||{};
+    const voice=!!s.voice; this._rightsVoice=voice;
+    $("#rTitle").textContent=voice?"🛡 Rechte — Sprach-Assistent":"🛡 Rechte anpassen";
+    this.buildSeg("#rPreset",this.presetOpts(),this.presetCur(s.preset),"rpreset");
+
+    let caps={}; this._rightsPol={};
+    const kind=voice?"voice":"cockpit", psid=voice?"default":this.sel;
+    try{const r=await jget("/api/policy?kind="+kind+"&sid="+encodeURIComponent(psid));this._rightsPol=(r&&r.policy)||{};caps=(this._rightsPol.caps)||{};}catch(e){}
+    $("#rNet").checked=(caps.net_general==="allow");
+    $("#rInternal").checked=(caps.net_internal==="allow");
+    $("#rWs").checked=(caps.websearch!=="deny");
+    $("#rWf").checked=(caps.webfetch!=="deny");
+    $("#rDev").checked=(caps.device_connect==="allow");
+    $("#rOrch").checked=voice?true:!!s.orchestrator;
+    $("#rOrch").disabled=voice;
+    $("#rOrchMax").value=s.max_concurrent||5;$("#rOrchMax").disabled=voice||!$("#rOrch").checked;
+    this._rightsSecretsVor=Array.isArray(caps.secrets)?caps.secrets.slice():[];
+    this.loadSecretsInto("#rSecrets","rsec",this._rightsSecretsVor);
+    $("#rGo").textContent=voice?"Übernehmen (sofort)":"Übernehmen (live)";
+    $("#rErr").textContent="";$("#rveil").classList.add("on");
+  },
+  async saveRights(){
+    const go=$("#rGo");go.disabled=true;
+    try{
+      const caps={net_general:$("#rNet").checked?"allow":"deny",net_internal:$("#rInternal").checked?"allow":"deny",
+        websearch:$("#rWs").checked?"allow":"deny",webfetch:$("#rWf").checked?"allow":"deny",
+        device_connect:$("#rDev").checked?"allow":"deny"};
+
+      const secBoxen=document.querySelectorAll("#rSecrets .rsec");
+      const secGeladen=!!$("#rSecrets") && ($("#rSecrets").querySelector("input")!==null);
+      let secNeu=null;
+      if(secGeladen){
+        secNeu=Array.from(secBoxen).filter(x=>x.checked).map(x=>x.value).filter(v=>v&&v!=="*");
+        caps.secrets=secNeu;
+      }
+      const vor=(this._rightsSecretsVor||[]).slice().sort().join("\u0000");
+      const nach=(secNeu||this._rightsSecretsVor||[]).slice().sort().join("\u0000");
+      const secGeaendert=(vor!==nach);
+      const wasDev=!!(this._rightsPol&&this._rightsPol.caps&&this._rightsPol.caps.device_connect==="allow");
+      if($("#rDev").checked && !wasDev) caps.devices=["*"];
+      if(this._rightsVoice){
+
+        const pol=Object.assign({},this._rightsPol||{});
+        pol.preset=$("#rPreset").dataset.val;
+        pol.caps=Object.assign({},pol.caps||{},caps);
+        const r=await jpost("/api/policy",{kind:"voice",sid:"default",policy:pol});
+        if(!(r&&r.ok)){$("#rErr").textContent=(r&&r.error)||"Fehler";go.disabled=false;return;}
+        $("#rveil").classList.remove("on");await this.refresh(false);
+        if(secGeaendert){
+
+          toast("🔐 Tresor-Freigaben geändert — Sprachzelle wird neu ausgestattet (Verlauf bleibt) …");
+          try{ const rq=await jpost("/api/voice/reequip",{});
+               toast((rq&&rq.ok)?"✅ Sprach-Assistent neu ausgestattet — Schlüssel sind jetzt in der Zelle"
+                                :"⚠️ "+((rq&&rq.error)||"Neustart der Sprachzelle fehlgeschlagen — die Freigabe greift beim nächsten Start"));
+          }catch(e){ toast("⚠️ Neustart der Sprachzelle nicht möglich — die Freigabe greift beim nächsten Start"); }
+        } else {
+          toast("✅ Sprach-Assistent: Rechte SOFORT wirksam — läuft weiter (Netz/Web/Geräte live; er erfährt es beim nächsten Zuruf)");
+        }
+      } else {
+        const r=await jpost("/api/session/provision",{sid:this.sel,preset:$("#rPreset").dataset.val,caps,restart:true,
+          orchestrator:$("#rOrch").checked,max_concurrent:(isNaN(parseInt($("#rOrchMax").value,10))?5:parseInt($("#rOrchMax").value,10))});
+        if(!r.ok){$("#rErr").textContent=r.error||"Fehler";go.disabled=false;return;}
+        $("#rveil").classList.remove("on");await this.refresh(false);
+        if(r.live_only){toast("✅ Netz-Rechte SOFORT wirksam — laufende Session, kein Neustart, Verlauf & Bildschirm bleiben");}
+        else{setTimeout(()=>this.connect(this.sel),700);toast("Rechte übernommen — dein Gespräch läuft weiter (Agent nur mit neuen Rechten neu gestartet, Verlauf bleibt)");}
+      }
+    }catch(e){$("#rErr").textContent="Fehler: "+e;}
+    go.disabled=false;
+  },
+
+  renderVpnCard(s){
+    const vc=$("#vpnCard");
+    vc.innerHTML=`<h4>🔒 VPN „${esc(s.vpn)}"</h4>
+      <div class="row">
+        <button class="btn sm pri" id="vpnGo">Verbinden</button>
+        <button class="btn sm" id="vpnStat">Status</button>
+        <button class="btn sm" id="vpnRestart" title="Baut die VPN-Verbindung und das Anmelde-Fenster neu auf — das meint Ciscos „please restart“.">🔄 Neu starten</button>
+        <button class="btn sm danger" id="vpnDown">Trennen</button>
+        <span id="vpnState" style="font-size:12.5px;color:var(--mut)"></span>
+      </div>
+      <div class="authurl" id="vpnUrl"></div>
+      <div class="vpnnote" id="vpnHint"></div>
+      ${s.vpn_cluster?`<div class="row" style="margin-top:8px;border-top:1px solid var(--line);padding-top:10px">
+        <button class="btn sm" id="hpcTerm" title="Interaktive SSH-Shell auf dem Rechen-Cluster (Login-Node) durch diesen VPN-Tunnel.">🖥 Cluster-Terminal</button>
+        <span style="font-size:12px;color:var(--faint)">Cluster-Shell durch den Tunnel</span>
+      </div>`:""}`;
+    $("#vpnGo").onclick=()=>this.vpnReq(s);
+    $("#vpnStat").onclick=()=>this.vpnStatus(s);
+    $("#vpnRestart").onclick=()=>this.vpnRestart(s);
+    $("#vpnDown").onclick=()=>this.vpnDown(s);
+    { const h=$("#hpcTerm"); if(h)h.onclick=()=>this.openHpcTerm(s); }
+    this.vpnStatus(s);
+  },
+  openHpcTerm(s){
+    $("#hveil").classList.add("on");
+    if(typeof Terminal==="undefined"){toast("xterm fehlt",true);return;}
+    if(!this.hterm){
+      this.hterm=new Terminal({fontSize:13,fontFamily:"'JetBrains Mono',ui-monospace,monospace",cursorBlink:true,
+        theme:{background:"#0b0e15",foreground:"#e8ecf5",cursor:"#8a7fff"}});
+      try{this.hfit=new FitAddon.FitAddon();this.hterm.loadAddon(this.hfit);}catch(e){}
+      this.hterm.open($("#hterm"));
+      this.hterm.onData(d=>{if(this.hws&&this.hws.readyState===1)this.hws.send(d);});
+      window.addEventListener("resize",()=>{if($("#hveil").classList.contains("on"))this.hFit();});
+    }
+    this.hterm.reset(); setTimeout(()=>this.hFit(),60);
+    if(this.hws){try{this.hws.onclose=null;this.hws.close();}catch(e){}}
+    const ws=new WebSocket(wsUrl("/ws/hpc")); ws.binaryType="arraybuffer"; this.hws=ws;
+    ws.onopen=()=>{this.hFit();this.hterm.focus();};
+    ws.onmessage=e=>{if(typeof e.data==="string")this.hterm.write(e.data);else this.hterm.write(new Uint8Array(e.data));};
+    ws.onclose=()=>{try{this.hterm.write("\r\n[Cluster-Terminal getrennt]\r\n");}catch(e){}};
+  },
+  hFit(){try{if(this.hfit){this.hfit.fit();if(this.hws&&this.hws.readyState===1)this.hws.send(JSON.stringify({t:"r",rows:this.hterm.rows,cols:this.hterm.cols}));}}catch(e){}},
+  closeHpcTerm(){$("#hveil").classList.remove("on");if(this.hws){try{this.hws.close();}catch(e){}this.hws=null;}},
+  async vpnReq(s){
+    $("#vpnState").textContent="verbinde…";
+    let r;try{r=await jpost("/api/vpn/request",{vpn:s.vpn,session:s.sid});}catch(e){$("#vpnState").textContent="Fehler";return;}
+    if(r.state==="forbidden"){$("#vpnHint").textContent="VPN-Start ist nur für den Owner im Heimnetz möglich.";$("#vpnState").textContent="gesperrt";return;}
+    if(r.state==="connected"){$("#vpnState").textContent="✓ verbunden";$("#vpnUrl").innerHTML="";return;}
+    if(r.stream_cell){
+      $("#vpnState").textContent="Login nötig (2FA)";
+      $("#vpnUrl").innerHTML=`<a href="/vnc3?cell=${encodeURIComponent(r.stream_cell)}" target="_blank" rel="noopener">🖥 Anmelde-Fenster öffnen</a>`;
+      $("#vpnHint").textContent="Bitte im Anmelde-Fenster anmelden, nicht in einem eigenen Browser-Tab — die 2FA-Bestätigung läuft dort.";
+    } else if(r.auth_url){
+      $("#vpnState").textContent="Login nötig (2FA)";
+      $("#vpnUrl").innerHTML=`<a href="${r.auth_url}" target="_blank" rel="noopener">🔗 SSO-Login öffnen (2FA)</a>`;
+      $("#vpnHint").textContent=r.note||"Hinweis: der Callback muss die VPN-netns erreichen.";
+    } else {$("#vpnState").textContent=r.error||"keine URL";}
+  },
+  async vpnStatus(s){
+    let r;try{r=await jget("/api/vpn/status?session="+encodeURIComponent(s.sid));}catch(e){return;}
+    const st=$("#vpnState");if(!st)return;
+    if(r.state==="connected")st.textContent="✓ verbunden";
+    else if(r.state==="auth_pending"){st.textContent="Login nötig";
+      if(r.stream_cell)$("#vpnUrl").innerHTML=`<a href="/vnc3?cell=${encodeURIComponent(r.stream_cell)}" target="_blank" rel="noopener">🖥 Anmelde-Fenster öffnen</a>`;
+      else if(r.auth_url)$("#vpnUrl").innerHTML=`<a href="${r.auth_url}" target="_blank" rel="noopener">🔗 SSO-Login öffnen (2FA)</a>`;}
+    else st.textContent="getrennt";
+  },
+  async vpnDown(s){await jpost("/api/vpn/cancel",{vpn:s.vpn,session:s.sid});$("#vpnState").textContent="getrennt";$("#vpnUrl").innerHTML="";},
+  async vpnRestart(s){$("#vpnState").textContent="setze zurück…";$("#vpnUrl").innerHTML="";
+    const r=await jpost("/api/vpn/restart",{vpn:s.vpn,session:s.sid});
+    if(r&&r.ok){$("#vpnState").textContent="✓ zurückgesetzt — jetzt neu „Verbinden“";toast("🔄 VPN-/Cisco-Stack zurückgesetzt");}
+    else{$("#vpnState").textContent="Fehler";toast((r&&r.error)||"Fehler");}},
+
+  openWizard(sid){
+    this.edit=sid||null;
+    const s=sid?this.session(sid):null;
+    $("#wizTitle").textContent=sid?"Ausstattung ändern":"Neue Session ausstatten";
+    $("#wizGo").textContent=sid?"Übernehmen":"Anlegen & Ausstatten";
+    $("#wName").value=s?(s.title||""):"";
+    $("#wName").parentElement.style.display=sid?"none":"";
+
+    this.buildSeg("#wRuntime",(this.runtimes||[]).map(r=>({id:r.id,label:r.label,sub:r.hint})),
+      (s&&s.runtime)||"claude-tmux","runtime",()=>{this.syncModelSeg();this.syncCodexNet();});
+    this.syncModelSeg((s&&s.model)||this.defModel());
+    this.buildSeg("#wEffort",this.efforts.map(m=>({id:m.id,label:m.label})),
+      (s&&s.effort)||"medium","effort",()=>this.updateGrant());
+    this.buildSeg("#wPreset",this.presetOpts(),
+      this.presetCur(s&&s.preset),"preset",()=>{this.applyPresetToggles();this.updateGrant();});
+
+    this.fillAutoSelect("#wAuto");
+    $("#wAuto").value=String(this.autoNorm((s&&s.autonomy!=null)?s.autonomy:this.autoDefault)); this.autoLab();
+    { const rb=$("#wResBlk"), isAdm=this.uservpn&&this.uservpn.is_admin;
+      if(rb){ rb.hidden=!isAdm;
+        if(isAdm){ const cur=(s&&s.res&&s.res.ram_alloc_mb)||1536; $("#wRam").value=cur;
+          $("#wResHint").innerHTML="Aktuell zugewiesen: <b>"+(cur>=1024?(cur/1024).toFixed(1)+" GB":cur+" MB")+"</b>. CPU &amp; Disk werden zentral geregelt (hier nicht änderbar)."; } } }
+    this.loadKits((s&&s.kits)||[]);
+
+    if(sid){
+      this.applyPresetToggles();
+      jget("/api/policy?kind=cockpit&sid="+encodeURIComponent(sid)).then(r=>{
+        const c=(r&&r.policy&&r.policy.caps)||{};
+        $("#cNet").checked=(c.net_general==="allow");
+        $("#cInternal").checked=(c.net_internal==="allow");
+        $("#cWs").checked=(c.websearch!=="deny");
+        $("#cWf").checked=(c.webfetch!=="deny");
+        this.loadSecrets(Array.isArray(c.secrets)?c.secrets:[]);
+        this.updateGrant();
+      }).catch(()=>{ this.loadSecrets([]); });
+    }else{
+      $("#cNet").checked=false;$("#cInternal").checked=false;$("#cWs").checked=true;$("#cWf").checked=true;
+      this.applyPresetToggles();
+      this.loadSecrets([]);
+    }
+
+    const vs=$("#wVpn");vs.innerHTML="";
+    const _allowed=(this.uservpn&&this.uservpn.allowed)||[];
+    const _avail=this.vpns.filter(v=>_allowed.includes(v.id));
+    _avail.forEach(v=>{const o=document.createElement("option");o.value=v.id;o.textContent=v.name;vs.appendChild(o);});
+    if(!_avail.length){const o=document.createElement("option");o.value="";o.textContent="— kein VPN freigeschaltet —";vs.appendChild(o);}
+    const on=!!(s&&s.vpn);$("#wVpnOn").checked=on;vs.disabled=!on;if(s&&s.vpn)vs.value=s.vpn;
+    this.vpnNote();
+    $("#wOrch").checked=!!(s&&s.orchestrator);
+    $("#wOrchMax").value=(s&&s.max_concurrent)||5;$("#wOrchMax").disabled=!(s&&s.orchestrator);
+    this.updateGrant();
+    $("#wizErr").textContent="";
+    $("#veil").classList.add("on");
+    if(!sid)setTimeout(()=>$("#wName").focus(),60);
+  },
+  closeWizard(){$("#veil").classList.remove("on");},
+  syncModelSeg(preferred){
+
+    const rt=($("#wRuntime").dataset.val)||"claude-tmux", ms=this.rtModels(rt), w=$("#wModel");
+    this.syncCodexNet();
+    if(ms&&ms.length){
+      const cur=(preferred&&ms.some(m=>m.id===preferred))?preferred:this.rtDefModel(rt,ms);
+      this.buildSeg("#wModel",ms.map(m=>({id:m.id,label:m.label,sub:m.hint})),cur,"model",()=>this.updateGrant());
+    }else if(w){
+      w.dataset.val="";
+      w.innerHTML='<span class="hint">Server-Standard (Vorgabe des verbundenen Kontos)</span>';
+    }
+    this.updateGrant();
+  },
+  syncCodexNet(){
+
+    const NET_ESSENTIAL={codex:"Codex",gemini:"Gemini"};
+    const rt=($("#wRuntime").dataset.val)||"claude-tmux";
+    const name=NET_ESSENTIAL[rt];
+    const net=$("#cNet"); if(!net)return;
+    let note=document.getElementById("codexNetNote");
+    if(!name){ if(note)note.remove(); this._codexAutoNet=false; return; }
+    if(!net.checked&&!this._codexAutoNet){ net.checked=true; this._codexAutoNet=true;
+      try{net.dispatchEvent(new Event("change"));}catch(e){} }
+    if(!note){
+      note=document.createElement("div"); note.id="codexNetNote"; note.className="hint";
+      const sw=net.closest("label")||net.parentElement;
+      if(sw&&sw.parentElement){sw.parentElement.insertBefore(note,sw.nextSibling);}
+      else{$("#wRuntime").appendChild(note);}
+    }
+    const upd=()=>{ note.textContent = net.checked
+      ? ("🌐 Für "+name+" ist Internet essentiell — Netz wurde mit aktiviert.")
+      : ("⚠️ Ohne Internet kann "+name+" NICHT antworten — bitte Netz einschalten.");
+      note.style.color = net.checked ? "" : "var(--warn,#e6a23c)"; };
+    upd();
+    if(!net._codexNote){ net._codexNote=true; net.addEventListener("change",upd); }
+  },
+  buildSeg(sel,items,cur,key,cb){
+    const wrap=$(sel);wrap.innerHTML="";wrap.dataset.val=cur;
+    items.forEach(it=>{
+      const b=document.createElement("button");b.className="opt"+(it.id===cur?" on":"");
+      b.innerHTML=it.sub?`${esc(it.label)}<small>${esc(it.sub)}</small>`:esc(it.label);
+      if(it.title)b.title=it.title;
+      b.onclick=()=>{wrap.dataset.val=it.id;[...wrap.children].forEach(c=>c.classList.remove("on"));b.classList.add("on");if(cb)cb();};
+      wrap.appendChild(b);
+    });
+  },
+  applyPresetToggles(){
+
+    const p=this.presetKey($("#wPreset").dataset.val);
+
+    const net = (p==="voll"||p==="erweitert");
+    const web = (p!=="minimal");
+    $("#cNet").checked=net; $("#cWs").checked=web; $("#cWf").checked=web;
+    if($("#cInternal"))$("#cInternal").checked=(p==="voll");
+  },
+  autoLab(){const l=$("#wAuto").value;$("#wAutoLab").innerHTML=`<b>${esc(this.autoShort(l))}</b> · ${esc(this.autoExp(l))}`;},
+  vpnNote(){const on=$("#wVpnOn").checked,id=$("#wVpn").value;
+    $("#wVpnNote").textContent=on?("Diese Session bekommt einen eigenen Tunnel über "+id+". Beim ersten Verbinden erscheint hier die Login-Seite (2FA)."):"";},
+  updateGrant(){
+    const g=$("#wGrant");if(!g)return;
+    const _rt=($("#wRuntime").dataset.val)||"claude-tmux", _mv=$("#wModel").dataset.val,
+          model=_mv?this.modelLabFor(_rt,_mv):"Server-Standard",
+          eff=this.effortLab($("#wEffort").dataset.val||"medium"),
+          l=$("#wAuto").value, autoL=this.autoShort(l),
+          net=$("#cNet").checked,ws=$("#cWs").checked,wf=$("#cWf").checked,
+          vpnOn=$("#wVpnOn").checked,vpn=vpnOn?($("#wVpn").value||"—"):null;
+    const kann=[];if(net)kann.push("Internet");if(ws)kann.push("Websuche");if(wf)kann.push("Webseiten abrufen");
+    const nicht=[];if(!net)nicht.push("kein allg. Internet");if(!ws)nicht.push("keine Websuche");if(!wf)nicht.push("kein Webfetch");
+    const kits=this.kitsChosen?this.kitsChosen():[];
+    g.innerHTML=`<div class="grant-h">Diese Session bekommt</div>
+      <div class="grant-row">
+        <span class="chip acc">🧠 ${esc(model)}</span>
+        <span class="chip">⚡ ${esc(eff)}</span>
+        <span class="chip">🎚 ${esc(autoL)}</span>
+        <span class="chip ${vpn?'vpn':''}">🔒 ${vpn?esc(vpn):"kein VPN"}</span>
+        ${kits.map(k=>`<span class="chip">🧰 ${esc(k)}</span>`).join("")}
+      </div>
+      <div class="grant-line"><b>Darf:</b> ${kann.length?esc(kann.join(", ")):"Basis (lesen/arbeiten laut Autonomie)"}${nicht.length?` &nbsp;·&nbsp; <b>Nicht:</b> ${esc(nicht.join(", "))}`:""}</div>`;
+  },
+
+  async loadKits(selected){
+
+    const box=$("#wKits"); if(!box)return;
+    const sel=new Set((selected||[]).map(String));
+    this._kitsReady=false;
+    box.innerHTML='<span class="hint">lädt …</span>';
+    try{
+      if(!this._kitcat){
+        const r=await jget("/api/store/catalog");
+        this._kitcat=(r&&r.ok)?(r.kits||{}):{};
+        try{ const c=await jget("/api/store/cards"); this._kitcards=(c&&c.cards)||{}; }catch(e){ this._kitcards={}; }
+      }
+      const ids=Object.keys(this._kitcat).filter(k=>this._kitcat[k].installed||this._kitcat[k].discovered).sort();
+      if(!ids.length){ this._kitsReady=true; box.innerHTML='<span class="hint">Noch keine Kiste gebaut — im Reiter <b>Software</b> anlegen.</span>'; return; }
+      box.innerHTML=ids.map(k=>{
+        const kit=this._kitcat[k]||{}, card=(this._kitcards||{})[k];
+        const progs=card?(((card.manual||{}).programs)||[]):[];
+        const names=progs.map(p=>String(p.name||"")).filter(Boolean);
+        const sub=names.length?names.slice(0,7).join(", ")+(names.length>7?" …":"")
+                              :(kit.zweck||kit.purpose||(kit.primary||[]).join(", ")||"");
+        const ck=sel.has(k)?" checked":"";
+        return '<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer">'
+             + '<input type="checkbox" class="wkit" value="'+esc(k)+'"'+ck+' style="margin-top:3px">'
+             + '<span><b>'+esc(k)+'</b>'+(names.length?' <span class="hint">('+names.length+' Programme)</span>':'')
+             + (sub?'<br><span class="hint">'+esc(sub)+'</span>':'')+'</span></label>';
+      }).join("");
+      box.querySelectorAll(".wkit").forEach(c=>c.onchange=()=>this.updateGrant());
+      this._kitsReady=true;
+      this.updateGrant();
+    }catch(e){ box.innerHTML='<span class="hint">Software-Regal nicht erreichbar.</span>'; }
+  },
+  kitsChosen(){ return Array.from(document.querySelectorAll("#wKits .wkit:checked")).map(x=>x.value); },
+
+  async loadSecretsInto(boxSel, cls, selected){
+
+    const box=$(boxSel); if(!box)return;
+    const sel=new Set((selected||[]).map(String));
+    box.innerHTML='<span class="hint">lädt …</span>';
+    try{
+      const r=await jget("/api/secrets/list");
+      const list=(r&&r.secrets)||[];
+      if(!list.length){ box.innerHTML='<span class="hint">Keine Geheimnisse im Tresor — unter <b>Einstellungen → Tresor</b> anlegen (z. B. SSH-Schlüssel), dann hier freigeben.</span>'; return; }
+      box.innerHTML=list.map(it=>{
+        const nm=esc(String(it.name||it)); const kd=esc(String(it.kind||""));
+        const ck=sel.has(String(it.name||it))?" checked":"";
+        return '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" class="'+cls+'" value="'+nm+'"'+ck+'><span>'+nm+(kd?' <span class="hint">('+kd+')</span>':'')+'</span></label>';
+      }).join("");
+    }catch(e){ box.innerHTML='<span class="hint">Tresor nicht erreichbar.</span>'; }
+  },
+
+  async loadSecrets(selected){
+
+    return this.loadSecretsInto("#wSecrets","wsec",selected);
+  },
+
+  async submitWizard(){
+    const err=$("#wizErr");err.textContent="";
+    const go=$("#wizGo");go.disabled=true;
+    try{
+      const model=$("#wModel").dataset.val, effort=$("#wEffort").dataset.val,
+            preset=$("#wPreset").dataset.val, autonomy=parseInt($("#wAuto").value,10),
+            vpnOn=$("#wVpnOn").checked, vpn=vpnOn?($("#wVpn").value||null):null;
+      const caps={net_general:$("#cNet").checked?"allow":"deny",
+                  net_internal:$("#cInternal").checked?"allow":"deny",
+                  websearch:$("#cWs").checked?"allow":"deny",
+                  webfetch:$("#cWf").checked?"allow":"deny"};
+      caps.secrets=Array.from(document.querySelectorAll("#wSecrets .wsec:checked")).map(x=>x.value).filter(v=>v&&v!=="*");
+      { const isAdm=this.uservpn&&this.uservpn.is_admin, _rv=parseInt((($("#wRam")||{}).value),10);
+        if(isAdm && _rv && _rv>=512) caps.mem_mb=Math.min(_rv,65536); }
+      let sid=this.edit;
+      if(!sid){
+        const name=$("#wName").value.trim()||"Neue Session";
+        const n=await jpost("/api/sessions/new",{title:name});
+        if(!n.ok||!(n.session&&n.session.id)){err.textContent=n.error||"Anlegen fehlgeschlagen";go.disabled=false;return;}
+        sid=n.session.id;
+      }
+      const body={sid,model:model||undefined,effort,autonomy,preset,caps,vpn,
+        runtime:($("#wRuntime").dataset.val||"claude-tmux"),
+        orchestrator:$("#wOrch").checked,max_concurrent:(isNaN(parseInt($("#wOrchMax").value,10))?5:parseInt($("#wOrchMax").value,10))};
+
+      if(this._kitsReady)body.kits=this.kitsChosen();
+      if(this.edit)body.restart=true;
+      const r=await jpost("/api/session/provision",body);
+      if(!r.ok){err.textContent=r.error||"Ausstatten fehlgeschlagen";go.disabled=false;return;}
+
+      if(r.kits_unknown&&r.kits_unknown.length)toast("Nicht ausgestattet (nicht gebaut): "+r.kits_unknown.join(", "));
+      this.closeWizard();
+      await this.refresh(false);
+      this.select(sid);
+      if(this.edit)setTimeout(()=>this.connect(sid),700);
+      toast(this.edit?"Ausstattung übernommen — Verlauf bleibt, Agent nur neu gestartet":"Session angelegt & ausgestattet");
+    }catch(e){err.textContent="Fehler: "+e;}
+    go.disabled=false;
+  },
+
+  setMode(m){
+    this.mode=m;
+    document.querySelectorAll(".mt").forEach(b=>b.classList.toggle("on",b.dataset.mode===m));
+    const meta=(m==="meta");
+    { const sh=document.querySelector(".shell"); if(sh)sh.classList.toggle("meta",meta); }
+    { const vp=$("#vpnPanel"); if(vp)vp.hidden = meta || !(this.uservpn&&this.uservpn.is_admin); }
+    $("#list").hidden=meta; $("#mlist").hidden=!meta;
+    $("#newBtn").hidden=meta;
+    $("#sideSub").innerHTML=meta?"Ein Dauerjob verteilt eine Aufgabenliste auf viele Agenten — höchstens N gleichzeitig, der Rest wartet.":"Jede Session wird zuerst <b>ausgestattet</b> — Modell, Autonomie, Rechte, VPN — und dann bearbeitet.";
+    $("#ws").hidden=true; $("#wsMeta").hidden=true; $("#tblView").hidden=true;
+    if(meta){ $("#wsEmpty").hidden=true; $("#metaEmpty").hidden=!!this.msel; this.refreshMeta(true); if(this.msel)this.selectMeta(this.msel); }
+    else { $("#metaEmpty").hidden=true; if(this.sel){$("#wsEmpty").hidden=true;$("#ws").hidden=false;}else{this.showTable();} }
+  },
+  async refreshMeta(first){
+    let d;try{d=await jget("/api/metasessions");}catch(e){return;}
+    if(!d||!d.ok)return;
+    this.metas=d.metasessions||[];
+    if(this.mode==="meta")this.renderMetaList();
+  },
+  renderMetaList(){
+    const el=$("#mlist");let html="";
+    if(!this.metas.length){html+='<div class="empty">Noch kein Dauerjob — oben „＋" drücken.</div>';el.innerHTML=html;this.wireGrant();return;}
+    this.metas.forEach(m=>{
+      const c=m.counts||{},tot=m.total||0,pct=x=>tot?Math.round(100*x/tot):0;
+      html+=`<div class="mcard ${m.id===this.msel?'sel':''}" data-id="${m.id}">
+        <div class="top"><span class="nm">${esc(m.title)}</span>
+        <span class="pill ${m.state==='running'?'run':(m.state==='paused'?'pause':'')}">${esc(m.state)}</span></div>
+        <div class="mbar"><i class="d" style="width:${pct(c.done||0)}%"></i><i class="r" style="width:${pct(c.running||0)}%"></i><i class="e" style="width:${pct(c.error||0)}%"></i></div>
+        <div class="ct"><span>▶ ${c.running||0}/${m.max_concurrent}</span><span>⏳ ${c.pending||0}</span><span>✓ ${c.done||0}</span>${c.error?`<span style="color:var(--danger)">✕ ${c.error}</span>`:''}${m.template&&m.template.vpn?`<span>🔒 ${esc(m.template.vpn)}</span>`:''}</div></div>`;
+    });
+    el.innerHTML=html;
+    el.querySelectorAll(".mcard").forEach(c=>c.onclick=()=>this.selectMeta(c.dataset.id));
+    this.wireGrant();this.wireVpnTunnels();
+  },
+  vpnTunnelHtml(){
+    const vpns=((this.uservpn||{}).vpns||[]).filter(v=>v.backend==="netns");
+    if(!vpns.length)return"";
+    return `<div class="gstrip"><h4>🔒 Account-VPN Tunnel <span class="hint" style="font-weight:400;color:var(--mut)">(Owner · Login am LAN)</span></h4>
+      <div id="vpnTunnels">${vpns.map(v=>`<div class="g-row" data-vpn="${esc(v.id)}" style="margin-bottom:2px">
+        <b style="min-width:70px">${esc(v.name)}</b>
+        <span class="vt-state" style="font-size:12px;color:var(--mut);flex:1">…</span>
+        <button class="btn sm pri vt-con">Verbinden</button>
+        <button class="btn sm vt-off">Trennen</button></div>
+        <div class="vt-url" style="font-size:11.5px;word-break:break-all;color:var(--acc);margin:2px 0 9px"></div>`).join("")}</div></div>`;
+  },
+  wireVpnTunnels(){
+    document.querySelectorAll("#vpnTunnels .g-row[data-vpn]").forEach(row=>{
+      const vpn=row.dataset.vpn;
+      row.querySelector(".vt-con").onclick=()=>this.vpnAccount(vpn,"request",row);
+      row.querySelector(".vt-off").onclick=()=>this.vpnAccount(vpn,"cancel",row);
+      this.vpnAccountStatus(vpn,row);
+    });
+  },
+  async vpnAccountStatus(vpn,row){
+    try{const r=await jget("/api/vpn/status");const st=row.querySelector(".vt-state");if(!st)return;
+      const active=(r.active||[]).includes(vpn);
+      st.textContent=active?"✓ verbunden":(r.auth_url?"Login nötig (2FA)":"getrennt");
+    }catch(e){}
+  },
+  async vpnAccount(vpn,action,row){
+    const st=row.querySelector(".vt-state"),url=row.nextElementSibling;
+    if(action==="cancel"){await jpost("/api/vpn/cancel",{vpn});st.textContent="getrennt";if(url)url.textContent="";toast("Tunnel getrennt");return;}
+    st.textContent="verbinde…";
+    let r;try{r=await jpost("/api/vpn/request",{vpn});}catch(e){st.textContent="Fehler";return;}
+    if(r.state==="forbidden"){st.textContent="nur Owner am LAN";if(url)url.textContent="VPN-Login ist nur vom Browser des Owners im Heimnetz möglich.";return;}
+    if(r.state==="connected"){st.textContent="✓ verbunden";if(url)url.textContent="";return;}
+    if(r.stream_cell){st.textContent="Login nötig (2FA)";
+      if(url)url.innerHTML=`<a href="/vnc3?cell=${encodeURIComponent(r.stream_cell)}" target="_blank" rel="noopener">🖥 Anmelde-Fenster öffnen</a> — bitte <b>dort</b> anmelden, nicht in einem eigenen Browser-Tab: die 2FA-Bestätigung läuft dort. Danach verbindet sich das VPN automatisch; nach ~24 h erneut „Verbinden".`;}
+    else if(r.auth_url){st.textContent="Login nötig (2FA)";
+      if(url)url.innerHTML=`<a href="${r.auth_url}" target="_blank" rel="noopener">🔗 SSO-Login öffnen (2FA)</a> — Hinweis: der Callback muss die VPN-netns erreichen.`;}
+    else st.textContent=r.error||"keine URL";
+  },
+  async selectMeta(id,keep){
+    this.msel=id;
+    $("#metaEmpty").hidden=true; $("#wsMeta").hidden=false; $("#ws").hidden=true; $("#wsEmpty").hidden=true;
+    document.querySelectorAll(".mcard").forEach(c=>c.classList.toggle("sel",c.dataset.id===id));
+    let d;try{d=await jget("/api/metasession/"+id);}catch(e){return;}
+    if(!d||!d.ok){$("#wsMeta").innerHTML='<div class="empty">nicht gefunden.</div>';this.msel=null;return;}
+    const t=d.template||{},c=d.counts||{};
+    const chips=[`<span class="chip acc">🧠 ${esc(this.modelLab(t.model||this.defMetaModel()))}</span>`,
+      `<span class="chip">⚡ ${esc(this.effortLab(t.effort||'medium'))}</span>`,
+      `<span class="chip">🎚 ${esc(this.autoShort(t.autonomy!=null?t.autonomy:this.autoDefault))}</span>`,
+      `<span class="chip" title="${esc(this.presetDesc(t.preset||this.presetDefault))}">🛡 ${esc(this.presetLab(t.preset||this.presetDefault))}</span>`,
+      `<span class="chip ${t.vpn?'vpn':''}">🔒 ${t.vpn?esc(t.vpn):'kein VPN'}</span>`,
+      `<span class="chip">⚙ max ${d.max_concurrent}</span>`].join("");
+    const rows=(d.tasks||[]).map(tk=>`<div class="mrow">
+        <span class="tp" title="${esc(tk.prompt)}">${esc(tk.prompt)}${tk.result?` <span style="color:var(--mut)">— ${esc(tk.result)}</span>`:(tk.error?` <span style="color:var(--danger)">— ${esc(tk.error)}</span>`:'')}</span>
+        ${tk.sid?`<button class="btn sm ghost" data-open="${esc(tk.sid)}">↗</button>`:''}
+        <span class="ts ${esc(tk.state)}">${esc(tk.state)}</span></div>`).join("")||'<div class="empty">noch keine Aufgaben</div>';
+    const paused=d.state==="paused";
+    $("#wsMeta").innerHTML=`<div class="ws-title" style="margin-bottom:8px">
+      <h2>${esc(d.title)}</h2><span class="stat ${d.state==='running'?'on':''}">${esc(d.state)}</span>
+      <div class="ws-actions">${d.lead_sid?`<button class="btn sm pri" id="mLead">🧠 Mit Lead-Agent planen</button>`:''}
+      <button class="btn sm" id="mPause">${paused?'▶ Fortsetzen':'⏸ Pausieren'}</button>
+      <button class="btn sm danger" id="mDel">🗑 Löschen</button></div></div>
+      <div class="equip" style="margin-bottom:12px">${chips}</div>
+      <div class="ct" style="color:var(--mut);font-size:12.5px;margin-bottom:6px">▶ ${c.running||0} laufen · ⏳ ${c.pending||0} warten · ✓ ${c.done||0} fertig${c.error?` · ✕ ${c.error} Fehler`:''}</div>
+      <div class="addtask"><input id="mAddInput" placeholder="Aufgabe nachreichen … (Enter)" autocomplete="off"><button class="btn pri" id="mAddBtn">＋ Aufgabe</button></div>
+      <div>${rows}</div>`;
+    $("#mPause").onclick=()=>this.metaCtl(paused?"resume":"pause");
+    $("#mDel").onclick=()=>this.metaDel();
+    $("#mAddBtn").onclick=()=>this.metaAdd();
+    $("#mAddInput").onkeydown=e=>{if(e.key==="Enter")this.metaAdd();};
+    if(d.lead_sid&&$("#mLead"))$("#mLead").onclick=()=>this.openSession(d.lead_sid);
+    $("#wsMeta").querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>this.openSession(b.dataset.open));
+    if(!this._mpoll)this._mpoll=setInterval(()=>{if(this.mode==="meta"&&this.msel)this.selectMeta(this.msel,true);},5000);
+  },
+  async metaCtl(a){await jpost("/api/metasession/"+this.msel+"/"+a,{});await this.refreshMeta();this.selectMeta(this.msel,true);},
+  async metaDel(){if(!confirm("Dauerjob löschen? Laufende Teil-Agenten werden gestoppt."))return;
+    await jpost("/api/metasession/"+this.msel+"/delete",{});this.msel=null;$("#wsMeta").hidden=true;$("#metaEmpty").hidden=false;await this.refreshMeta();toast("Gelöscht");},
+  async metaAdd(){const i=$("#mAddInput"),t=(i.value||"").trim();if(!t)return;
+    await jpost("/api/metasession/"+this.msel+"/tasks",{tasks:[t]});i.value="";this.selectMeta(this.msel,true);toast("Aufgabe hinzugefügt");},
+  openMetaWizard(){
+    if(this.mode!=="meta")this.setMode("meta");
+    $("#mName").value="";$("#mMax").value="5";$("#mTasks").value="";
+    this.buildSeg("#mModel",this.models.map(m=>({id:m.id,label:m.label,sub:m.hint})),this.defMetaModel(),"mmodel");
+    this.buildSeg("#mEffort",this.efforts.map(m=>({id:m.id,label:m.label})),"medium","meffort");
+    this.buildSeg("#mPreset",this.presetOpts(),this.presetDefault,"mpreset");
+    this.fillAutoSelect("#mAuto");$("#mAuto").value=String(this.autoDefault);this.mAutoLab();
+    const vs=$("#mVpn");vs.innerHTML="";
+    const allowed=(this.uservpn&&this.uservpn.allowed)||[];
+    const avail=this.vpns.filter(v=>allowed.includes(v.id));
+    avail.forEach(v=>{const o=document.createElement("option");o.value=v.id;o.textContent=v.name;vs.appendChild(o);});
+    if(!avail.length){const o=document.createElement("option");o.value="";o.textContent="— kein VPN freigeschaltet —";vs.appendChild(o);}
+    $("#mVpnOn").checked=false;vs.disabled=true;$("#mVpnNote").textContent="";
+    $("#mwizErr").textContent="";$("#mveil").classList.add("on");setTimeout(()=>$("#mName").focus(),60);
+  },
+  mAutoLab(){const l=$("#mAuto").value;$("#mAutoLab").innerHTML=`<b>${esc(this.autoShort(l))}</b> · ${esc(this.autoExp(l))}`;},
+  async submitMetaWizard(){
+    const err=$("#mwizErr");err.textContent="";const go=$("#mwizGo");go.disabled=true;
+    try{
+      const tasks=$("#mTasks").value.split("\n").map(s=>s.trim()).filter(Boolean);
+      const body={title:$("#mName").value.trim()||"Dauerjob",max_concurrent:parseInt($("#mMax").value,10)||5,
+        template:{model:$("#mModel").dataset.val,effort:$("#mEffort").dataset.val,autonomy:parseInt($("#mAuto").value,10),
+          preset:$("#mPreset").dataset.val,vpn:$("#mVpnOn").checked?($("#mVpn").value||null):null},tasks};
+      const r=await jpost("/api/metasession",body);
+      if(!r.ok){err.textContent=r.error||"Fehler";go.disabled=false;return;}
+      $("#mveil").classList.remove("on");await this.refreshMeta();this.selectMeta(r.id);toast("Dauerjob gestartet");
+    }catch(e){err.textContent="Fehler: "+e;}
+    go.disabled=false;
+  },
+  grantStripHtml(){
+    const uv=this.uservpn||{},users=uv.users||[],vpns=uv.vpns||[],grants=uv.grants||{};
+    let gl="";Object.keys(grants).forEach(u=>{if((grants[u]||[]).length)gl+=`<div>${esc(u)}: 🔒 ${grants[u].map(esc).join(", ")}</div>`;});
+    return `<div class="gstrip"><h4>🔑 VPN pro Nutzer freischalten <span class="hint" style="font-weight:400;color:var(--mut)">(Owner)</span></h4>
+      <div class="g-row">
+        <select id="gUser">${(users.length?users:["owner"]).map(u=>`<option>${esc(u)}</option>`).join("")}</select>
+        <select id="gVpn">${vpns.map(v=>`<option value="${esc(v.id)}">${esc(v.name)}</option>`).join("")}</select>
+        <button class="btn sm pri" id="gOn">Freischalten</button>
+        <button class="btn sm" id="gOff">Entziehen</button></div>
+      <div class="glist">${gl||"— noch keine Freischaltungen —"}</div></div>`;
+  },
+  wireGrant(){
+    const on=$("#gOn"),off=$("#gOff");if(!on)return;
+    const set=async(en)=>{const uid=$("#gUser").value,vpn=$("#gVpn").value;if(!uid||!vpn)return;
+      await jpost("/api/admin/user-vpn",{uid,vpn,enabled:en});
+      try{this.uservpn=await jget("/api/uservpn");}catch(e){}
+      this.renderOwnerStrips();toast(en?"Freigeschaltet":"Entzogen");};
+    on.onclick=()=>set(true);off.onclick=()=>set(false);
+  },
+};
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+const THOUGHTS={
+  notes:[],open:null,showAll:false,pending:null,
+  async boot(){ const inp=$("#thInput"); if(!inp)return;
+    inp.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();this.add();} });
+    await this.refresh(); setInterval(()=>this.refresh(),20000); },
+  async refresh(){ try{ const d=await jget("/api/thoughts"); if(d&&d.ok){this.notes=d.notes||[];this.render();} }catch(e){} },
+  bump(){ [4000,12000,30000].forEach(t=>setTimeout(()=>this.refresh(),t)); },
+  async add(){ const inp=$("#thInput"),t=inp.value.trim(); if(!t)return; inp.value=""; inp.focus();
+    try{ await jpost("/api/thoughts",{text:t}); }catch(e){} this.refresh(); },
+  async refine(id,hint){ try{ await jpost("/api/thoughts/refine",{id,hint:hint||""}); }catch(e){} this.refresh(); this.bump(); },
+  async discard(id){ try{ await jpost("/api/thoughts/update",{id,action:"discard"}); }catch(e){} if(this.open===id)this.open=null; this.refresh(); },
+  async saveEdit(id,val){ try{ await jpost("/api/thoughts/update",{id,action:"set_prompt",prompt:val}); }catch(e){} },
+  async spawn(id){ const n=this.notes.find(x=>x.id===id); if(!n)return;
+    const title=((n.refined&&n.refined.title)||n.raw_text||"Gedanke").slice(0,60);
+    let r; try{ r=await jpost("/api/sessions/new",{title}); }catch(e){ toast("Anlegen fehlgeschlagen"); return; }
+    if(!(r&&r.ok&&r.session&&r.session.id)){ toast((r&&r.error)||"Anlegen fehlgeschlagen"); return; }
+    const sid=r.session.id;
+    await jpost("/api/thoughts/update",{id,action:"mark_spawned",sid});
+    this.open=null; this.pending={id,sid};
+    toast("Session angelegt - jetzt ausstatten; der Auftrag folgt automatisch");
+    APP.openWizard(sid);
+    this.watchSpawn(); this.refresh(); },
+  async watchSpawn(){ const p=this.pending; if(!p)return;
+    for(let i=0;i<100;i++){ await new Promise(r=>setTimeout(r,3000));
+      if(!this.pending||this.pending.sid!==p.sid)return;
+      let r; try{ r=await jpost("/api/thoughts/send",{id:p.id}); }catch(e){ continue; }
+      if(r&&r.ok){ toast("Auftrag an die Session uebergeben"); this.pending=null; this.refresh(); return; }
+      if(!(r&&r.retry)){ this.pending=null; this.refresh(); return; } }
+    this.pending=null; },
+  render(){ const host=$("#thList"); if(!host)return;
+    const vis=this.notes;
+    const c=$("#thCount"); if(c)c.textContent=vis.length?("("+vis.length+")"):"";
+    host.innerHTML="";
+    if(!vis.length){ host.innerHTML='<div class="thempty">Noch keine Gedanken - einfach oben eintippen.</div>'; return; }
+    const rows=this.showAll?vis:vis.slice(0,5);
+    for(const n of rows){
+      const d=document.createElement("div"); d.className="thnote";
+      const chip=n.state==="refining"?'<span class="thchip run">formuliert&hellip;</span>'
+        :n.state==="refined"?'<span class="thchip ok">ausformuliert</span>'
+        :n.state==="spawned"?('<span class="thchip sp">Session'+(n.sent?" &#10003;":"")+'</span>'):"";
+      d.innerHTML='<div class="throw"><span class="thraw" title="'+esc(n.raw_text)+'">'+esc(n.raw_text)+'</span>'+chip
+        +(n.state==="captured"?'<button class="btn sm" data-a="refine" title="Mit KI zu einem fertigen Auftrag ausformulieren">&#10024;</button>':"")
+        +(n.state==="refined"?'<button class="btn sm" data-a="open" title="Entwurf ansehen/bearbeiten">'+(this.open===n.id?"&#9652;":"&#9662;")+'</button>':"")
+        +(n.state==="spawned"&&!n.sent?'<button class="btn sm" data-a="send" title="Auftrag in die Session geben">&#128232;</button>':"")
+        +(n.state==="spawned"&&n.sid?'<button class="btn sm" data-a="goto" title="Zur Session">&#8594;</button>':"")
+        +'<button class="btn sm" data-a="discard" title="Verwerfen (kein Loeschen)">&#128465;</button></div>'
+        +(n.refine_error?'<div class="therr">'+esc(n.refine_error)+'</div>':"");
+      if(this.open===n.id&&n.refined){
+        const ed=document.createElement("div"); ed.className="thedit";
+        ed.innerHTML='<div class="thorig">Original bleibt erhalten: '+esc(n.raw_text)+'</div>'
+          +'<textarea class="thta"></textarea>'
+          +((n.refined.open_questions||[]).length?'<div class="thoq">Offene Fragen: '+esc((n.refined.open_questions||[]).join(" | "))+'</div>':"")
+          +'<div class="thbtns"><button class="btn pri sm" data-a="spawn">&#128640; Session starten</button>'
+          +'<button class="btn sm" data-a="reref">&#9851; Neu formulieren</button>'
+          +'<button class="btn sm" data-a="dropdraft">Entwurf verwerfen</button></div>';
+        const ta=ed.querySelector(".thta"); ta.value=n.refined.prompt||"";
+        ta.addEventListener("blur",()=>this.saveEdit(n.id,ta.value));
+        ed.querySelector('[data-a="spawn"]').onclick=async()=>{ await this.saveEdit(n.id,ta.value); this.spawn(n.id); };
+        ed.querySelector('[data-a="reref"]').onclick=()=>{ const h=window.prompt("Hinweis fuer die Neu-Formulierung (optional):")||""; this.refine(n.id,h); };
+        ed.querySelector('[data-a="dropdraft"]').onclick=()=>{ jpost("/api/thoughts/update",{id:n.id,action:"drop_draft"}).then(()=>{ this.open=null; this.refresh(); }); };
+        d.appendChild(ed);
+      }
+      d.querySelectorAll(".throw [data-a]").forEach(b=>{ const a=b.dataset.a;
+        b.onclick=()=>{ if(a==="refine")this.refine(n.id,"");
+          else if(a==="open"){ this.open=this.open===n.id?null:n.id; this.render(); }
+          else if(a==="discard")this.discard(n.id);
+          else if(a==="send")jpost("/api/thoughts/send",{id:n.id}).then(r=>{ toast(r&&r.ok?"Auftrag uebergeben":((r&&r.error)||"fehlgeschlagen")); this.refresh(); });
+          else if(a==="goto"&&n.sid)APP.select(n.sid); }; });
+      host.appendChild(d);
+    }
+    if(vis.length>5){ const m=document.createElement("button"); m.className="btn sm thmore";
+      m.textContent=this.showAll?"weniger anzeigen":("alle "+vis.length+" anzeigen");
+      m.onclick=()=>{ this.showAll=!this.showAll; this.render(); }; host.appendChild(m); }
+  },
+};
+APP.boot();
+THOUGHTS.boot();
+</script>
+</body>
+</html>

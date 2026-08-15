@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""pn-shutdown — orderly poweroff/reboot for a pn-init box (the appliance off-button).
+
+WHY: pn-init is PID1 (no systemd, no `shutdown`/`poweroff` binaries that talk to it). Before
+this helper the only "off" was the power cord, which risks corrupting SQLite DBs, the
+append-only provenance chain, cell delta images and the RAM-admission ledger.
+
+TWO PATHS, chosen by what the RUNNING PID1 can do — and we say which one we took (honesty):
+
+  [NEW]    /run/pn-init/shutdown.v2 present -> this pn-init performs the full orderly shutdown
+           itself (SIGTERM every service in reverse registration order with per-service grace,
+           straggler sweep, durable RESET-REASON, sync, unmount/remount-ro, reboot(2)).
+           Our whole job is: sync() + one signal to PID1.
+
+  [COMPAT] marker absent (an older running pn-init: its signal handler only did
+           kill(-1,SIGTERM); sleep(1); sync(); reboot()) -> WE stop the services first, from
+           userspace, in reverse /etc/pn-init.conf order via pnctl-grade name->pid resolution,
+           each with a bounded SIGTERM->SIGKILL grace, sshd excluded (kept until PID1's final
+           sweep so this SSH session survives to report), then sync() and signal PID1, whose
+           rudimentary path handles the (now idle) remainder. NOTE: the old pn-init may respawn
+           a stopped service for the ~seconds until it processes our signal; its final blanket
+           SIGTERM covers any respawn — services just get less grace than on the NEW path.
+
+  Fallback of last resort (PID1 did not act on the signal): SysRq s(ync) + o/b via
+  /proc/sysrq-trigger — loudly labelled, because that is NOT a graceful path for userspace.
+
+Usage:
+  pn-shutdown [--reboot] [--dry-run] [--yes]
+
+  --reboot     restart instead of power off
+  --dry-run    print WHICH path would be taken + the exact reverse stop plan; change NOTHING
+  --yes        skip the interactive confirmation (required when not run from a terminal)
+
+Needs root (signalling PID1); re-execs itself via `sudo -n` when possible. --dry-run works
+unprivileged. Provenance: appends one line per run to /var/log/pn/pn-shutdown.log (best-effort).
+"""
+import os
+import sys
+import time
+import signal
+import subprocess
+
+CONF = os.environ.get("PN_INIT_CONF", "/etc/pn-init.conf")
+MARKER = "/run/pn-init/shutdown.v2"
+LOG = "/var/log/pn/pn-shutdown.log"
+STOP_GRACE_S = 8
+PID1_WAIT_COMPAT_S = 25
+
+EXCLUDE = {"sshd"}
+
+def say(msg):
+    print(msg, flush=True)
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except OSError:
+        pass
+
+def die(msg, code=1):
+    say("pn-shutdown: FEHLER: %s" % msg)
+    sys.exit(code)
+
+def pid1_comm():
+    try:
+        return open("/proc/1/comm").read().strip()
+    except OSError:
+        return "?"
+
+def load_services():
+
+    out = []
+    try:
+        for ln in open(CONF, encoding="utf-8", errors="replace"):
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split("|", 2)
+            if len(parts) < 3:
+                continue
+            out.append((parts[0].strip(), parts[1].strip()))
+    except FileNotFoundError:
+        die("keine pn-init-Konfiguration unter %s (ist das eine pn-init-Box?)" % CONF)
+    return out
+
+def find_pnctl():
+
+    import shutil, glob
+    for c in ([shutil.which("pnctl"), "/usr/local/bin/pnctl",
+               os.path.expanduser("~/.local/bin/pnctl")]
+              + sorted(glob.glob("/home/*/.local/bin/pnctl"))):
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+def resolve_pids(pnctl, name):
+
+    try:
+        r = subprocess.run([pnctl, "pid", name], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return [int(p) for p in r.stdout.split()]
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return []
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+def stop_one(name, pids):
+
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    t0 = time.time()
+    while time.time() - t0 < STOP_GRACE_S:
+        if not any(alive(p) for p in pids):
+            return "stopped (%.1fs)" % (time.time() - t0)
+        time.sleep(0.2)
+    for p in pids:
+        if alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return "no exit in %ds -> SIGKILL" % STOP_GRACE_S
+
+def stop_plan(services):
+
+    plan = []
+    for name, flags in reversed(services):
+        if "oneshot" in flags or "disabled" in flags or name in EXCLUDE:
+            continue
+        plan.append(name)
+    return plan
+
+def sysrq(*keys):
+    try:
+        with open("/proc/sys/kernel/sysrq", "w") as f:
+            f.write("1\n")
+        for k in keys:
+            with open("/proc/sysrq-trigger", "w") as f:
+                f.write(k + "\n")
+            time.sleep(2)
+        return True
+    except OSError:
+        return False
+
+def main():
+    args = set(sys.argv[1:])
+    unknown = args - {"--reboot", "--dry-run", "--yes", "-h", "--help"}
+    if unknown:
+        die("unbekannte Option(en): %s\n%s" % (" ".join(sorted(unknown)), __doc__))
+    if args & {"-h", "--help"}:
+        print(__doc__)
+        return
+    reboot = "--reboot" in args
+    dry = "--dry-run" in args
+    verb = "Neustart" if reboot else "Poweroff"
+
+    comm = pid1_comm()
+    if comm == "systemd" and not dry:
+
+        say("PID1 ist systemd (Rescue-Boot?) -> delegiere an systemctl %s"
+            % ("reboot" if reboot else "poweroff"))
+        os.execvp("systemctl", ["systemctl", "reboot" if reboot else "poweroff"])
+
+    services = load_services()
+    orderly = os.path.exists(MARKER)
+    plan = stop_plan(services)
+
+    if dry:
+        say("DRY-RUN (%s): es wird NICHTS gestoppt und NICHTS signalisiert." % verb)
+        say("  PID1: %s%s" % (comm, "" if comm == "pn-init" else "  (ACHTUNG: kein pn-init)"))
+        if orderly:
+            say("  Pfad: [NEW] %s vorhanden -> PID1 uebernimmt den geordneten Stopp selbst" % MARKER)
+            say("        (Dienste rueckwaerts, RESET-REASON, sync, remount-ro). Helfer wuerde nur")
+            say("        sync() + Signal %s an PID1 senden." % ("SIGTERM" if reboot else "SIGUSR1"))
+        else:
+            say("  Pfad: [COMPAT] %s fehlt -> laufendes pn-init kennt nur den rudimentaeren" % MARKER)
+            say("        Shutdown; Dienste wuerden AUS DEM USERSPACE gestoppt, dann Signal an PID1.")
+        pnctl = find_pnctl()
+        say("  Stopp-Reihenfolge (umgekehrte Registrierung, sshd ausgenommen):")
+        for name in plan:
+            pids = resolve_pids(pnctl, name) if pnctl else []
+            say("    - %-18s %s" % (name, ("pid %s" % " ".join(map(str, pids))) if pids else "(laeuft nicht)"))
+        say("  Danach: sync() -> kill -%s 1 -> PID1 %s"
+            % ("TERM" if reboot else "USR1", "Neustart" if reboot else "Poweroff"))
+        return
+
+    if os.geteuid() != 0:
+
+        for cand in ("/usr/local/sbin/pn-shutdown", os.path.realpath(sys.argv[0])):
+            if os.path.isfile(cand):
+                r = subprocess.run(["sudo", "-n", cand] + sys.argv[1:])
+                sys.exit(r.returncode)
+        die("braucht root (Signal an PID1) und `sudo -n` ist nicht erlaubt")
+
+    if "--yes" not in args:
+        if sys.stdin.isatty():
+            try:
+                a = input("%s: alle Dienste stoppen und Box %s? [j/N] "
+                          % (verb, "neu starten" if reboot else "ausschalten"))
+            except EOFError:
+                a = ""
+            if a.strip().lower() not in ("j", "ja", "y", "yes"):
+                say("abgebrochen — nichts passiert.")
+                return
+        else:
+            die("nicht interaktiv: --yes erforderlich (Schutz gegen versehentliches Ausschalten)")
+
+    if comm != "pn-init":
+        die("PID1 ist %r, nicht pn-init — dieser Helfer signalisiert nur ein pn-init-PID1" % comm)
+
+    say("%s in 4s — Antwort-Fenster fuer den Aufrufer ..." % verb)
+    time.sleep(4)
+
+    sig = signal.SIGTERM if reboot else signal.SIGUSR1
+
+    if orderly:
+        say("[NEW] PID1 unterstuetzt den geordneten Shutdown (%s):" % MARKER)
+        say("      pn-init stoppt jetzt selbst alle Dienste rueckwaerts, schreibt den RESET-REASON,")
+        say("      synct und haengt die Dateisysteme aus. Sende %s an PID1 ..."
+            % ("SIGTERM (Neustart)" if reboot else "SIGUSR1 (Poweroff)"))
+        os.sync()
+        os.kill(1, sig)
+    else:
+        say("[COMPAT] laufendes pn-init kennt den geordneten Shutdown NOCH NICHT (%s fehlt)." % MARKER)
+        say("         Ehrlich gesagt: das alte PID1 gibt allen Prozessen nur ~1s. Darum stoppe ICH")
+        say("         die Dienste zuerst, rueckwaerts, mit je bis zu %ds Gnadenfrist:" % STOP_GRACE_S)
+        pnctl = find_pnctl()
+        if not pnctl:
+            say("         WARNUNG: pnctl nicht gefunden — ueberspringe den Dienste-Stopp; es bleibt")
+            say("         nur der rudimentaere PID1-Pfad (sync + Signal).")
+        else:
+            for name in plan:
+                pids = resolve_pids(pnctl, name)
+                if not pids:
+                    continue
+                say("         stoppe %-18s pid %s ... %s"
+                    % (name, " ".join(map(str, pids)), stop_one(name, pids)))
+            say("         (Hinweis: pn-init kann Gestopptes bis zum Signal kurz neu starten —")
+            say("          dessen finaler Sammel-SIGTERM raeumt das ab.)")
+        say("         sync() + %s an PID1 (altes pn-init: Sammel-TERM, 1s, sync, %s) ..."
+            % ("SIGTERM" if reboot else "SIGUSR1", verb))
+        os.sync()
+        os.kill(1, sig)
+
+    wait_s = (len(plan) * STOP_GRACE_S + 60) if orderly else PID1_WAIT_COMPAT_S
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        time.sleep(1)
+    say("FALLBACK: PID1 hat nach %ds nicht reagiert. Das ist KEIN geordneter Weg mehr:" % wait_s)
+    say("          SysRq sync + %s (Dateisysteme gesynct, Prozesse bekommen keine Gnadenfrist)."
+        % ("Reboot" if reboot else "Poweroff"))
+    if not sysrq("s", "b" if reboot else "o"):
+        die("auch /proc/sysrq-trigger nicht verfuegbar — Box laeuft weiter; bitte Konsole pruefen", 3)
+
+if __name__ == "__main__":
+    main()

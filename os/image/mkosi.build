@@ -1,0 +1,62 @@
+#!/bin/sh
+# mkosi.build — compile the first-party native bits and stage them into $DESTDIR, which mkosi
+# overlays onto the image rootfs. Runs in mkosi's build environment (BuildPackages installed),
+# NOT in the final image, so the golden root never ships a C toolchain.
+#
+# Builds os/init/pn-init (the PID1) via its OWN Makefile (musl-static => tiny, dependency-free,
+# matches STATUS.md I.4) and installs it at /usr/lib/brainarbeit/pn-init — the path the default
+# GRUB entry's init= points to (mkosi.conf.d/20-bootloader.conf).
+set -eu
+
+# mkosi sets $SRCDIR (the BuildSources mount: repo root, per 40-build.conf "../..:.") and
+# $DESTDIR (staged onto the image rootfs). See the mkosi.build env-var contract.
+SRC="${SRCDIR:?mkosi must set SRCDIR}"
+DEST="${DESTDIR:?mkosi must set DESTDIR}"
+INIT_SRC="$SRC/os/init"
+
+echo "[mkosi.build] building pn-init (PID1) from $INIT_SRC"
+cd "$INIT_SRC"
+
+# Prefer the tiny musl-static PID1 (STATUS.md I.4: ~34 KB, identical behaviour). Fall back to
+# glibc-static if musl-gcc is unavailable in the build env (build.sh installs musl-tools).
+if command -v musl-gcc >/dev/null 2>&1; then
+    make musl
+else
+    echo "[mkosi.build] musl-gcc absent -> glibc-static fallback (make)"
+    make
+fi
+make            # also build the glibc pndstub used by the in-init test harness (harmless extra)
+
+install -D -m0755 "$INIT_SRC/pn-init"  "$DEST/usr/lib/brainarbeit/pn-init"
+install -D -m0755 "$INIT_SRC/pndstub"  "$DEST/usr/lib/brainarbeit/pndstub"
+
+# A /sbin/init symlink to pn-init is intentionally NOT created: /sbin/init stays systemd so the
+# GRUB RECOVERY entry boots stock systemd. The DEFAULT entry selects pn-init via init= cmdline.
+echo "[mkosi.build] pn-init staged at /usr/lib/brainarbeit/pn-init ($(du -h "$INIT_SRC/pn-init" | cut -f1))"
+
+# ---------------------------------------------------------------------------
+# Stage the FIRST-PARTY engine + display SOURCE into the RO root (built into a venv on DATA at
+# first boot — firstboot.sh). The runnable bits live on DATA; the source rides in the immutable
+# image so a fresh box can build its venv and a self-update ships a new engine atomically.
+# This is done HERE (not in mkosi.postinst.chroot) because $SRCDIR is only available to the
+# build script. mkosi mounts the brainarbeit repo at $SRCDIR (40-build.conf BuildSources).
+# ---------------------------------------------------------------------------
+stage() {   # stage <from> <to-under-DESTDIR>
+    from="$1"; to="$DEST/$2"
+    if [ -d "$from" ] && [ -n "$(ls -A "$from" 2>/dev/null)" ]; then
+        install -d "$to"; cp -a "$from/." "$to/"
+        echo "[mkosi.build] staged $2 from $from"
+    else
+        install -d "$to"
+        echo "SUBMODULE NOT CHECKED OUT AT BUILD TIME ($from)" > "$to/.MISSING"
+        echo "[mkosi.build] WARN $from empty (submodule not initialised) — staged placeholder"
+    fi
+}
+stage "$SRC/engine"             "usr/lib/brainarbeit/engine-src"
+stage "$SRC/components/phantom" "usr/lib/brainarbeit/display-src"
+
+# Record the engine revision baked in, for provenance + self-update diffing.
+if [ -d "$SRC/.git" ] && command -v git >/dev/null 2>&1; then
+    install -d "$DEST/usr/lib/brainarbeit"
+    git -C "$SRC" submodule status engine 2>/dev/null > "$DEST/usr/lib/brainarbeit/engine.rev" || true
+fi

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portal-contract/1/capability_profile",
+  "title": "Advertised capability profile (contract.md §5.1)",
+  "description": "Sent via profile.advertise (§3.10) BEFORE any capability verb. Absent/garbage fields degrade SAFELY (booleans->false, cores->4, mem_mb->4096) matching phantom client_caps_from_query. This is the mechanism that makes native===web HONEST: a gap is negotiated, never silent.",
+  "type": "object",
+  "properties": {
+    "render": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["webgpu", "webgl2", "vulkan", "metal", "server-composite"] },
+      "description": "ordered, best first."
+    },
+    "webgl2": { "type": "boolean", "description": "can client-composite SceneFrame v1 (R2)?" },
+    "webgpu": { "type": "boolean" },
+    "hw_decode": { "type": "boolean" },
+    "cores": { "type": "integer", "minimum": 1, "default": 4 },
+    "mem_mb": { "type": "integer", "minimum": 0, "default": 4096 },
+    "throttled": { "type": "boolean" },
+    "native": { "type": "boolean", "description": "native power node vs browser." },
+
+    "ssh-terminate": { "type": "boolean", "description": "client terminates SSH itself (design §8.1a)." },
+    "vpn-terminate": { "type": "boolean" },
+    "durable-store": { "type": "boolean", "description": "client holds durable artifact history (§10)." },
+    "secret-vault": { "type": "boolean", "description": "client holds durable vault + non-extractable keys (§2.1, §3.8)." },
+    "wake-word": { "type": "boolean", "description": "on-device wake-word (design §4.6)." },
+    "hardware-confirm": { "type": "boolean", "description": "headset button / phone tap for irreversible confirm (§6)." },
+
+    "sig_algs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "MUST include the contract's ed25519 (§2.1).",
+      "contains": { "const": "ed25519" }
+    },
+    "max_msg_bytes": { "type": "integer", "minimum": 1024, "default": 262144 }
+  },
+  "additionalProperties": true
+}

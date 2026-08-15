@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+
+from pnlib.memory.store import MemoryStore
+from pnlib.memory.anchored import (
+    AnchoredMemory, NoOpLedgerSink, default_sink,
+)
+
+def _emit(obj, as_json: bool):
+    if as_json:
+        print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+    else:
+        for k, v in obj.items():
+            print(f"{k}: {v}")
+
+def _open(args, *, want_ledger: bool):
+
+    store = MemoryStore(args.db)
+    ledger_path = getattr(args, "ledger", None) if want_ledger else None
+    sink = default_sink(ledger_path) if ledger_path else NoOpLedgerSink()
+    return AnchoredMemory(store, sink)
+
+def cmd_remember(args) -> int:
+    am = _open(args, want_ledger=True)
+    try:
+        r = am.remember(args.text, origin=args.origin, actor=args.actor, agent_id=args.agent_id,
+                        valid_time=args.valid_time, observed_time=args.observed_time)
+        _emit({"ok": True, "seq": r.seq, "ledger_seq": r.ledger_seq, "anchored": r.anchored,
+               "origin": r.origin, "sink_present": am.sink_present}, args.json)
+    finally:
+        am.close()
+    return 0
+
+def _print_hits(hits, as_json: bool):
+    if as_json:
+        print(json.dumps(hits, sort_keys=True, separators=(",", ":")))
+        return
+    if not hits:
+        print("(no hits)")
+        return
+    for h in hits:
+        print(f"[{h['distance']:.4f}] ({h['origin']}, ledger_seq={h['ledger_seq']}) {h['text']!r}")
+
+def cmd_recall(args) -> int:
+    am = _open(args, want_ledger=False)
+    try:
+        hits = am.recall(args.query, k=args.k, include_model=args.include_model,
+                         observed_as_of=args.as_of)
+        _print_hits(hits, args.json)
+    finally:
+        am.close()
+    return 0
+
+def cmd_as_of(args) -> int:
+    am = _open(args, want_ledger=False)
+    try:
+        hits = am.as_of(args.query, observed_time=args.observed_time, k=args.k,
+                        include_model=args.include_model)
+        _print_hits(hits, args.json)
+    finally:
+        am.close()
+    return 0
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="pn-memory", description="T7 agent-memory CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    rp = sub.add_parser("remember", help="remember one fact (optionally ledger-anchored)")
+    rp.add_argument("--db", required=True)
+    rp.add_argument("--origin", required=True, choices=["human", "agent", "model"])
+    rp.add_argument("--text", required=True)
+    rp.add_argument("--ledger", help="ledger db to anchor the write to (omit = un-anchored)")
+    rp.add_argument("--actor")
+    rp.add_argument("--agent-id")
+    rp.add_argument("--valid-time", type=float)
+    rp.add_argument("--observed-time", type=float)
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(func=cmd_remember)
+
+    cp = sub.add_parser("recall", help="ranked nearest-neighbour recall (anti-collapse by default)")
+    cp.add_argument("--db", required=True)
+    cp.add_argument("--query", required=True)
+    cp.add_argument("--k", type=int, default=5)
+    cp.add_argument("--include-model", action="store_true")
+    cp.add_argument("--as-of", type=float, help="restrict to observed_time <= T")
+    cp.add_argument("--json", action="store_true")
+    cp.set_defaults(func=cmd_recall)
+
+    ap = sub.add_parser("as-of", help="bitemporal 'what did we know at T' recall")
+    ap.add_argument("--db", required=True)
+    ap.add_argument("--query", required=True)
+    ap.add_argument("--observed-time", type=float, required=True)
+    ap.add_argument("--k", type=int, default=5)
+    ap.add_argument("--include-model", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.set_defaults(func=cmd_as_of)
+
+    return p
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,16 @@
+[Unit]
+Description=Brainbox first-boot provisioning (unique identity + secret scrub)
+Documentation=file:///home/brainbox/brainarbeit/os/image/README.md
+After=network-pre.target local-fs.target
+Before=brainbox-portal.service
+ConditionPathExists=/etc/brainbox/is-appliance
+ConditionPathExists=!/var/lib/brainbox/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/brainbox-firstboot.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3304 @@
+#!/usr/bin/env python3
+
+import os, sys, time, json, socket, threading, signal, re, secrets
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import (DB_PATH, LOG_DIR, VERSION, DATA_DIR, RECORD_DIR,
+                   db, ipc, meters, dispatch as slc, sched, record, acct, eta,
+                   remotedispatch as rdisp, fleetpick, failklasse, kernslots)
+from pnlib.profile import ResourceProfile, resolve, estimate, CLASSES
+
+_FC_MODE = (os.environ.get("PN_FLEET_COMPUTE", "shadow") or "shadow").strip().lower()
+try:
+    _FC_RESERVE = max(0, int(os.environ.get("PN_RESERVED_CORES", "1")))
+except (TypeError, ValueError):
+    _FC_RESERVE = 1
+_FC_KIND = os.environ.get("PN_FLEET_COMPUTE_KIND", "exec")
+
+_FC_TAGS = set(t.strip() for t in (os.environ.get("PN_FLEET_COMPUTE_TAGS", "fleet-test") or "").split(",") if t.strip())
+_FC_SHADOW_SEEN = {}
+
+_FC_INTERACTIVE_TT = frozenset({
+    "cell.exec",
+    "cell.session", "cell.voice", "voice", "session", "interactive",
+})
+
+try:
+    _FC_BOX_ARCH = os.uname().machine
+except Exception:
+    _FC_BOX_ARCH = None
+
+def _fleet_marked_portable(job):
+
+    try:
+        env = json.loads(job.get("env") or "{}") or {}
+        v = str(env.get("PN_OFFLOADABLE", "")).strip().lower()
+        if v and v not in ("0", "false", "no"):
+            return True
+    except Exception:
+        pass
+    tag = (job.get("client_tag") or job.get("tag") or "").strip()
+    return bool(tag) and tag in _FC_TAGS
+
+def _fleet_arch_agnostic(job):
+
+    try:
+        env = json.loads(job.get("env") or "{}") or {}
+        v = str(env.get("PN_ARCH_AGNOSTIC", "")).strip().lower()
+        return bool(v) and v not in ("0", "false", "no")
+    except Exception:
+        return False
+
+_FC_LOG_PATH = os.environ.get("PN_FLEET_COMPUTE_LOG",
+                              os.path.join(DATA_DIR, "fleet-compute.log"))
+
+_FC_NODE_SLOTS_ENV = (os.environ.get("PN_NODE_SLOTS", "") or "").strip()
+_FC_NODE_SLOTS_PER_NODE = 4
+_FC_NODE_SLOTS_MAX = 64
+
+def _node_slots(workers):
+
+    if _FC_NODE_SLOTS_ENV:
+        try:
+            return max(0, int(_FC_NODE_SLOTS_ENV))
+        except ValueError:
+            pass
+    n = sum(1 for r in (workers or {}).values()
+            if r and r.get("state") == "online" and r.get("endpoint"))
+
+    return min(_FC_NODE_SLOTS_MAX, max(4, _FC_NODE_SLOTS_PER_NODE * n))
+
+def _node_lane_full(rtc, workers, waits, job):
+
+    cap = _node_slots(workers)
+    cur = int((rtc or {}).get("node", 0))
+    if cur >= cap:
+        waits[job["id"]] = "node lane full (%d/%d proxies in flight)" % (cur, cap)
+        return True
+    return False
+
+def _fc_log(msg):
+    line = "%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg)
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        with open(_FC_LOG_PATH, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+def _fleet_offloadable(job):
+
+    if job.get("node"):
+        return False
+    tt = (job.get("task_type") or "").lower()
+    if tt in _FC_INTERACTIVE_TT:
+        return False
+
+    try:
+        if ResourceProfile.from_json(job.get("profile") or "").sandbox == "cell_isolated":
+            return False
+    except Exception:
+        return False
+    if _FC_MODE == "enforce" and not _fleet_marked_portable(job):
+        return False
+    return True
+
+def _fleet_assign(job, workers, inflight, boxload, nproc, mem_avail=None, mem_total=None):
+
+    if _FC_MODE == "off" or not workers or not _fleet_offloadable(job):
+        return
+    try:
+        nid = fleetpick.pick_compute_node(workers, _FC_KIND, boxload, nproc,
+                                          reserved_cores=_FC_RESERVE, inflight=inflight,
+                                          now=time.time(), box_arch=_FC_BOX_ARCH,
+                                          arch_ok=_fleet_arch_agnostic(job),
+                                          box_mem_avail_mb=mem_avail,
+                                          box_mem_total_mb=mem_total)
+        if not nid:
+            inflight[None] = inflight.get(None, 0) + 1
+            return
+        inflight[nid] = inflight.get(nid, 0) + 1
+        jid = job.get("id")
+        if _FC_MODE == "enforce":
+            job["node"] = nid
+            try:
+                db.assign_node(CX, jid, nid, rdisp.PROXY_MEM_MIB)
+            except Exception:
+                pass
+            _fc_log("[fleet-compute] job %s -> node %s (enforce, box_load=%.2f/%d, reserve=%d)"
+                    % (jid, nid, boxload, nproc, _FC_RESERVE))
+        else:
+            now = time.time()
+            if now - _FC_SHADOW_SEEN.get(jid, 0.0) > 300:
+                if len(_FC_SHADOW_SEEN) > 500:
+                    _FC_SHADOW_SEEN.clear()
+                _FC_SHADOW_SEEN[jid] = now
+                _fc_log("[fleet-compute:shadow] job %s WÜRDE auslagern -> node %s "
+                        "(box_load=%.2f/%d, reserve=%d)" % (jid, nid, boxload, nproc, _FC_RESERVE))
+    except Exception as e:
+        try:
+            sys.stderr.write("[fleet-compute] assign skipped: %s\n" % type(e).__name__)
+        except Exception:
+            pass
+
+def _kern_snapshot(workers=None, now=None):
+
+    w = rdisp.load_workers() if workers is None else workers
+    return kernslots.nodes_snapshot(w, os.cpu_count() or 1, _FC_RESERVE,
+                                    kind=_FC_KIND, box_arch=_FC_BOX_ARCH,
+                                    now=time.time() if now is None else now)
+
+def _kern_eligibility(snapshot, node_pin, jobdict):
+
+    if node_pin:
+        return [node_pin] if node_pin in snapshot else []
+    portable = (_FC_MODE == "enforce" and _fleet_marked_portable(jobdict))
+    return kernslots.eligible_nodes(snapshot, portable=portable,
+                                    arch_ok=_fleet_arch_agnostic(jobdict),
+                                    box_arch=_FC_BOX_ARCH)
+
+def _kern_eff_key(r, now):
+
+    return (r["prio"] - int((now - (r["submitted_at"] or now)) // 600), r["id"])
+
+def _kern_rows(cx, now=None):
+
+    now = now or time.time()
+    rows = db.kern_buchungen(cx)
+    running = [{"node": r["node"], "kerne": r["kerne"],
+                "rest_s": kernslots.rest_s(r["started_at"], r["dauer_s"], now)}
+               for r in rows if r["state"] == "running"]
+    queued = sorted((r for r in rows if r["state"] == "queued"),
+                    key=lambda r: _kern_eff_key(r, now))
+    return running, queued
+
+def _kern_ahead(snapshot, queued, before_key=None, now=None):
+
+    now = now or time.time()
+    out = []
+    for r in queued:
+        if before_key is not None and _kern_eff_key(r, now) >= before_key:
+            continue
+        jd = {"env": r["env"], "client_tag": r["client_tag"]}
+        out.append({"kerne": r["kerne"], "dauer_s": r["dauer_s"],
+                    "eligible": _kern_eligibility(snapshot, r["node"], jd)})
+    return out
+
+def _kern_submit_pruefung(req, ctx, prof, node):
+
+    raw = req.get("kerne")
+    try:
+        wunsch = int(raw)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "kerne-ungueltig",
+                "error": "kerne muss eine ganze Zahl >= 1 sein (bekommen: %r)" % (raw,)}, None
+    if wunsch < 1:
+        return {"ok": False, "reason": "kerne-ungueltig",
+                "error": "kerne muss >= 1 sein (bekommen: %d)" % wunsch}, None
+
+    if str(req.get("source") or "") == "filler":
+        return {"ok": False, "reason": "kerne-unzulaessig",
+                "error": "Filler-Jobs buchen keine Kerne (Backfill läuft nur in Lücken)"}, None
+    _tt_iso = None
+    if ctx.get("task_type"):
+        _tt_iso = (db.get_task_type(CX, ctx["task_type"]) or {}).get("isolation_tier")
+    if sched.track_of(prof) == "interactive" or getattr(prof, "trusted", False) or _tt_iso == "cell":
+        return {"ok": False, "reason": "kerne-unzulaessig",
+                "error": ("Kern-Buchung gilt nur für Batch-Jobs — interaktive/Session/Zell-"
+                          "Profile bekommen nie eine harte cpu.max-Quote (Doktrin).")}, None
+    flex = bool(req.get("flexibel"))
+    now = time.time()
+    snapshot = _kern_snapshot(now=now)
+    jd = {"env": json.dumps(req.get("env") or {}), "client_tag": req.get("tag")}
+    elig = _kern_eligibility(snapshot, node, jd)
+    running, queued = _kern_rows(CX, now=now)
+    ahead = _kern_ahead(snapshot, queued, now=now)
+    ang = kernslots.angebot(snapshot, elig, running, ahead, wunsch, now=now)
+    proj = kernslots.projektion(snapshot, elig, running, ahead, wunsch, now=now)
+    gebucht = wunsch
+    if flex and proj["status"] != "sofort":
+        d = kernslots.downgrade_kerne(ang, wunsch)
+        if d:
+            gebucht = d
+            proj = kernslots.projektion(snapshot, elig, running, ahead, d, now=now)
+    absagen, grund = kernslots.absage_pruefen(proj)
+    if absagen:
+        return {"ok": False, "reason": "kerne-absage",
+                "error": ("Kern-Buchung über %d Kern(e) abgesagt: %s. Alternativangebot "
+                          "siehe `angebot` — kleinere Buchungen starten ggf. sofort."
+                          % (gebucht, grund)),
+                "angebot": ang}, None
+    return None, {"kerne": gebucht, "wunsch": wunsch, "flexibel": flex,
+                  "projektion": proj, "angebot": ang}
+
+def _kern_antwort(buchung):
+
+    p = buchung["projektion"]
+    e = {"status": p["status"], "eta_s": p.get("eta_s"),
+         "human": ("sofort" if p["status"] == "sofort"
+                   else eta.human(p["eta_s"]) if p["status"] == "eta" else p["status"])}
+    if p.get("grund"):
+        e["grund"] = p["grund"]
+    return {"kerne": {"gebucht": buchung["kerne"], "wunsch": buchung["wunsch"],
+                      "flexibel": buchung["flexibel"], "eta": e},
+            "angebot": buchung["angebot"]}
+
+LK = threading.RLock()
+PROCS = {}
+OUT_OFF = {}
+
+_DAUER_NOTED: set = set()
+CX = None
+
+CFG = sched.Config.autoscale()
+GATE = None
+IO_ENABLED = False
+STARTED = time.time()
+
+_ADMISSION_PAUSED = False
+
+STALL_S = 300
+
+MAX_LOG_BYTES = 1 << 20
+
+MAX_LIMIT = 1000
+
+FILLER_CAP = int(os.environ.get("PN_FILLER_CAP", "2"))
+
+FILLER_TRICKLE_S = float(os.environ.get("PN_FILLER_TRICKLE_S", "900"))
+_LAST_FILLER_TRICKLE = 0.0
+STOP_GRACE_S = float(os.environ.get("PN_STOP_GRACE_S", "5"))
+
+LLM_HELD: dict = {}
+PENDING_RELEASE: set = set()
+GC_EVERY_S = 60
+LAST_GC = 0.0
+
+HM_EVERY_S = float(os.environ.get("PN_HAUSMEISTER_EVERY_S", "3600") or 3600)
+HM_ENABLED = str(os.environ.get("PN_DB_HAUSMEISTER", "1")).strip().lower() not in (
+    "0", "false", "no", "off")
+_HM = {"last": 0.0, "thread": None}
+
+def _hm_verben_fluessig():
+
+    got = LK.acquire(timeout=2.0)
+    if got:
+        LK.release()
+        return True
+    return False
+
+def _hm_run():
+    try:
+        from pnlib import hausmeister as _hm_mod
+        _hm_mod.lauf(DB_PATH, weiter=_hm_verben_fluessig,
+                     drucken=lambda s: (sys.stderr.write("pnd %s\n" % s), sys.stderr.flush()))
+    except Exception as e:
+        sys.stderr.write("pnd hausmeister uebersprungen: %s: %s\n" % (type(e).__name__, e))
+        sys.stderr.flush()
+
+def maybe_hausmeister():
+
+    if not HM_ENABLED or HM_EVERY_S <= 0:
+        return
+    t = _HM.get("thread")
+    if t is not None and t.is_alive():
+        return
+    now = time.time()
+    if _HM["last"] == 0.0:
+        _HM["last"] = now - HM_EVERY_S + min(600.0, HM_EVERY_S / 2.0)
+        return
+    if now - _HM["last"] < HM_EVERY_S:
+        return
+    _HM["last"] = now
+    th = threading.Thread(target=_hm_run, daemon=True, name="pn-hausmeister")
+    _HM["thread"] = th
+    th.start()
+
+WAIT_REASONS: dict = {"jobs": {}, "global": None, "ts": 0.0}
+HEALTH_DEGRADED = {"disk": False, "disk_floor": False}
+
+SCRATCH_ROOT = os.path.join(DATA_DIR, "scratch")
+
+PIPELINE_STATE_DIR = os.environ.get(
+    "PN_PIPELINE_STATE_DIR", os.path.expanduser("~/data-pipeline/state"))
+
+def _job_scratch_dir(job_id) -> str:
+    return os.path.join(SCRATCH_ROOT, "pn-job-%s" % job_id)
+
+def _dir_usage_mib(paths) -> int:
+
+    total = 0
+    for root in paths:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(dirpath, name)).st_blocks * 512
+                except OSError:
+                    continue
+    return total // (1024 * 1024)
+
+PROGRESS_RE = re.compile(rb"@@PN_PROGRESS\s+(\{[^\n]*?\})|\[\s*(\d+)\s*/\s*(\d+)\s*\]")
+
+_PH = re.compile(r"\{(\w+)\}")
+
+SECRETS_DIR = os.path.join(DATA_DIR, "secrets")
+
+def detect_io_delegation() -> bool:
+    cg = meters.cgroup_path("pn-batch.slice")
+    if not cg:
+        return False
+    try:
+
+        parent = os.path.dirname(cg)
+        with open(os.path.join(parent, "cgroup.controllers")) as f:
+            return "io" in f.read().split()
+    except Exception:
+        return False
+
+def sd_notify(msg: str):
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.sendto(msg.encode(), addr)
+        s.close()
+    except Exception:
+        pass
+
+def out_err_rc_for(job_id):
+    base = os.path.join(LOG_DIR, f"job-{job_id}")
+    return base + ".out", base + ".err", base + ".rc"
+
+def _rt_dir():
+    return os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+
+def _llm_sock():
+    return os.environ.get("PN_LLM_SOCK") or os.path.join(_rt_dir(), "pn-llmd.sock")
+
+def _gov_sock():
+    return os.environ.get("PN_GOV_SOCK") or "/run/pn-governord.sock"
+
+def _unix_rpc(path, req, timeout=1.0):
+
+    try:
+        return ipc.send_request(req, timeout=timeout, path=path)
+    except Exception:
+        return None
+
+def llm_headroom():
+
+    r = _unix_rpc(_llm_sock(), {"verb": "llm.headroom"}, timeout=1.0)
+    if not r or not r.get("ok") or "llm_free" not in r:
+        return {"llm_free": None, "llm_pool": None, "llm_in_use": None}
+    return {"llm_free": r.get("llm_free"), "llm_pool": r.get("llm_pool"),
+            "llm_in_use": r.get("llm_in_use")}
+
+def llm_lease(job_id, weight, kind):
+
+    if not weight:
+        return True
+    r = _unix_rpc(_llm_sock(), {"verb": "lease", "job_id": job_id,
+                                "weight": weight, "kind": kind}, timeout=1.0)
+    ok = bool(r and r.get("ok"))
+    if ok:
+        LLM_HELD[job_id] = {"weight": weight, "kind": kind}
+        PENDING_RELEASE.discard(job_id)
+    return ok
+
+def llm_release(job_id):
+
+    if job_id not in LLM_HELD and job_id not in PENDING_RELEASE:
+        return
+    r = _unix_rpc(_llm_sock(), {"verb": "release", "job_id": job_id}, timeout=1.0)
+    if r and r.get("ok"):
+        LLM_HELD.pop(job_id, None)
+        PENDING_RELEASE.discard(job_id)
+    else:
+        PENDING_RELEASE.add(job_id)
+
+def _reconcile_llm_release(job):
+
+    try:
+        prof = ResourceProfile.from_json(job["profile"])
+    except Exception:
+        return
+    if not prof.llm_weight:
+        return
+    jid = job["id"]
+    r = _unix_rpc(_llm_sock(), {"verb": "release", "job_id": jid}, timeout=1.0)
+    if not (r and r.get("ok")):
+        PENDING_RELEASE.add(jid)
+
+def drain_pending_releases():
+
+    for jid in list(PENDING_RELEASE):
+        r = _unix_rpc(_llm_sock(), {"verb": "release", "job_id": jid}, timeout=1.0)
+        if r and r.get("ok"):
+            LLM_HELD.pop(jid, None)
+            PENDING_RELEASE.discard(jid)
+
+def reassert_llm_leases():
+
+    try:
+        for j in db.running(CX):
+            prof = ResourceProfile.from_json(j["profile"])
+            if prof.llm_weight:
+
+                r = _unix_rpc(_llm_sock(), {"verb": "lease", "job_id": j["id"],
+                                            "weight": prof.llm_weight, "kind": prof.llm_kind},
+                              timeout=1.0)
+                if r and r.get("ok"):
+                    LLM_HELD[j["id"]] = {"weight": prof.llm_weight, "kind": prof.llm_kind}
+    except Exception as e:
+        sys.stderr.write(f"pnd: reassert_llm_leases skipped ({type(e).__name__}: {e})\n")
+
+def gov_observe(seconds):
+
+    if not seconds or seconds <= 0:
+        return
+    _unix_rpc(_gov_sock(), {"verb": "queue.observe", "seconds": float(seconds)}, timeout=1.0)
+
+_ACCT_READER = None
+
+def acct_history(task_type):
+
+    global _ACCT_READER
+    if not task_type:
+        return {}
+    try:
+        if _ACCT_READER is None:
+            _ACCT_READER = acct.AcctReader()
+        return _ACCT_READER.type_estimate(task_type)
+    except Exception:
+        return {}
+
+def _cmd_type_of(argv):
+
+    try:
+        if argv and argv[0]:
+            base = os.path.basename(str(argv[0])).strip()
+            if base:
+                return "cmd:" + base[:64]
+    except Exception:
+        pass
+    return None
+
+def job_eta(jid, job, cx=None):
+
+    global _ACCT_READER
+    try:
+        state = (job or {}).get("state")
+        pos = db.position(cx if cx is not None else CX, jid)
+        wait = eta.waiting_on(pos, state)
+        if state and state != "queued":
+            return {"position": pos, "ahead": max(0, pos - 1), "waiting_on": wait,
+                    "eta_start_s": None, "eta_done_s": None, "human": None}
+        tt = (job or {}).get("task_type")
+        if not tt:
+
+            try:
+                tt = _cmd_type_of(json.loads((job or {}).get("cmd") or "[]"))
+            except Exception:
+                tt = None
+        if _ACCT_READER is None:
+            _ACCT_READER = acct.AcctReader()
+        svc = _ACCT_READER.type_service_time(tt) if tt else None
+        if not svc or svc <= 0:
+
+            svc = _ACCT_READER.global_service_time()
+        svc = svc if (svc and svc > 0) else eta.DEFAULT_SEED_SVC_S
+        proj = eta.project_eta(pos, svc, CFG.max_concurrent)
+        proj["waiting_on"] = wait
+        proj["svc_s"] = svc
+        proj["human"] = eta.human(proj["eta_done_s"])
+        proj["human_start"] = eta.human(proj["eta_start_s"])
+
+        wr = _wait_reason_for(jid)
+        if wr:
+            proj["wait_reason"] = wr
+            proj["wait_reason_de"] = _wait_reason_de(wr)
+            if proj.get("waiting_on") in ("dispatching", "position"):
+                proj["waiting_on"] = "resource"
+
+        try:
+            _kp_prof = ResourceProfile.from_json((job or {}).get("profile") or "")
+            _kk = int(getattr(_kp_prof, "kerne", 0) or 0)
+            if _kk and (job or {}).get("state") == "queued":
+                _now = time.time()
+                _kcx = cx if cx is not None else CX
+                _snapshot = _kern_snapshot(now=_now)
+                _running, _queued = _kern_rows(_kcx, now=_now)
+                _me = next((r for r in _queued if r["id"] == jid), None)
+                _ahead = _kern_ahead(_snapshot, _queued,
+                                     before_key=_kern_eff_key(_me, _now) if _me else None,
+                                     now=_now)
+                _jd = {"env": (job or {}).get("env"),
+                       "client_tag": (job or {}).get("client_tag")}
+                _elig = _kern_eligibility(_snapshot, (job or {}).get("node"), _jd)
+                _kp = kernslots.projektion(_snapshot, _elig, _running, _ahead, _kk, now=_now)
+                proj["kerne"] = _kk
+                _kw = int(getattr(_kp_prof, "kerne_wunsch", 0) or 0)
+                if _kw and _kw != _kk:
+                    proj["kerne_wunsch"] = _kw
+                _own = float(getattr(_kp_prof, "dauer_s", 0) or 0) or float(proj.get("svc_s") or 0)
+                if _kp["status"] == "sofort":
+                    proj["eta_start_s"] = 0.0
+                    proj["eta_done_s"] = _own if _own > 0 else None
+                    proj["human_start"] = "sofort"
+                    if _own > 0:
+                        proj["human"] = eta.human(_own)
+                elif _kp["status"] == "eta":
+                    proj["eta_start_s"] = _kp["eta_s"]
+                    proj["eta_done_s"] = (_kp["eta_s"] + _own) if _own > 0 else None
+                    proj["human_start"] = eta.human(_kp["eta_s"])
+                    proj["human"] = (eta.human(proj["eta_done_s"])
+                                     if proj["eta_done_s"] else eta.human(_kp["eta_s"]))
+                    proj["waiting_on"] = "kern-slots"
+                else:
+                    proj["eta_start_s"] = proj["eta_done_s"] = None
+                    proj["human"] = proj["human_start"] = "unbekannt"
+                    proj["waiting_on"] = "kern-slots"
+                    if _kp.get("grund"):
+                        proj["eta_grund"] = _kp["grund"]
+        except Exception:
+            pass
+
+        try:
+            _p = ResourceProfile.from_json((job or {}).get("profile") or "")
+            _tot = meters.meminfo().get("total") or 0
+            _ceil = max(0, _tot - CFG.mem_floor)
+            if _tot and _p.mem > _ceil:
+                proj["eta_start_s"] = proj["eta_done_s"] = None
+                proj["human"] = proj["human_start"] = "nie (passt nicht auf diese Box)"
+                proj["waiting_on"] = "unfit"
+                proj["wait_reason"] = ("mem %d MiB exceeds box capacity "
+                                       "(%d total - %d floor)" % (_p.mem, _tot, CFG.mem_floor))
+                proj["wait_reason_de"] = ("passt nicht auf diese Box: braucht %d MiB RAM, "
+                                          "diese Box kann höchstens %d MiB bereitstellen "
+                                          "(%d MiB gesamt) — Job abbrechen oder kleiner "
+                                          "deklarieren" % (_p.mem, _ceil, _tot))
+        except Exception:
+            pass
+        return proj
+    except Exception:
+        return None
+
+def _wait_reason_de(reason):
+
+    r = str(reason or "")
+    m = re.match(r"(batch|interactive) budget (\d+)\+(\d+)>(\d+)", r)
+    if m:
+        lane = "Batch" if m.group(1) == "batch" else "Echtzeit"
+        free = max(0, int(m.group(4)) - int(m.group(2)))
+        return ("wartet auf RAM: braucht %s MiB, im %s-Budget sind nur noch %d MiB frei (%s)"
+                % (m.group(3), lane, free, r))
+    m = re.match(r"mem floor (\d+)-(\d+)<(\d+)", r)
+    if m:
+        return ("wartet auf freien Arbeitsspeicher der Box: braucht %s MiB, verfügbar %s MiB "
+                "bei Untergrenze %s MiB (%s)" % (m.group(2), m.group(1), m.group(3), r))
+    if r.startswith("llm pool") or r.startswith("filler llm pool"):
+        return "wartet auf freie LLM-Kapazität (%s)" % r
+    if r.startswith("cpu budget") or r.startswith("filler cpu"):
+        return "wartet auf freie CPU-Kerne (%s)" % r
+    m = re.match(r"kern-slots (\S+): (-?\d+) von (\d+) buchbaren Kernen frei, (\d+) gebucht", r)
+    if m:
+        return ("wartet auf %s gebuchte Kerne: auf %s sind nur %s von %s buchbaren frei (%s)"
+                % (m.group(4), m.group(1), m.group(2), m.group(3), r))
+    if r.startswith("kern-slots"):
+        return "wartet auf gebuchte Kerne (%s)" % r
+    if r.startswith("disk_free") or r.startswith("filler disk"):
+        return "wartet auf freien Plattenplatz (%s)" % r
+    if (r.startswith("max_concurrent") or r.startswith("batch slots")
+            or r.startswith("filler_cap")):
+        return "wartet auf einen freien Ausführungs-Slot (%s)" % r
+    if r.startswith("machine unhealthy") or r == "filler yields under pressure":
+        return "wartet: Box unter Speicherdruck (%s)" % r
+    if r.startswith("batch tier throttled"):
+        return "wartet: Batch-Spur gedrosselt (%s)" % r
+    if r.startswith("admission paused"):
+        return "wartet: Job-Annahme ist vom Admin pausiert"
+    return "wartet: %s" % r
+
+def _wait_reason_for(jid):
+
+    return WAIT_REASONS["jobs"].get(jid) or WAIT_REASONS.get("global")
+
+def _attach_wait_reasons(jobs):
+
+    now = time.time()
+    for j in jobs or []:
+        if j.get("state") == "queued":
+            nb = j.get("not_before")
+            if nb and nb > now:
+                att = int(j.get("attempts") or 0)
+                j["wait_reason"] = "backoff (attempt %d, retry in %ds)" % (att, int(nb - now))
+                j["wait_reason_de"] = ("Backoff nach Fehlversuch %d: nächster Anlauf in %d s "
+                                       "(%s)" % (att, int(nb - now),
+                                                 j.get("fail_class") or "transient"))
+                continue
+            wr = _wait_reason_for(j.get("id"))
+            if wr:
+                j["wait_reason"] = wr
+                j["wait_reason_de"] = _wait_reason_de(wr)
+    return jobs
+
+def _attach_kerne(jobs):
+
+    for j in jobs or []:
+        p = j.get("profile")
+        if not p or '"kerne"' not in p:
+            continue
+        try:
+            d = json.loads(p)
+        except (ValueError, TypeError):
+            continue
+        k = d.get("kerne")
+        if not k:
+            continue
+        j["kerne"] = k
+        if d.get("kerne_wunsch") and d["kerne_wunsch"] != k:
+            j["kerne_wunsch"] = d["kerne_wunsch"]
+        if d.get("dauer_s"):
+            j["dauer_s"] = d["dauer_s"]
+    return jobs
+
+def _kern_status_snapshot(rcx):
+
+    try:
+        snap = _kern_snapshot()
+        run = [r for r in db.kern_buchungen(rcx) if r["state"] == "running"]
+        frei = kernslots.frei_je_node(snap, run)
+        return {("box" if n is None else n): {
+                    "buchbar": e["buchbar"],
+                    "belegt": e["buchbar"] - frei.get(n, e["buchbar"]),
+                    "frei": frei.get(n, e["buchbar"])}
+                for n, e in snap.items()}
+    except Exception as e:
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+
+def _shorten_cmd(cmd, cmd_max):
+
+    if not isinstance(cmd, str) or len(cmd) <= cmd_max:
+        return cmd
+    try:
+        parts = json.loads(cmd)
+        if not isinstance(parts, list):
+            raise ValueError
+    except (ValueError, TypeError):
+        return cmd[:cmd_max] + "…"
+    out, used = [], 0
+    for i, p in enumerate(parts):
+        s = p if isinstance(p, str) else json.dumps(p, ensure_ascii=False)
+        if used + len(s) > cmd_max:
+            rest = max(0, cmd_max - used)
+            if rest:
+                out.append(s[:rest] + "…")
+            weitere = len(parts) - len(out)
+            if weitere > 0:
+                out.append("…[+%d Argument(e) gekürzt]" % weitere)
+            break
+        out.append(p)
+        used += len(s)
+    return json.dumps(out, ensure_ascii=False)
+
+def _project_rows(jobs, fields, cmd_max):
+
+    try:
+        cm = int(cmd_max) if cmd_max is not None else None
+    except (TypeError, ValueError):
+        cm = None
+    if cm is not None and cm > 0:
+        for j in jobs:
+            if j.get("cmd"):
+                j["cmd"] = _shorten_cmd(j["cmd"], cm)
+    if isinstance(fields, (list, tuple)) and fields:
+        want = {str(f) for f in fields} | {"id", "state"}
+        jobs = [{k: v for k, v in j.items() if k in want} for j in jobs]
+    return jobs
+
+def _cg_stats(job_id):
+
+    try:
+        return slc.job_cgroup_stats(job_id)
+    except Exception:
+        return {"mem_peak": None, "cpu_s": None}
+
+def stamp_actuals(job, started, finished, cg_stats=None):
+
+    jid = job["id"]
+    wall_s = (finished - started) if (started and finished and finished > started) else None
+    held = LLM_HELD.get(jid) or {}
+    llm_calls = held.get("weight")
+    if llm_calls is None:
+        try:
+            llm_calls = ResourceProfile.from_json(job.get("profile") or "").llm_weight or None
+        except Exception:
+            llm_calls = None
+    cg = cg_stats or {}
+
+    _tt = job.get("task_type")
+    if not _tt:
+        try:
+            _tt = _cmd_type_of(json.loads(job.get("cmd") or "[]"))
+        except Exception:
+            _tt = None
+    payload = {
+        "task_type": _tt,
+        "principal": job.get("submitter_principal"),
+        "mem_peak": cg.get("mem_peak"),
+        "cpu_s": cg.get("cpu_s"),
+        "wall_s": round(wall_s, 3) if wall_s else None,
+        "llm_calls": llm_calls,
+    }
+    try:
+        db.add_typed_event(CX, jid, "actuals", payload)
+    except Exception as e:
+        try:
+            db.add_event(CX, jid, "error", f"actuals stamp failed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+SESSION_SOURCE = "session"
+
+def _session_vmm_pid(job):
+    m = re.match(r"session:pid=(\d+)$", job.get("scope_unit") or "")
+    return int(m.group(1)) if m else None
+
+def _session_remote_node(job):
+
+    m = re.match(r"session:node=(.+)$", job.get("scope_unit") or "")
+    return m.group(1) if m else None
+
+def _session_vmm_alive(pid):
+
+    if not pid:
+        return False
+    try:
+        return open("/proc/%d/comm" % pid).read().strip() == "pn-vmm"
+    except (OSError, ValueError):
+        return False
+
+def _session_llm_totals(jid):
+
+    calls = tokens = 0
+    try:
+        for r in CX.execute("SELECT data FROM job_events WHERE job_id=? AND kind='llm.turn' AND topic=?",
+                            (jid, "job/%d" % jid)):
+            try:
+                d = json.loads(r["data"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            st = int(d.get("status") or 0)
+            if st and st >= 400:
+                continue
+            calls += 1
+            tokens += int(d.get("tokens_in") or 0) + int(d.get("tokens_out") or 0)
+    except Exception:
+        pass
+    return calls, tokens
+
+def _finalize_session_row(job, state, reason=None):
+
+    jid = job["id"]
+    calls, tokens = _session_llm_totals(jid)
+    started = job.get("started_at")
+    now = time.time()
+    payload = {
+        "task_type": job.get("task_type"),
+        "principal": job.get("submitter_principal"),
+        "mem_peak": None, "cpu_s": None,
+        "wall_s": round(now - started, 3) if started else None,
+        "llm_calls": float(calls) if calls else None,
+        "llm_tokens": float(tokens) if tokens else None,
+    }
+    try:
+        db.add_typed_event(CX, jid, "actuals", payload)
+    except Exception:
+        pass
+    if reason:
+        try:
+            db.add_event(CX, jid, "note", reason)
+        except Exception:
+            pass
+    db.mark_terminal(CX, jid, state, 0 if state == "done" else None)
+
+def _session_supervise(job):
+
+    if _session_remote_node(job):
+        return
+    pid = _session_vmm_pid(job)
+    if _session_vmm_alive(pid):
+        return
+    _finalize_session_row(job, "done",
+                          "session cell vanished without detach (vmm pid %s gone) — row closed by pnd"
+                          % pid)
+
+def _session_verbs(req, verb):
+
+    if req.get("_peer_uid") != os.getuid():
+        return {"ok": False, "error": "session verbs are first-party only"}
+    if verb == "session-attach":
+        cell = str(req.get("cell") or "").strip()
+
+        principal = str(req.get("cell_principal") or "owner").strip() or "owner"
+        kind = "voice" if str(req.get("kind") or "") == "voice" else "session"
+        node = str(req.get("node") or "").strip()
+        try:
+            mem = max(1, int(req.get("mem_mb") or 0))
+            pid = int(req.get("pid") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "mem_mb/pid must be integers"}
+        if not cell or (not pid and not node):
+            return {"ok": False, "error": "session-attach needs cell, mem_mb, pid (or node)"}
+
+        unit = ("session:node=%s" % node) if (node and not pid) else ("session:pid=%d" % pid)
+        where = ("remote node=%s" % node) if (node and not pid) else ("vmm pid %d" % pid)
+        r = CX.execute("SELECT id FROM jobs WHERE source=? AND client_tag=? AND state='running' "
+                       "ORDER BY id DESC LIMIT 1", (SESSION_SOURCE, cell)).fetchone()
+        if r:
+            jid = r["id"]
+            CX.execute("UPDATE jobs SET scope_unit=? WHERE id=?", (unit, jid))
+            CX.commit()
+            db.add_event(CX, jid, "note", "session cell re-attached (%s)" % where)
+            return {"ok": True, "id": jid, "already": True}
+        prof = {"mem": mem, "cpu_weight": 60, "latency": "realtime", "llm_weight": 0,
+                "timeout_s": 7 * 86400}
+        jid = db.submit(CX, cmd=["(session-cell)", cell], cwd="/", env={},
+                        profile_json=json.dumps(prof), prio=10, mem=mem, tag=cell,
+                        source=SESSION_SOURCE, principal=principal,
+                        task_type=("voice.interactive" if kind == "voice" else "session.interactive"),
+                        submitter_principal=principal)
+        db.mark_running(CX, jid, unit, None)
+        db.add_event(CX, jid, "note",
+                     "session microVM attached (principal=%s, %d MiB, %s) — interactive "
+                     "track, LLM per-call geleast" % (principal, mem, where))
+        return {"ok": True, "id": jid}
+    if verb == "session-turn":
+        try:
+            jid = int(req.get("job_id") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad job_id"}
+        job = db.get(CX, jid, scope_all=True)
+        if not job or job.get("source") != SESSION_SOURCE:
+            return {"ok": False, "error": "no such session job"}
+        payload = {"job_id": jid, "principal": job.get("submitter_principal"),
+                   "tokens_in": max(0, int(req.get("tokens_in") or 0)),
+                   "tokens_out": max(0, int(req.get("tokens_out") or 0)),
+                   "status": int(req.get("status") or 0),
+                   "wait_ms": max(0, int(req.get("wait_ms") or 0))}
+        db.add_typed_event(CX, jid, "llm.turn", payload)
+        try:
+            db.heartbeat(CX, jid)
+        except Exception:
+            pass
+        return {"ok": True}
+    if verb == "session-detach":
+        jid = req.get("job_id")
+        job = None
+        if jid is not None:
+            try:
+                job = db.get(CX, int(jid), scope_all=True)
+            except (TypeError, ValueError):
+                job = None
+        elif req.get("cell"):
+            r = CX.execute("SELECT id FROM jobs WHERE source=? AND client_tag=? AND state='running' "
+                           "ORDER BY id DESC LIMIT 1", (SESSION_SOURCE, str(req["cell"]))).fetchone()
+            job = db.get(CX, r["id"], scope_all=True) if r else None
+        if not job or job.get("source") != SESSION_SOURCE:
+            return {"ok": False, "error": "no such session job"}
+        if job.get("state") != "running":
+            return {"ok": True, "id": job["id"], "already": True}
+        state = "failed" if str(req.get("state") or "done") == "failed" else "done"
+        _finalize_session_row(job, state, str(req.get("reason") or "") or None)
+        return {"ok": True, "id": job["id"], "state": state}
+    return {"ok": False, "error": "unknown session verb"}
+
+def _tail_file(path, nbytes):
+
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > nbytes:
+                f.seek(size - nbytes)
+            data = f.read(nbytes)
+        return data.decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+def sandbox_props_for(job, prof, ws, mem_high=None, scratch=None):
+
+    props = prof.systemd_properties(IO_ENABLED, mem_high=mem_high)
+
+    props.append(f"ReadWritePaths={ws}")
+
+    if (PIPELINE_STATE_DIR
+            and str(job.get("principal") or "") == "admin"
+            and str(job.get("client_tag") or "").startswith("pipeline:")
+            and os.path.isdir(PIPELINE_STATE_DIR)):
+        props.append(f"ReadWritePaths={PIPELINE_STATE_DIR}")
+
+    if scratch:
+        props.append(f"ReadWritePaths={scratch}")
+    if prof.sandbox == "worker-strict":
+
+        try:
+            os.makedirs(SECRETS_DIR, mode=0o700, exist_ok=True)
+        except OSError:
+            pass
+        if os.path.isdir(SECRETS_DIR):
+            props.append(f"InaccessiblePaths={SECRETS_DIR}")
+        else:
+            print(f"[pnd] worker-strict: secrets-Riegel NICHT setzbar ({SECRETS_DIR} fehlt und "
+                  f"ist nicht anlegbar) — der Auftrag laeuft ohne diesen Zusatz-Riegel",
+                  file=sys.stderr, flush=True)
+        sig = os.path.join(os.environ.get("XDG_RUNTIME_DIR",
+                          f"/run/user/{os.getuid()}"), "zyrkel-signals.sock")
+        if os.path.exists(sig):
+            props.append(f"InaccessiblePaths={sig}")
+
+    try:
+        _tt = db.get_task_type(CX, job.get("task_type")) if job.get("task_type") else None
+    except Exception:
+        _tt = None
+    if _tt and _tt.get("isolation_tier") == "cell" and slc.backend_name() == "cgroup":
+        props.append("X-PnCell=1")
+
+    if getattr(prof, "trusted", False) and slc.backend_name() == "cgroup":
+        props.append("X-PnTrusted=1")
+    return props
+
+def start_job(job, prof, mem_high=None):
+    out, err, rc = out_err_rc_for(job["id"])
+    argv = json.loads(job["cmd"])
+    env = json.loads(job["env"] or "{}")
+
+    ws = record.mkspace(job["id"])
+    db.set_workspace(CX, job["id"], ws)
+    job = {**job, "workspace_path": ws}
+
+    env["PN_JOB_ID"] = str(job["id"])
+    env["PN_WORKSPACE"] = ws
+    env.setdefault("XDG_RUNTIME_DIR",
+                   os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+
+    scratch = _job_scratch_dir(job["id"])
+    try:
+        os.makedirs(scratch, exist_ok=True)
+        os.chmod(scratch, 0o700)
+    except OSError as e:
+        sys.stderr.write("pnd: scratch dir setup job %s failed: %s: %s\n"
+                         % (job["id"], type(e).__name__, e))
+    env["PN_SCRATCH"] = scratch
+    if getattr(prof, "disk_max", None):
+        env["PN_SCRATCH_MAX_MIB"] = str(int(prof.disk_max))
+        env["TMPDIR"] = env["TMP"] = env["TEMP"] = scratch
+    props = sandbox_props_for(job, prof, ws, mem_high=mem_high, scratch=scratch)
+    if job.get("node"):
+
+        nprops = rdisp.node_props(job["node"], timeout_s=getattr(prof, "timeout_s", None))
+        if nprops is None:
+            db.finalize(CX, job["id"], "failed", 125, record_ok=False,
+                        fail_class=failklasse.TRANSIENT)
+            db.add_event(CX, job["id"], "error",
+                         f"node dispatch failed: worker '{job['node']}' unknown/unusable "
+                         f"(removed from workers.json after submit?)")
+            return False
+        proc = rdisp.dispatch(job["id"], argv, job["cwd"], env, props + nprops, out, err, rc)
+    else:
+
+        proc = slc.dispatch(job["id"], argv, job["cwd"], env, props, out, err, rc,
+                            track=sched.track_of(prof))
+    if proc is None:
+
+        db.finalize(CX, job["id"], "failed", 127, record_ok=False,
+                    fail_class=failklasse.FATAL)
+        db.add_event(CX, job["id"], "error", "dispatch failed (systemd-run)")
+        return False
+    PROCS[job["id"]] = proc
+    OUT_OFF[job["id"]] = 0
+    db.mark_running(CX, job["id"], slc.unit_name(job["id"]), out)
+
+    db.add_typed_event(CX, job["id"], "state", {"state": "running"})
+    return True
+
+def _drop(jid):
+    PROCS.pop(jid, None)
+    OUT_OFF.pop(jid, None)
+    _DAUER_NOTED.discard(jid)
+
+    llm_release(jid)
+
+    try:
+        slc.cleanup_unit(jid)
+    except Exception as e:
+        sys.stderr.write("pnd: leaf cleanup job %s failed: %s: %s\n" % (jid, type(e).__name__, e))
+
+    try:
+        import shutil as _shutil
+        _shutil.rmtree(_job_scratch_dir(jid), ignore_errors=True)
+    except Exception as e:
+        sys.stderr.write("pnd: scratch cleanup job %s failed: %s: %s\n" % (jid, type(e).__name__, e))
+
+def _read_rationale(ws):
+
+    for cand in (os.path.join(ws, "work", "RATIONALE.md"),
+                 os.path.join(ws, "RATIONALE.md")):
+        try:
+            with open(cand) as f:
+                return f.read()
+        except OSError:
+            continue
+    return None
+
+def emit_result(job, record_info, exit_code):
+
+    try:
+        payload = {
+            "wo_id": job.get("group_id"),
+            "job_id": job["id"],
+            "reply_to": job.get("reply_to"),
+            "verdict": "done" if exit_code == 0 else "failed",
+            "record_commit": record_info["commit"],
+            "result_hash": record_info["result_hash"],
+            "manifest_digest": record_info["result_hash"],
+        }
+        db.add_event(CX, job["id"], "result", payload)
+        return True
+    except Exception as e:
+        db.add_event(CX, job["id"], "error", f"emit failed: {type(e).__name__}: {e}")
+        return False
+
+def emit_approval_request(job, record_info, code, held_state, nonce, gate):
+
+    try:
+        preview = record.review_preview(job)
+    except Exception as e:
+        preview = {"error": f"{type(e).__name__}: {e}"}
+    payload = {
+        "job_id": job["id"], "nonce": nonce, "gate": gate,
+        "task_type": job.get("task_type"),
+        "summary": job.get("client_tag") or job.get("task_type") or "produced result",
+        "held_state": held_state,
+        "result": {
+            "record_commit": (record_info or {}).get("commit"),
+            "result_hash": (record_info or {}).get("result_hash"),
+            "result_uri": None,
+            "workspace_path": job.get("workspace_path"),
+            "exit_code": code,
+        },
+        "preview": preview,
+        "revise": {"count": job.get("revise_count") or 0,
+                   "max": job.get("revise_max") if job.get("revise_max") is not None else 3},
+    }
+    db.add_typed_event(CX, job["id"], "approval-request", payload)
+
+def _emit_terminal(jid, state, code, record_ok, job):
+
+    db.add_typed_event(CX, jid, "state", {"state": state, "exit_code": code,
+                                          "record_ok": bool(record_ok)})
+
+    if str(job.get("source") or "") == "filler":
+        return
+    db.add_typed_event(CX, jid, "notify",
+                       {"job_id": jid, "state": state, "task_type": job.get("task_type"),
+                        "principal": job.get("submitter_principal"),
+                        "reply_to": job.get("reply_to"), "exit_code": code,
+                        "record_commit": job.get("record_commit"),
+                        "result_hash": job.get("result_hash")})
+
+def finalize_approved(job):
+
+    jid = job["id"]
+    j = db.get(CX, jid, scope_all=True)
+    if not j or j["state"] != "awaiting_approval":
+        return None
+    held_state = j.get("held_state") or "done"
+    code = j.get("held_exit_code")
+    ws = j.get("workspace_path") or record.workspace_path(jid)
+    j = {**j, "workspace_path": ws}
+
+    committed = bool(j.get("record_commit")) and record.valid_workspace(ws)
+    record_ok = record.compute_record_ok(
+        j, work_success=(held_state == "done"), committed=committed, emitted=committed)
+    if record_ok:
+        state = "done"
+    elif held_state == "timeout":
+        state = "timeout"
+    else:
+        state = "failed"
+    snap = meters.snapshot()
+    retention_until = time.time() + record.work_ttl_for(snap.get("data_free_pct", 100.0))
+    db.finalize(CX, jid, state, code, record_ok=record_ok,
+                record_commit=j.get("record_commit"), result_uri=None,
+                result_hash=j.get("result_hash"), retention_until=retention_until,
+                fail_class=(None if state == "done" else failklasse.FATAL))
+    db.add_typed_event(CX, jid, "approval-result", {"decision": "approved", "state": state})
+    _emit_terminal(jid, state, code, record_ok, j)
+    return state
+
+def finalize_job(job, code, terminal_hint, cg_stats=None):
+
+    jid = job["id"]
+    ws = job.get("workspace_path") or record.workspace_path(jid)
+    job = {**job, "workspace_path": ws}
+    started = job.get("started_at")
+    finished = time.time()
+    work_success = (terminal_hint == "done" and code == 0)
+    argv = json.loads(job["cmd"])
+
+    committed = False
+    record_info = None
+    try:
+        record_info = record.write_record(
+            job, argv=argv, exit_code=code if code is not None else -1,
+            started_at=started, finished_at=finished,
+            rationale=_read_rationale(ws))
+        committed = bool(record_info.get("commit"))
+    except Exception as e:
+        db.add_event(CX, jid, "error", f"record commit failed: {type(e).__name__}: {e}")
+
+    emitted = False
+    if committed:
+        emitted = emit_result(job, record_info, code if code is not None else -1)
+
+    record_ok = record.compute_record_ok(
+        job, work_success=work_success, committed=committed, emitted=emitted)
+
+    gate = (job.get("approval_kind") or "none")
+    if work_success and record_ok and gate in ("post", "checkpoint"):
+        nonce = secrets.token_urlsafe(18)
+
+        db.set_record(CX, jid, record_commit=(record_info or {}).get("commit"),
+                      result_hash=(record_info or {}).get("result_hash"))
+        held_state = "done"
+        db.hold_for_approval(CX, jid, nonce, held_state, code, approval_kind=gate)
+
+        job = {**job, "revise_count": db.get(CX, jid, scope_all=True).get("revise_count")}
+        emit_approval_request(job, record_info, code, held_state, nonce, gate)
+        db.add_typed_event(CX, jid, "state",
+                           {"state": "awaiting_approval", "gate": gate, "exit_code": code})
+        return "awaiting_approval"
+
+    if record_ok:
+        state = "done"
+    elif terminal_hint == "timeout":
+        state = "timeout"
+    else:
+        state = "failed"
+
+    snap = meters.snapshot()
+    ttl = record.work_ttl_for(snap.get("data_free_pct", 100.0))
+    retention_until = finished + ttl
+
+    fc = None
+    if state != "done":
+        _, _errp, _ = out_err_rc_for(jid)
+        fc = failklasse.classify(code, terminal_hint,
+                                 err_tail=_tail_file(_errp, 4096),
+                                 oom=bool((cg_stats or {}).get("oom_kill"))) or failklasse.FATAL
+    db.finalize(CX, jid, state, code, record_ok=record_ok,
+                record_commit=(record_info or {}).get("commit"),
+                result_uri=None,
+                result_hash=(record_info or {}).get("result_hash"),
+                retention_until=retention_until, fail_class=fc)
+
+    _emit_terminal(jid, state, code, record_ok, job)
+
+    if started:
+        gov_observe(finished - started)
+
+    stamp_actuals(job, started, finished, cg_stats=cg_stats)
+    if work_success and not record_ok:
+        db.add_event(CX, jid, "error",
+                     "work succeeded but record incomplete (commit/emit/layout) -> failed, "
+                     "not done (no-done-without-record)")
+    return state
+
+def _maybe_oom_grow(job, prof, code, cg):
+
+    grown = sched.oom_grow_target(prof, job.get("oom_retries") or 0, code,
+                                  (cg or {}).get("oom_kill"))
+    if grown is None:
+        return False
+    new_prof = ResourceProfile.from_json(job["profile"])
+    new_prof.mem = grown
+    retries = (job.get("oom_retries") or 0) + 1
+    db.requeue_oom_grown(CX, job["id"], grown, new_prof.to_json())
+    db.add_event(CX, job["id"], "note",
+                 f"OOM-killed -> requeue with mem {prof.mem}->{grown} MiB "
+                 f"(oom retry {retries}/{prof.max_oom_retries})")
+    db.add_typed_event(CX, job["id"], "notify",
+                       {"job_id": job["id"], "state": "oom-retry", "kind": "oom-retry",
+                        "task_type": job.get("task_type"),
+                        "principal": job.get("submitter_principal"),
+                        "reply_to": job.get("reply_to"),
+                        "mem_from": prof.mem, "mem_to": grown,
+                        "retry": retries, "max": prof.max_oom_retries})
+    return True
+
+def _walltime_warn(job, prof, wall, extra):
+
+    jid = job["id"]
+    limit = prof.timeout_s + max(0.0, extra)
+    remaining = max(0, int(limit - wall))
+    db.mark_soft_warned(CX, jid)
+    if str(job.get("source") or "") != "filler":
+        db.add_typed_event(CX, jid, "notify",
+                           {"job_id": jid, "state": "walltime-warn", "kind": "walltime-warn",
+                            "task_type": job.get("task_type"),
+                            "principal": job.get("submitter_principal"),
+                            "reply_to": job.get("reply_to"),
+                            "remaining_s": remaining, "walltime_s": int(limit),
+                            "extendable": prof.max_extend_s > 0})
+    db.add_event(CX, jid, "note",
+                 f"walltime warning: ~{remaining}s left of {int(limit)}s"
+                 + (f" — `pn extend {jid} <s>` to request more time" if prof.max_extend_s > 0
+                    else " — ask an admin to extend"))
+
+def _maybe_drain_requeue(job, code):
+
+    if not job.get("node") or code == 0:
+        return False
+    try:
+        cap = max(0, int(os.environ.get("PN_DRAIN_REQUEUE", "2") or 2))
+    except (TypeError, ValueError):
+        cap = 2
+    try:
+        v = rdisp.drain_verdict(job, code, rdisp.get_worker(job["node"]), max_requeues=cap)
+    except Exception:
+        return False
+    if not v.get("requeue"):
+        if v.get("reason"):
+            db.add_event(CX, job["id"], "note", "drain-requeue: " + v["reason"])
+        return False
+    nb = db.requeue_drain(CX, job["id"], clear_node=v.get("clear_node", False))
+    if nb is None:
+        return False
+    wait_s = max(0, int(nb - time.time()))
+    db.add_event(CX, job["id"], "note",
+                 "Node-Drain beendete den Lauf (exit %s) -> zurueck in die Queue statt failed: "
+                 "%s; Versuch %d/%d, Backoff %ds%s"
+                 % (code, v["reason"], int(job.get("drain_requeues") or 0) + 1, cap, wait_s,
+                    " — Fleet-Zuweisung geloest, Picker waehlt neu" if v.get("clear_node")
+                    else ""))
+    db.add_typed_event(CX, job["id"], "state",
+                       {"state": "queued", "reason": "node-drain-requeue",
+                        "node": job.get("node"), "exit_code": code, "not_before": nb})
+    return True
+
+def reap():
+    now = time.time()
+    for job in db.running(CX):
+        jid = job["id"]
+        if job.get("source") == SESSION_SOURCE:
+            _session_supervise(job)
+            continue
+        _, _, rcp = out_err_rc_for(jid)
+        prof = ResourceProfile.from_json(job["profile"])
+
+        code = None
+        done = False
+        p = PROCS.get(jid)
+        if p is not None:
+            ret = p.poll()
+            if ret is not None:
+                code = slc.read_rc(rcp)
+                if code is None:
+                    code = ret
+                done = True
+        else:
+            st = slc.unit_status(jid)
+            if not st["loaded"] or not st["active"]:
+                code = slc.read_rc(rcp)
+                if code is None:
+                    code = st["code"]
+                done = True
+        if done:
+
+            cg = _cg_stats(jid)
+
+            if code != 0 and _maybe_oom_grow(job, prof, code, cg):
+                _drop(jid)
+                continue
+
+            if code != 0 and _maybe_drain_requeue(job, code):
+                _drop(jid)
+                continue
+            finalize_job(job, code, "done" if code == 0 else "failed", cg_stats=cg)
+            _drop(jid)
+            continue
+
+        if not job.get("started_at"):
+            continue
+
+        _dmax = getattr(prof, "disk_max", None)
+        if _dmax:
+            _used = _dir_usage_mib([_job_scratch_dir(jid),
+                                    job.get("workspace_path") or record.workspace_path(jid)])
+            if _used > int(_dmax):
+                _reason = ("Scratch-Kontingent überschritten: %d MiB auf der Platte geschrieben, "
+                           "erlaubt sind %d MiB (--disk-max) — Job gestoppt, Box-Platte unversehrt."
+                           % (_used, int(_dmax)))
+                cg = _cg_stats(jid)
+                slc.stop_unit(jid)
+                pp = PROCS.get(jid)
+                if pp:
+                    try:
+                        pp.wait(timeout=5)
+                    except Exception:
+                        pass
+                db.add_event(CX, jid, "error", _reason)
+                finalize_job(job, 122, "failed", cg_stats=cg)
+                _drop(jid)
+                continue
+        wall = now - job["started_at"]
+
+        _ds = getattr(prof, "dauer_s", None)
+        if _ds and wall > float(_ds) and jid not in _DAUER_NOTED:
+            _DAUER_NOTED.add(jid)
+            try:
+                db.add_event(CX, jid, "note",
+                             "überzieht die geplante Dauer (dauer_s=%ds) um %ds — dauer_s ist "
+                             "reine Planungsgröße, KEIN Limit; nur die ETA anderer Buchungen "
+                             "wird neu gerechnet." % (int(_ds), int(wall - float(_ds))))
+            except Exception:
+                _DAUER_NOTED.discard(jid)
+        extra = job.get("walltime_extra_s") or 0.0
+        phase = sched.walltime_phase(prof, wall, extra, bool(job.get("soft_warned")))
+        if phase == "warn":
+            _walltime_warn(job, prof, wall, extra)
+        elif phase == "kill":
+            cg = _cg_stats(jid)
+            slc.stop_unit(jid)
+            pp = PROCS.get(jid)
+            if pp:
+                try:
+                    pp.wait(timeout=5)
+                except Exception:
+                    pass
+            finalize_job(job, 124, "timeout", cg_stats=cg)
+            _drop(jid)
+
+def scan_progress():
+
+    for job in db.running(CX):
+        jid = job["id"]
+        outp, _, _ = out_err_rc_for(jid)
+        off = OUT_OFF.get(jid, 0)
+        try:
+            sz = os.path.getsize(outp)
+            if sz <= off:
+                continue
+            with open(outp, "rb") as f:
+                f.seek(off)
+                chunk = f.read()
+            OUT_OFF[jid] = off + len(chunk)
+        except OSError:
+            continue
+        last = None
+        for last in PROGRESS_RE.finditer(chunk):
+            pass
+        if not last:
+            continue
+        done = total = msg = None
+        if last.group(1):
+            try:
+                d = json.loads(last.group(1).decode())
+                done, total, msg = d.get("done"), d.get("total"), d.get("msg")
+            except Exception:
+                continue
+        else:
+            done, total = int(last.group(2)), int(last.group(3))
+        if done is not None or total is not None or msg is not None:
+            db.update_progress(CX, jid, done=done, total=total, msg=msg)
+            db.add_typed_event(CX, jid, "progress",
+                               {"done": done, "total": total, "msg": msg})
+
+def replicate_sweep():
+
+    for job in db.replication_pending(CX):
+        res = record.replicate(job)
+        if res.get("ok"):
+            db.mark_replicated(CX, job["id"], result_uri=res.get("result_uri"),
+                               result_hash=res.get("result_hash"))
+            db.add_event(CX, job["id"], "replicated",
+                         {"result_uri": res.get("result_uri"),
+                          "result_hash": res.get("result_hash"),
+                          "idempotent": res.get("idempotent", False)})
+
+def gc_sweep():
+
+    for job in db.gc_candidates(CX):
+        if record.dispose_workspace(job["id"]):
+            db.mark_workspace_gcd(CX, job["id"])
+            db.add_event(CX, job["id"], "gc",
+                         {"reason": "ttl", "result_uri": job.get("result_uri")})
+
+    snap = meters.snapshot()
+    pct = snap.get("data_free_pct", 100.0)
+    if pct < record.DATA_WARN_PCT:
+
+        for job in db.disk_pressure_victims(CX, limit=50):
+            if meters.snapshot().get("data_free_pct", 100.0) >= record.DATA_WARN_PCT:
+                break
+            if record.dispose_workspace(job["id"]):
+                db.mark_workspace_gcd(CX, job["id"])
+                db.add_event(CX, job["id"], "gc",
+                             {"reason": "disk-pressure", "result_uri": job.get("result_uri")})
+
+    pct = meters.snapshot().get("data_free_pct", 100.0)
+    degraded = pct < record.DATA_HARD_PCT
+    floored = pct < getattr(record, "DATA_FLOOR_PCT", 3.0)
+    if degraded and not HEALTH_DEGRADED["disk"]:
+        sys.stderr.write(f"pnd HEALTH DEGRADED: DATA free {pct:.1f}% < {record.DATA_HARD_PCT}% "
+                         f"-> THROTTLE: bulk work waits, latency work keeps flowing "
+                         f"(NOT deleting unreplicated copies)\n")
+        sys.stderr.flush()
+    if floored and not HEALTH_DEGRADED["disk_floor"]:
+        sys.stderr.write(f"pnd HEALTH FLOOR: DATA free {pct:.1f}% < "
+                         f"{getattr(record, 'DATA_FLOOR_PCT', 3.0)}% -> stop admitting "
+                         f"ENTIRELY (still NOT deleting unreplicated copies)\n")
+        sys.stderr.flush()
+    HEALTH_DEGRADED["disk"] = degraded
+    HEALTH_DEGRADED["disk_floor"] = floored
+
+def maybe_gc():
+
+    global LAST_GC
+    now = time.time()
+    if now - LAST_GC < GC_EVERY_S:
+        return
+    LAST_GC = now
+    try:
+        replicate_sweep()
+        gc_sweep()
+    except Exception as e:
+        sys.stderr.write(f"pnd gc_sweep error: {type(e).__name__}: {e}\n")
+        sys.stderr.flush()
+
+def run_dag_gate():
+
+    res = db.gate_dag(CX)
+    for jid in res.get("promoted", []):
+
+        db.add_typed_event(CX, jid, "state", {"state": "queued", "reason": "deps_satisfied"})
+    for jid, detail in res.get("cancelled", []):
+
+        db.add_typed_event(CX, jid, "state",
+                           {"state": "cancelled", "reason": "dep_failed",
+                            "failed_deps": detail.get("failed_deps"),
+                            "missing_deps": detail.get("missing_deps")})
+        j = db.get(CX, jid, scope_all=True) or {}
+        db.add_typed_event(CX, jid, "notify",
+                           {"job_id": jid, "state": "cancelled", "reason": "dep_failed",
+                            "task_type": j.get("task_type"),
+                            "principal": j.get("submitter_principal"),
+                            "reply_to": j.get("reply_to")})
+
+    touched = set()
+    for jid in res.get("promoted", []) + [c[0] for c in res.get("cancelled", [])]:
+        j = db.get(CX, jid, scope_all=True)
+        if j and j.get("group_id"):
+            touched.add(j["group_id"])
+    for gid in touched:
+
+        owner = db.group_owner(CX, gid)
+        if not owner:
+            continue
+        gs = db.group_status(CX, gid, principal=owner, scope_all=False)
+        if gs:
+            db.add_typed_event(CX, gs["members"][0]["id"], "group-status", gs,
+                               topics=[db.group_topic(owner, gid)])
+    return res
+
+def preempt_filler(jid) -> bool:
+
+    slc.stop_unit(jid)
+    pp = PROCS.get(jid)
+    if pp:
+        try:
+            pp.wait(timeout=STOP_GRACE_S)
+        except Exception:
+            pass
+
+    alive = (pp is not None and pp.poll() is None)
+    if not alive:
+        st = slc.unit_status(jid)
+
+        alive = bool(st.get("loaded") and st.get("active"))
+    if alive:
+        db.add_event(CX, jid, "note",
+                     "preempt requested but filler not yet dead -> kept accounted (no re-admit)")
+        return False
+    _drop(jid)
+    db.add_event(CX, jid, "note", "preempted by arriving real work (filler yields)")
+    db.requeue(CX, jid, reset_age=True)
+    return True
+
+def _maybe_preempt_for(job, prof, hr, proj, llm_reserved):
+
+    fillers = db.running_fillers(CX)
+    if not fillers:
+        return (False, 0, 0.0)
+    cand = [{"id": f["id"],
+             "mem": ResourceProfile.from_json(f["profile"]).mem,
+             "llm": sched.llm_demand_slots(ResourceProfile.from_json(f["profile"]))}
+            for f in fillers]
+
+    used = max(proj.get("batch_current", 0), db.reserved_mib(CX, track="batch"))
+    need_mem = max(0, (used + prof.mem) - CFG.batch_high)
+
+    llm_free = (hr or {}).get("llm_free")
+    need_llm = 0.0
+    if prof.llm_weight:
+        demand = sched.llm_demand_slots(prof)
+        if llm_free is None:
+            need_llm = demand
+        else:
+            avail = float(llm_free) - float(llm_reserved or 0.0)
+            need_llm = max(0.0, demand - avail)
+
+    have_mem = sum(c["mem"] for c in cand)
+    have_llm = sum(c["llm"] for c in cand)
+    if need_mem > have_mem or need_llm > have_llm:
+        return (False, 0, 0.0)
+    plan = sched.preempt_plan(need_mem, need_llm, cand)
+    by_id = {c["id"]: c for c in cand}
+    freed_mem, freed_llm, any_killed = 0, 0.0, False
+    for jid in plan:
+        if preempt_filler(jid):
+            any_killed = True
+            freed_mem += by_id[jid]["mem"]
+            freed_llm += by_id[jid]["llm"]
+    return (any_killed, freed_mem, freed_llm)
+
+def tick():
+    with LK:
+        reap()
+        drain_pending_releases()
+        maybe_gc()
+        run_dag_gate()
+        snap = meters.snapshot()
+        scan_progress()
+
+        if _ADMISSION_PAUSED:
+            WAIT_REASONS.update(jobs={}, ts=time.time(),
+                                **{"global": "admission paused (admin)"})
+            sd_notify("WATCHDOG=1")
+            return
+
+        _starved = snap["mem_available"] < CFG.mem_floor
+        blocked = GATE.update(100.0 if _starved else (snap.get("psi_ctl_full_avg10") or 0.0))
+
+        _bpsi = snap.get("psi_batch_full_avg10")
+        batch_blocked = _bpsi is not None and _bpsi >= CFG.psi_stop
+
+        if HEALTH_DEGRADED["disk_floor"]:
+            WAIT_REASONS.update(jobs={}, ts=time.time(),
+                                **{"global": "DATA-Platte unter dem absoluten Boden "
+                                             "(%.1f%%) — es startet nichts mehr, und es wird "
+                                             "nichts Unrepliziertes geloescht"
+                                             % (snap.get("data_free_pct", 0.0))})
+            sd_notify("WATCHDOG=1")
+            return
+        _disk_gedrosselt = bool(HEALTH_DEGRADED["disk"])
+
+        reassert_llm_leases()
+        hr = llm_headroom()
+        proj = dict(snap)
+
+        llm_reserved = 0.0
+        dispatched = 0
+
+        _fc_workers = rdisp.load_workers() if _FC_MODE != "off" else {}
+        _fc_inflight = {}
+        try:
+            _fc_boxload = os.getloadavg()[0]
+        except OSError:
+            _fc_boxload = 0.0
+        _fc_nproc = os.cpu_count() or 1
+
+        _kern_frei = _kern_snap = None
+        try:
+            _krows = db.kern_buchungen(CX)
+            if any(r["state"] == "queued" for r in _krows):
+                _kern_snap = _kern_snapshot(_fc_workers or rdisp.load_workers())
+                _kern_frei = kernslots.frei_je_node(
+                    _kern_snap, [r for r in _krows if r["state"] == "running"])
+        except Exception as e:
+            _kern_frei = _kern_snap = None
+            try:
+                sys.stderr.write("[kern-slots] Tick-Sicht nicht baubar: %s: %s\n"
+                                 % (type(e).__name__, e))
+            except Exception:
+                pass
+
+        _waits: dict = {}
+        _wait_global = None
+
+        last_head = None
+        skipped = set()
+
+        while dispatched < CFG.max_per_tick:
+
+            _rtc = db.running_track_counts(CX)
+            running = _rtc["total"]
+            reserved = db.reserved_mib(CX, track="batch")
+            cpu_running = db.reserved_cpu(CX, track="batch")
+
+            job = db.next_queued(CX, exclude_filler=True, skip=skipped)
+            if not job:
+                break
+            prof = ResourceProfile.from_json(job["profile"])
+
+            _kb = int(getattr(prof, "kerne", 0) or 0)
+            _fa_workers = _fc_workers
+            if _kb and _kern_frei is not None:
+                _fa_workers = {nid: rec for nid, rec in _fc_workers.items()
+                               if _kern_frei.get(nid, -1) >= _kb}
+            _fleet_assign(job, _fa_workers, _fc_inflight, _fc_boxload, _fc_nproc,
+                          mem_avail=proj.get("mem_available"), mem_total=snap.get("mem_total"))
+
+            if _kb and _kern_frei is not None:
+                _ktgt = job.get("node")
+                if _ktgt in _kern_frei and _kern_frei[_ktgt] < _kb:
+                    _waits[job["id"]] = ("kern-slots %s: %d von %d buchbaren Kernen frei, "
+                                         "%d gebucht"
+                                         % (_ktgt or "box", max(0, _kern_frei[_ktgt]),
+                                            (_kern_snap or {}).get(_ktgt, {}).get("buchbar", 0),
+                                            _kb))
+                    skipped.add(job["id"])
+                    continue
+            if job.get("node"):
+
+                prof.mem = rdisp.PROXY_MEM_MIB
+                prof.cpu_quota_pct = rdisp.PROXY_CPU_PCT
+
+                if _node_lane_full(_rtc, _fc_workers, _waits, job):
+                    skipped.add(job["id"])
+                    continue
+            _track = sched.track_of(prof)
+            dec = sched.evaluate(CFG, proj, prof, running, reserved, blocked, cpu_running,
+                                 track=_track, batch_blocked=batch_blocked,
+                                 disk_degraded=_disk_gedrosselt,
+                                 track_running=_rtc.get("batch", 0) + _rtc.get("filler", 0)
+                                 if _track == "batch" else _rtc.get(_track, 0),
+                                 slotless=bool(job.get("node")))
+            llm_dec = sched.llm_ok(hr, prof, llm_reserved)
+            if not dec.admit or not llm_dec.admit:
+
+                _waits[job["id"]] = dec.reason if not dec.admit else llm_dec.reason
+
+                if blocked:
+                    _wait_global = _waits[job["id"]]
+                    break
+                if running >= CFG.max_concurrent:
+
+                    _wait_global = _waits[job["id"]]
+                    skipped.add(job["id"])
+                    continue
+                killed, freed_mem, freed_llm = _maybe_preempt_for(
+                    job, prof, hr, proj, llm_reserved)
+                if killed:
+                    proj["mem_available"] += freed_mem
+                    proj["batch_current"] = max(0, proj["batch_current"] - freed_mem)
+                    if hr.get("llm_free") is not None:
+                        hr = dict(hr); hr["llm_free"] = float(hr["llm_free"]) + freed_llm
+                    continue
+
+                skipped.add(job["id"])
+                continue
+
+            high = sched.dynamic_mem_high(CFG, proj, reserved, prof)
+
+            if prof.llm_weight and not llm_lease(job["id"], prof.llm_weight, prof.llm_kind):
+                _waits[job["id"]] = "llm pool lease refused (pn-llmd saturated/unreachable)"
+                break
+            if start_job(job, prof, mem_high=high):
+                dispatched += 1
+                _waits.pop(job["id"], None)
+                proj["mem_available"] -= prof.mem
+                proj["batch_current"] = max(proj["batch_current"], reserved + prof.mem)
+                llm_reserved += sched.llm_demand_slots(prof)
+                if _kb and _kern_frei is not None:
+                    _kern_frei[job.get("node")] = _kern_frei.get(job.get("node"), 0) - _kb
+                last_head = None
+            else:
+
+                if prof.llm_weight:
+                    llm_release(job["id"])
+                if last_head == job["id"]:
+                    break
+                last_head = job["id"]
+                continue
+
+        if not blocked and not db.has_queued_real(CX):
+            fdispatched = 0
+            flast = None
+            fskipped = set()
+            while fdispatched < CFG.max_per_tick:
+                fjob = db.next_queued_filler(CX, skip=fskipped)
+                if not fjob:
+                    break
+                fprof = ResourceProfile.from_json(fjob["profile"])
+                _fleet_assign(fjob, _fc_workers, _fc_inflight, _fc_boxload, _fc_nproc,
+                              mem_avail=proj.get("mem_available"), mem_total=snap.get("mem_total"))
+                if fjob.get("node"):
+                    fprof.mem = rdisp.PROXY_MEM_MIB
+                    fprof.cpu_quota_pct = rdisp.PROXY_CPU_PCT
+                    if _node_lane_full(db.running_track_counts(CX), _fc_workers, _waits, fjob):
+                        break
+                reserved = db.reserved_mib(CX, track="batch")
+                cpu_running = db.reserved_cpu(CX, track="batch")
+                filler_running = len(db.running_fillers(CX))
+                fdec = sched.filler_fits(CFG, proj, fprof, reserved, hr, llm_reserved,
+                                         filler_running, blocked or batch_blocked,
+                                         filler_cap=FILLER_CAP, cpu_running=cpu_running)
+                if not fdec.admit:
+                    _waits[fjob["id"]] = fdec.reason
+
+                    fskipped.add(fjob["id"])
+                    continue
+                fhigh = sched.dynamic_mem_high(CFG, proj, reserved, fprof)
+                if fprof.llm_weight and not llm_lease(fjob["id"], fprof.llm_weight, fprof.llm_kind):
+                    _waits[fjob["id"]] = "llm pool lease refused (pn-llmd saturated/unreachable)"
+                    break
+                if start_job(fjob, fprof, mem_high=fhigh):
+                    fdispatched += 1
+                    _waits.pop(fjob["id"], None)
+                    proj["mem_available"] -= fprof.mem
+                    proj["batch_current"] = max(proj["batch_current"], reserved + fprof.mem)
+                    llm_reserved += sched.llm_demand_slots(fprof)
+                    flast = None
+                else:
+                    if fprof.llm_weight:
+                        llm_release(fjob["id"])
+                    if flast == fjob["id"]:
+                        break
+                    flast = fjob["id"]
+                    continue
+
+        elif (FILLER_TRICKLE_S > 0 and not blocked and not batch_blocked
+              and len(db.running_fillers(CX)) == 0
+              and (time.time() - globals().get("_LAST_FILLER_TRICKLE", 0.0)) >= FILLER_TRICKLE_S):
+            fjob = db.next_queued_filler(CX)
+            if fjob:
+                fprof = ResourceProfile.from_json(fjob["profile"])
+                _fleet_assign(fjob, _fc_workers, _fc_inflight, _fc_boxload, _fc_nproc,
+                              mem_avail=proj.get("mem_available"), mem_total=snap.get("mem_total"))
+                _nl_full = False
+                if fjob.get("node"):
+                    fprof.mem = rdisp.PROXY_MEM_MIB
+                    fprof.cpu_quota_pct = rdisp.PROXY_CPU_PCT
+
+                    _nl_full = _node_lane_full(db.running_track_counts(CX), _fc_workers,
+                                               _waits, fjob)
+                reserved = db.reserved_mib(CX, track="batch")
+                cpu_running = db.reserved_cpu(CX, track="batch")
+
+                fdec = sched.filler_fits(CFG, proj, fprof, reserved, hr, llm_reserved,
+                                         0, False, filler_cap=FILLER_CAP, cpu_running=cpu_running)
+                if fdec.admit and not _nl_full:
+                    fhigh = sched.dynamic_mem_high(CFG, proj, reserved, fprof)
+                    _leased = True
+                    if fprof.llm_weight:
+                        _leased = llm_lease(fjob["id"], fprof.llm_weight, fprof.llm_kind)
+                    if _leased and start_job(fjob, fprof, mem_high=fhigh):
+                        globals()["_LAST_FILLER_TRICKLE"] = time.time()
+                        _waits.pop(fjob["id"], None)
+                        db.add_event(CX, fjob["id"], "note",
+                                     "filler trickle: garantierter Drip auf gesunder Box (Owner-Regel)")
+                    elif fprof.llm_weight and not _leased:
+                        _waits[fjob["id"]] = "filler trickle: llm pool lease refused"
+                    elif fprof.llm_weight:
+                        llm_release(fjob["id"])
+                else:
+                    _waits[fjob["id"]] = "filler trickle: " + fdec.reason
+
+        WAIT_REASONS.update(jobs=_waits, ts=time.time(), **{"global": _wait_global})
+    sd_notify("WATCHDOG=1")
+
+class AuthzError(Exception):
+    pass
+
+def broker_uids():
+    raw = os.environ.get("PND_BROKER_UIDS", "4003")
+    out = set()
+    for tok in raw.replace(",", " ").split():
+        try:
+            out.add(int(tok))
+        except ValueError:
+            pass
+    return out
+
+def _coerce_param(name, typ, val):
+
+    if typ == "int":
+        try:
+            return str(int(val))
+        except (TypeError, ValueError):
+            raise AuthzError(f"param '{name}' must be an int")
+
+    return str(val)
+
+def _clamp_limit(val, default=50, cap=MAX_LIMIT):
+
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        n = int(default)
+    if n < 0:
+        n = int(default)
+    return min(n, cap)
+
+def _resolve_principal(req, cx=None):
+
+    cx = CX if cx is None else cx
+    peer_uid = req.get("_peer_uid")
+    broker_principal = db.principal_for_uid(cx, peer_uid)
+    broker_caps = db.caps_for(cx, broker_principal)
+
+    method = req.get("_method")
+    selector = req.get("_selector")
+
+    if method or selector:
+        if peer_uid not in broker_uids() or "act-as" not in broker_caps:
+            raise AuthzError(
+                f"peer uid {peer_uid} (principal '{broker_principal or 'unknown'}') is not a "
+                f"trusted broker (needs allow-list membership + the 'act-as' cap)")
+        if not method or selector is None:
+            raise AuthzError("broker submit requires both _method and _selector")
+
+        over_priv = broker_caps & db.WILDCARD_CAPS
+        if over_priv:
+            raise AuthzError(
+                f"a broker principal must be structurally de-privileged (holds {sorted(over_priv)})")
+        submitter, _verified = db.resolve_identity(cx, method, selector)
+        if not submitter:
+
+            submitter = "lan-guest"
+        submitter_caps = db.caps_for(cx, submitter)
+
+        relay_caps = broker_caps - {"act-as"}
+        eff_caps = relay_caps & submitter_caps
+
+        ceiling = req.get("_ceiling_caps")
+        if ceiling is not None:
+            if not isinstance(ceiling, (list, tuple, set)):
+                raise AuthzError("_ceiling_caps must be a list of capability strings")
+            ceiling = set(ceiling)
+            bad = ceiling & db.WILDCARD_CAPS
+            if bad:
+                raise AuthzError(
+                    f"_ceiling_caps may not contain a wildcard cap {sorted(bad)} (a ceiling can "
+                    f"only narrow, never widen)")
+            eff_caps = db.caps_ceiling(eff_caps, ceiling)
+        return {"principal": submitter, "caps": eff_caps, "via_method": method,
+                "via_device": req.get("via_device"), "is_broker": True}
+
+    return {"principal": broker_principal, "caps": broker_caps,
+            "via_method": "peercred", "via_device": None, "is_broker": False}
+
+_TRUSTED_SOURCES = frozenset({"filler", "internal", "klaviatur", "cron", "box"})
+_SAFE_EXTERNAL_SOURCES = frozenset({"cli", "http", "portal", "voice", "device", "relay"})
+
+def _validate_source(req, ctx):
+
+    want = (req.get("source") or "cli").strip().lower()
+    caps = ctx.get("caps") or set()
+    trusted = ("view:all" in caps) or ("task_type:*" in caps)
+    if want in _TRUSTED_SOURCES:
+        if trusted:
+            return want
+
+        return "cli"
+    if want in _SAFE_EXTERNAL_SOURCES:
+        return want
+
+    return want if want and want not in _TRUSTED_SOURCES else "cli"
+
+try:
+    from pnlib import fairshare as _fs
+except Exception:
+    _fs = None
+
+_FS = {"t": 0.0, "usage": {}, "cfg": None}
+_FS_TTL = 300.0
+
+def _truthy_env(name, dflt="0"):
+    return str(os.environ.get(name, dflt)).strip().lower() in ("1", "true", "yes", "on")
+
+def _fs_cfg(snap):
+    if _FS["cfg"] is None:
+        _FS["cfg"] = _fs.config(snap.get("cpu_count") or 4, snap.get("mem_total") or 4096)
+    return _FS["cfg"]
+
+def _fs_usage(cfg):
+
+    now = time.time()
+    if now - _FS["t"] > _FS_TTL:
+        try:
+            _FS["usage"] = _fs.decayed_usage(DB_PATH, cfg)
+        except Exception:
+            _FS["usage"] = _FS.get("usage") or {}
+        _FS["t"] = now
+    return _FS["usage"]
+
+def _fs_account_weights(accounts, cx):
+
+    by_princ = {}
+    for a in accounts:
+        p = a.rsplit("/", 1)[0] if "/" in a else a
+        by_princ.setdefault(p, []).append(a)
+    out = {}
+    for p, accs in by_princ.items():
+        w = 1
+        if cx is not None:
+            try:
+                w = max(1, int(db.get_policy(cx, p).get("weight") or 1))
+            except Exception:
+                w = 1
+        share = w / float(len(accs) or 1)
+        for a in accs:
+            out[a] = share
+    return out
+
+def _fairshare_admit(req, ctx, prof, cx=None):
+
+    if _fs is None or not _truthy_env("PN_FAIRSHARE_ENFORCE", "1"):
+        return True, None, [], 0
+    try:
+        acct = _fs.account_of(ctx.get("principal"), req.get("tag"))
+        now = time.time()
+
+        until, level = _fs.ban_check(acct, now)
+        if until:
+            return (False, "Gesperrt wegen Submission-Flooding: '%s' noch %s (Stufe %d)"
+                    % (acct, _fs.human_duration(until - now), level),
+                    ["Stell die Cron-Frequenz ab oder buendle die Arbeit. Die Sperre eskaliert "
+                     "1h -> 2h -> 4h -> 24h -> 7d, wenn weiter geflutet wird."], 0)
+        _fs.ban_forgive(acct, now)
+
+        snap = meters.snapshot()
+        cfg = _fs_cfg(snap)
+        p = prof.to_json() if hasattr(prof, "to_json") else prof
+        pdict = json.loads(p) if isinstance(p, str) else p
+        realtime = (pdict.get("latency") == "realtime")
+
+        pend, rows = _fs.pending_work(DB_PATH, cfg)
+        total_rows = sum(rows.values())
+        if total_rows >= cfg["max_queued_rows"] and not realtime:
+            return (False, "Warteschlange voll (%d Zeilen, Backstop %d)" % (total_rows, cfg["max_queued_rows"]),
+                    ["Die Box ist kein HPC-Cluster: buendle Aufgaben zu weniger, laengeren Jobs."], 0)
+
+        want = _fs.reserve(pdict, cfg)
+        active = [a for a, v in pend.items() if v > 0]
+        weights = _fs_account_weights(set(active) | {acct}, cx)
+        allow = _fs.allowance(acct, active, weights, cfg)
+        have = pend.get(acct, 0.0)
+        if (have + want > allow) and not realtime:
+
+            banned_until, lvl = _fs.ban_strike(acct, now)
+            rep = _fs.shape_report(DB_PATH, cfg).get(acct, {})
+            adv = list(rep.get("advice") or [])
+            adv.append("'%s' reserviert %.0f Box-Sekunden; sein fairer Anteil unter %d aktiven "
+                       "Submittern ist %.0f." % (acct, have, len(weights), allow))
+            if banned_until:
+                adv.append("FLOODING: ab jetzt %s gesperrt (Stufe %d)."
+                           % (_fs.human_duration(banned_until - now), lvl))
+            return (False, "Fairshare: '%s' ueber seinem Backlog-Anteil (%.0f + %.0f > %.0f Box-s)"
+                    % (acct, have, want, allow), adv, 0)
+
+        usage = _fs_usage(cfg)
+        tot = sum(usage.values()) or 1.0
+
+        uw = _fs_account_weights(set(usage) | {acct}, cx)
+        shares = (uw.get(acct, 1.0)) / (sum(uw.values()) or 1.0)
+        f = _fs.fair_factor(usage.get(acct, 0.0) / tot, shares)
+        return True, None, [], _fs.priority_delta(f, 0.0, cfg)
+    except Exception as e:
+        print("[pnd] fairshare disabled this submit: %s" % e, file=sys.stderr, flush=True)
+        return True, None, [], 0
+
+_OVR_FIELDS = (("mem", "mem"), ("prio", "prio"), ("timeout_s", "timeout"),
+               ("cpu_quota_pct", "cpu_quota"), ("disk_min_free", "disk_min"),
+               ("disk_max", "disk_max"),
+               ("mem_max", "mem_max"), ("idempotent", "idempotent"),
+
+               ("latency", "latency"))
+
+def _scheduling_overrides(req, ctx):
+
+    caps = ctx.get("caps") or set()
+    if ("view:all" not in caps) and ("task_type:*" not in caps):
+        return {}
+    return {pf: req.get(rk) for pf, rk in _OVR_FIELDS}
+
+def _trusted_posture_allowed(ctx):
+
+    tt_name = ctx.get("task_type")
+    if tt_name:
+        klass = (db.get_task_type(CX, tt_name) or {}).get("klass")
+        base = CLASSES.get(klass) if klass else None
+        return bool(base is not None and getattr(base, "trusted", False))
+
+    return bool((ctx.get("caps") or set()) & db.WILDCARD_CAPS)
+
+def authorize_submit(req):
+
+    ctx = _resolve_principal(req)
+    principal, caps = ctx["principal"], ctx["caps"]
+    tt_name = req.get("task_type")
+
+    if tt_name:
+        allowed = (f"task_type:{tt_name}" in caps or "task_type:*" in caps
+                   or "task.raw" in caps)
+        if not allowed:
+            raise AuthzError(f"principal '{principal or 'unknown'}' may not run "
+                             f"task_type '{tt_name}'")
+        tt = db.get_task_type(CX, tt_name)
+        if not tt:
+            raise AuthzError(f"unknown task_type '{tt_name}'")
+        template = json.loads(tt["cmd_template"])
+        schema = json.loads(tt["params_schema"] or "{}")
+        params = req.get("params") or {}
+        unknown = set(params) - set(schema)
+        if unknown:
+            raise AuthzError(f"unknown params for '{tt_name}': {sorted(unknown)}")
+        sub = {}
+        for pname, ptyp in schema.items():
+            if pname not in params:
+                raise AuthzError(f"missing param '{pname}' for task_type '{tt_name}'")
+            sub[pname] = _coerce_param(pname, ptyp, params[pname])
+
+        argv = []
+        for elem in template:
+            if not isinstance(elem, str):
+                raise AuthzError(f"task_type '{tt_name}' template element {elem!r} is not a string")
+            argv.append(_PH.sub(lambda m: sub[m.group(1)] if m.group(1) in sub else m.group(0), elem))
+        return argv, {**ctx, "task_type": tt_name}
+
+    cmd = req.get("cmd") or req.get("argv")
+    if cmd is None:
+        raise AuthzError("submit requires either 'task_type' or a raw 'cmd'")
+    if "task.raw" not in caps:
+        raise AuthzError(f"principal '{principal or 'unknown'}' may not submit raw commands "
+                         f"(needs capability task.raw)")
+    return cmd, {**ctx, "task_type": None}
+
+def _resolve_caller(req, cx=None):
+
+    ctx = _resolve_principal(req, cx=cx)
+    return ctx["principal"], (ctx.get("caps") or set()), ctx.get("is_broker", False)
+
+def view_all_for(ctx):
+
+    return "view:all" in (ctx.get("caps") or set())
+
+def enforce_attenuation(ctx, parent_job):
+
+    if parent_job is None:
+        return None
+
+    view_all = "view:all" in (ctx.get("caps") or set())
+    parent = db.get(CX, int(parent_job), principal=ctx.get("principal"), scope_all=view_all)
+    if not parent:
+        raise AuthzError(f"parent_job {parent_job} unknown or not owned by "
+                         f"'{ctx.get('principal') or 'unknown'}'")
+
+    raw = parent.get("caps")
+    if raw:
+        try:
+            parent_caps = set(json.loads(raw))
+        except (ValueError, TypeError):
+            parent_caps = db.caps_for(CX, parent.get("submitter_principal"))
+    else:
+        parent_caps = db.caps_for(CX, parent.get("submitter_principal"))
+    child_caps = set(ctx.get("caps") or set())
+
+    escalation = child_caps - parent_caps
+    if escalation:
+        raise AuthzError(
+            f"attenuation violation: child caps {sorted(escalation)} ⊄ parent_job "
+            f"{parent_job} caps {sorted(parent_caps)} (a sub-task may never exceed its parent)")
+    return parent
+
+def dag_fields(req):
+
+    deps = req.get("deps")
+    dep_ids = []
+    if deps:
+        if not isinstance(deps, (list, tuple)):
+            raise AuthzError("deps must be a list of job ids")
+        for d in deps:
+            try:
+                dep_ids.append(int(d))
+            except (TypeError, ValueError):
+                raise AuthzError(f"bad dep id {d!r} (must be an int job id)")
+    group_id = req.get("group_id")
+    parent_job = req.get("parent_job")
+    if parent_job is not None:
+        try:
+            parent_job = int(parent_job)
+        except (TypeError, ValueError):
+            raise AuthzError(f"bad parent_job {parent_job!r}")
+    return dep_ids, group_id, parent_job
+
+def validate_deps_ownership(ctx, dep_ids):
+
+    view_all = "view:all" in (ctx.get("caps") or set())
+    for d in dep_ids:
+        if db.get(CX, d, principal=ctx.get("principal"), scope_all=view_all) is None:
+            raise AuthzError(f"dep job {d} unknown or not visible to "
+                             f"'{ctx.get('principal') or 'unknown'}'")
+
+def validate_group_ownership(ctx, group_id):
+
+    if not group_id:
+        return
+    if "view:all" in (ctx.get("caps") or set()):
+        return
+    principal = ctx.get("principal")
+    r = CX.execute("SELECT 1 FROM jobs WHERE group_id=? AND submitter_principal<>? LIMIT 1",
+                   (group_id, principal)).fetchone()
+    if r:
+        raise AuthzError("group_id belongs to another tenant")
+
+SUB_POLL_S = 0.5
+SUB_PING_S = 25.0
+
+def _make_subscriber(principal, topics, after_id):
+
+    def stream(conn, peer_uid):
+        def send(obj):
+            conn.sendall((json.dumps(obj, separators=(",", ":")) + "\n").encode())
+
+        scx = db.connect_ro(DB_PATH)
+        try:
+            start = db.max_event_id(scx) if after_id is None else int(after_id)
+            send({"ok": True, "type": "subscribed", "topics": topics,
+                  "principal": principal, "cursor": start})
+            cursor = start
+            last_ping = time.time()
+            while True:
+                evs = db.events_since(scx, topics, after_id=cursor, limit=500) if topics else []
+                if evs:
+                    for e in evs:
+                        send({"type": "event", "event": e})
+                        cursor = max(cursor, e["id"])
+                    last_ping = time.time()
+                else:
+
+                    if time.time() - last_ping >= SUB_PING_S:
+                        send({"type": "ping", "cursor": cursor})
+                        last_ping = time.time()
+                    time.sleep(SUB_POLL_S)
+        finally:
+            try:
+                scx.close()
+            except Exception:
+                pass
+    return stream
+
+READ_VERBS = frozenset({
+    "events", "pending", "cvm", "replay", "subscribe", "job", "eta", "list", "my-jobs",
+    "via-inflight", "my-history", "my-outputs", "whereis", "group", "result", "handoff",
+    "status", "log", "get-approval-prefs",
+})
+
+def _handle_read(req, verb):
+
+    rcx = db.connect_ro(DB_PATH)
+    try:
+        try:
+            caller, caller_caps, _is_broker = _resolve_caller(req, cx=rcx)
+        except AuthzError as e:
+            return {"ok": False, "error": str(e)}
+        view_all = "view:all" in caller_caps
+
+        read_scope = view_all or ("approval:resolve" in caller_caps)
+
+        if verb == "get-approval-prefs":
+            prefs = db.get_approval_prefs(rcx, caller)
+            wildcard = "task_type:*" in caller_caps
+            avail = []
+            for row in rcx.execute("SELECT name, klass, approval FROM task_types ORDER BY name"):
+                name = row["name"]
+                if not (wildcard or ("task_type:%s" % name) in caller_caps):
+                    continue
+                base = row["approval"] or "none"
+                avail.append({
+                    "name": name, "klass": row["klass"], "default": base,
+                    "pref": prefs.get(name),
+                    "effective": db.effective_approval(rcx, caller, name, base),
+                    "lowerable": db.APPROVAL_STRENGTH.get(base, 0) == 0,
+                })
+            return {"ok": True, "principal": caller, "prefs": prefs, "available": avail}
+        if verb == "events":
+            if not db.get(rcx, req.get("id"), principal=caller, scope_all=read_scope):
+                return {"ok": False, "error": "no such job"}
+            return {"ok": True, "events": db.events(
+                rcx, req["id"], _clamp_limit(req.get("limit"), default=200),
+                principal=caller, scope_all=read_scope)}
+
+        if verb == "pending":
+
+            return {"ok": True, "pending": db.pending_approvals(
+                rcx, principal=caller, scope_all=read_scope,
+                limit=_clamp_limit(req.get("limit"), default=100)),
+                "now": time.time()}
+
+        if verb == "cvm":
+            c = db.cvm(rcx, req.get("id"), principal=caller, scope_all=read_scope)
+            if not c:
+                return {"ok": False, "error": "no such job"}
+            return {"ok": True, "cvm": c}
+
+        if verb == "replay":
+            req_topics = req.get("topics") or ([f"job/{req['id']}"] if req.get("id") else [])
+            topics = db.authorize_topics(rcx, caller, req_topics, scope_all=view_all)
+            evs = db.events_since(rcx, topics, after_id=req.get("after_id", 0),
+                                  limit=_clamp_limit(req.get("limit"), default=500))
+            return {"ok": True, "events": evs, "topics": topics,
+                    "cursor": db.max_event_id(rcx)}
+
+        if verb == "subscribe":
+            req_topics = req.get("topics") or ([f"job/{req['id']}"] if req.get("id") else [])
+            topics = db.authorize_topics(rcx, caller, req_topics, scope_all=view_all)
+            after = req.get("after_id")
+            stream = _make_subscriber(caller, topics, after)
+            return {"_stream": stream}
+        if verb == "job":
+            j = db.get(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            out = {"ok": True, "job": j, "pos": db.position(rcx, req["id"]),
+                   "eta": job_eta(req["id"], j, cx=rcx),
+                   "now": time.time(), "stall_s": STALL_S}
+
+            if req.get("events"):
+                out["events"] = db.events(
+                    rcx, req["id"], _clamp_limit(req.get("events"), default=200),
+                    principal=caller, scope_all=view_all)
+            return out
+        if verb == "eta":
+            j = db.get(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            return {"ok": True, "id": req["id"], "state": j.get("state"),
+                    "eta": job_eta(req["id"], j, cx=rcx), "now": time.time()}
+        if verb == "list":
+
+            lim = _clamp_limit(req.get("limit"), default=50)
+            cursor = req.get("continue")
+            jobs = _attach_wait_reasons(db.list_recent(
+                rcx, lim, principal=caller, scope_all=view_all, before_id=cursor))
+            nxt = min((j["id"] for j in jobs), default=None) if len(jobs) >= lim else None
+
+            jobs = _project_rows(_attach_kerne(jobs), req.get("fields"), req.get("cmd_max"))
+            return {"ok": True, "jobs": jobs, "counts": db.counts(rcx),
+                    "next_cursor": nxt, "now": time.time(), "stall_s": STALL_S}
+        if verb == "my-jobs":
+            lim = _clamp_limit(req.get("limit"), default=50)
+            jobs = _attach_kerne(_attach_wait_reasons(db.jobs_for_principal(
+                rcx, caller, state=req.get("state"), via_device=req.get("via"),
+                limit=lim, before_id=req.get("continue"))))
+            nxt = min((j["id"] for j in jobs), default=None) if len(jobs) >= lim else None
+            return {"ok": True, "jobs": jobs, "next_cursor": nxt,
+                    "now": time.time(), "stall_s": STALL_S}
+
+        if verb == "via-inflight":
+            did = req.get("via_device") or req.get("_selector")
+            n = db.count_inflight_via_device(rcx, caller, did)
+            return {"ok": True, "in_flight": n, "via_device": did, "principal": caller}
+        if verb == "my-history":
+            j = db.get(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            return {"ok": True, "job": j,
+                    "events": db.events(rcx, req["id"],
+                                        _clamp_limit(req.get("limit"), default=200),
+                                        principal=caller, scope_all=view_all)}
+        if verb == "my-outputs":
+            return {"ok": True, "outputs": db.outputs_for_principal(
+                rcx, caller, since=req.get("since"),
+                limit=_clamp_limit(req.get("limit"), default=200))}
+        if verb == "whereis":
+
+            w = db.whereis(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not w:
+                return {"ok": False, "error": "no such job"}
+            return {"ok": True, "whereis": w}
+
+        if verb == "group":
+            gs = db.group_status(rcx, req.get("group_id"), principal=caller, scope_all=view_all)
+            if not gs:
+                return {"ok": False, "error": "no such group"}
+            return {"ok": True, "group": gs}
+
+        if verb == "result":
+            rv = db.result_view(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not rv:
+                return {"ok": False, "error": "no such job"}
+            return {"ok": True, "result": rv}
+        if verb == "handoff":
+            j = db.get(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            deps = db._deps_of(j)
+            return {"ok": True, "handoff": db.handoff_refs(
+                rcx, deps, principal=caller, scope_all=view_all), "deps": deps}
+        if verb == "status":
+            snap = meters.snapshot()
+            return {"ok": True, "snap": snap, "counts": db.counts(rcx),
+                    "reserved": db.reserved_mib(rcx), "oldest_wait": db.oldest_wait(rcx),
+                    "reserved_batch": db.reserved_mib(rcx, track="batch"),
+                    "reserved_interactive": db.reserved_mib(rcx, track="interactive"),
+                    "running_tracks": db.running_track_counts(rcx),
+                    "kern_slots": _kern_status_snapshot(rcx),
+                    "wait_global": WAIT_REASONS.get("global"),
+                    "wait_reasons": dict(WAIT_REASONS.get("jobs") or {}),
+                    "pressure_blocked": GATE.blocked, "now": time.time(),
+                    "cfg": {"mem_floor": CFG.mem_floor, "batch_high": CFG.batch_high,
+                            "max_concurrent": CFG.max_concurrent, "psi_stop": CFG.psi_stop,
+                            "io_enabled": IO_ENABLED, "stall_s": STALL_S},
+                    "uptime": time.time() - STARTED, "version": VERSION}
+        if verb == "log":
+
+            j = db.get(rcx, req["id"], principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            out, err, _ = out_err_rc_for(req["id"])
+            nbytes = _clamp_limit(req.get("bytes", 8000), default=8000, cap=MAX_LOG_BYTES)
+            return {"ok": True, "stdout": _tail_file(out, nbytes),
+                    "stderr": _tail_file(err, nbytes),
+                    "out_path": out, "err_path": err}
+        return {"ok": False, "error": f"unknown verb {verb}"}
+    finally:
+        try:
+            rcx.close()
+        except Exception:
+            pass
+
+def handle(req):
+    verb = req.get("verb")
+
+    if verb == "ping":
+        return {"ok": True, "version": VERSION, "pid": os.getpid(),
+                "uptime": time.time() - STARTED}
+
+    if verb in READ_VERBS:
+        try:
+            return _handle_read(req, verb)
+        except Exception as e:
+            return {"ok": False, "error": f"read lane: {type(e).__name__}: {e}"}
+    with LK:
+        if verb == "ping":
+            return {"ok": True, "version": VERSION, "pid": os.getpid(),
+                    "uptime": time.time() - STARTED}
+        if verb in ("session-attach", "session-turn", "session-detach"):
+
+            return _session_verbs(req, verb)
+        if verb == "submit":
+
+            try:
+                cmd, ctx = authorize_submit(req)
+
+                dep_ids, group_id, parent_job = dag_fields(req)
+                validate_deps_ownership(ctx, dep_ids)
+                validate_group_ownership(ctx, group_id)
+                enforce_attenuation(ctx, parent_job)
+            except AuthzError as e:
+                return {"ok": False, "error": str(e)}
+
+            _pol = db.get_policy(CX, ctx["principal"])
+            if not int(_pol.get("submit_enabled", 1) or 0):
+                return {"ok": False, "reason": "submit-suspended",
+                        "error": "Einreichen durch Admin gesperrt%s" % (
+                            (": " + str(_pol["submit_reason"])) if _pol.get("submit_reason") else "")}
+            _msj = _pol.get("max_submit_jobs")
+            if _msj is not None:
+                _inflight = len(db.nonterminal_for_principal(CX, ctx["principal"]))
+                if _inflight >= int(_msj):
+                    return {"ok": False, "reason": "quota",
+                            "error": ("Job-Kontingent erreicht (%d/%d gleichzeitig) — warte, bis "
+                                      "laufende Jobs fertig sind." % (_inflight, int(_msj)))}
+
+            node = (str(req.get("node") or "").strip() or None)
+            if node:
+                _w = rdisp.get_worker(node)
+                if _w is None:
+                    return {"ok": False, "error": f"unknown worker node '{node}' "
+                            f"(not registered in workers.json — POST /api/workers/register first)"}
+                _nerr = rdisp.caps_cover(_w, "process")
+                if _nerr:
+                    return {"ok": False, "error": _nerr}
+
+            _ovr = _scheduling_overrides(req, ctx)
+            if ctx.get("task_type"):
+                tt_def = db.get_task_type(CX, ctx["task_type"]) or {}
+                prof = estimate(tt_def.get("klass") or req.get("class"),
+                                template_patch=tt_def.get("profile_template"),
+                                history=acct_history(ctx["task_type"]), **_ovr)
+            else:
+
+                prof = estimate(req.get("class"), history=acct_history(_cmd_type_of(cmd)),
+                                **_ovr)
+
+            if getattr(prof, "trusted", False) and not _trusted_posture_allowed(ctx):
+                prof.trusted = False
+
+            _undeclared_cap = None
+            if (not ctx.get("task_type") and not req.get("class")
+                    and req.get("mem") is None and req.get("mem_max") is None
+                    and prof.mem_max is None and not getattr(prof, "trusted", False)):
+                _env_cap = os.environ.get("PN_UNDECLARED_MEM_MAX", "").strip()
+                _undeclared_cap = (int(_env_cap) if _env_cap.isdigit()
+                                   else max(1024, prof.mem * 2))
+                prof.mem_max = _undeclared_cap
+
+            _kbuch = None
+            if req.get("dauer_s") is not None:
+                try:
+                    _dv = int(req["dauer_s"])
+                    if _dv > 0:
+                        prof.dauer_s = _dv
+                except (TypeError, ValueError):
+                    return {"ok": False, "reason": "dauer-ungueltig",
+                            "error": "dauer_s muss eine ganze Zahl > 0 sein (bekommen: %r)"
+                                     % (req.get("dauer_s"),)}
+            if req.get("kerne") is not None:
+                _kerr, _kbuch = _kern_submit_pruefung(req, ctx, prof, node)
+                if _kerr:
+                    return _kerr
+                prof.kerne = _kbuch["kerne"]
+                prof.kerne_wunsch = _kbuch["wunsch"]
+                prof.flexibel = bool(_kbuch["flexibel"])
+                prof.cpu_quota_pct = int(prof.kerne) * 100
+
+            _bias = int(db.get_policy(CX, ctx["principal"]).get("prio_bias") or 0)
+            if _bias:
+                prof.prio = max(0, min(300, int(prof.prio) + _bias))
+            _ok, _err, _adv, _delta = _fairshare_admit(req, ctx, prof, CX)
+            if not _ok:
+                return {"ok": False, "error": _err, "advice": _adv, "reason": "fairshare"}
+            if _delta:
+                prof.prio = max(0, min(300, int(prof.prio) + _delta))
+
+            if not node:
+                _tot = meters.meminfo().get("total") or 0
+                _ceil = max(0, _tot - CFG.mem_floor)
+                if _tot and prof.mem > _ceil:
+                    return {"ok": False, "reason": "unfit",
+                            "error": ("Der Job braucht ~%d MiB RAM, diese Box kann höchstens "
+                                      "~%d MiB bereitstellen (%d MiB gesamt, %d MiB System-"
+                                      "Untergrenze) — auf dieser Box nicht ausführbar. Kleiner "
+                                      "deklarieren (--mem) oder auf einem größeren Worker "
+                                      "einreichen (--node)."
+                                      % (prof.mem, _ceil, _tot, CFG.mem_floor))}
+                try:
+                    _st = os.statvfs(DATA_DIR)
+                    _disk_tot = (_st.f_blocks * _st.f_frsize) // (1024 * 1024)
+                except OSError:
+                    _disk_tot = None
+                if _disk_tot and prof.disk_min_free > _disk_tot:
+                    return {"ok": False, "reason": "unfit",
+                            "error": ("Der Job verlangt %d MiB freien Plattenplatz, das Daten-"
+                                      "Volume dieser Box ist insgesamt nur %d MiB groß — auf "
+                                      "dieser Box nicht ausführbar."
+                                      % (prof.disk_min_free, _disk_tot))}
+            cwd = req.get("cwd") or os.path.expanduser("~")
+
+            eff_source = _validate_source(req, ctx)
+
+            jid = db.submit(CX, cmd, cwd, req.get("env"), prof.to_json(),
+                            prof.prio, (rdisp.PROXY_MEM_MIB if node else prof.mem),
+                            req.get("tag"),
+                            node=node,
+                            room=req.get("room"), source=eff_source,
+                            principal=ctx["principal"], task_type=ctx["task_type"],
+                            submitter_principal=ctx["principal"],
+                            via_device=ctx.get("via_device"), via_method=ctx.get("via_method"),
+
+                            reply_to=req.get("reply_to"),
+
+                            deps=dep_ids, group_id=group_id, parent_job=parent_job,
+                            caps=ctx.get("caps") or set())
+            if _undeclared_cap:
+
+                db.add_event(CX, jid, "note",
+                             "kein RAM deklariert -> konservativer Hard-Cap %d MiB "
+                             "(memory.max, ohne Swap). Für größere Läufe --mem/--mem-max "
+                             "deklarieren; wiederholte Läufe lernen ihre Größe automatisch "
+                             "(cmd:-EWMA)." % _undeclared_cap)
+            if _kbuch:
+
+                _kp = _kbuch["projektion"]
+                _keta = ("sofort" if _kp["status"] == "sofort"
+                         else eta.human(_kp["eta_s"]) if _kp["status"] == "eta"
+                         else _kp["status"])
+                _note = ("Kern-Buchung: %d Kern(e) gebucht (cpu.max %d%%), Start-Einschätzung: %s."
+                         % (_kbuch["kerne"], _kbuch["kerne"] * 100, _keta))
+                if _kbuch["kerne"] != _kbuch["wunsch"]:
+                    _note += (" flexibel-Zuteilung: Wunsch waren %d Kerne, sofort erfüllbar "
+                              "waren %d — automatisch heruntergestuft."
+                              % (_kbuch["wunsch"], _kbuch["kerne"]))
+                if prof.dauer_s:
+                    _note += (" Geplante Dauer %ds — reine Planungsgröße, KEIN Limit."
+                              % int(prof.dauer_s))
+                db.add_event(CX, jid, "note", _note)
+
+            if req.get("work_order"):
+                wo = dict(req["work_order"])
+                wo["handoff"] = db.handoff_refs(CX, dep_ids, principal=ctx["principal"],
+                                                scope_all=view_all_for(ctx))
+                db.add_event(CX, jid, "workorder", wo)
+            if dep_ids:
+
+                tt = db.get_task_type(CX, ctx["task_type"]) if ctx["task_type"] else None
+                ak = (tt.get("approval") if tt else None) or req.get("approval") or "none"
+
+                ak = db.effective_approval(CX, ctx["principal"], ctx["task_type"], ak)
+                if ak in ("post", "checkpoint"):
+                    CX.execute("UPDATE jobs SET approval_kind=? WHERE id=?", (ak, jid))
+                    CX.commit()
+                db.add_typed_event(CX, jid, "state",
+                                   {"state": "blocked", "deps": dep_ids})
+                return {"ok": True, "id": jid, "state": "blocked", "deps": dep_ids,
+                        "group_id": group_id, "parent_job": parent_job,
+                        "approval": ak if ak != "none" else None,
+                        **(_kern_antwort(_kbuch) if _kbuch else {})}
+
+            tt = db.get_task_type(CX, ctx["task_type"]) if ctx["task_type"] else None
+            approval_kind = (tt.get("approval") if tt else None) or req.get("approval") or "none"
+
+            approval_kind = db.effective_approval(CX, ctx["principal"], ctx["task_type"], approval_kind)
+            needs_conf = (bool(req.get("needs_confirmation"))
+                          or bool(tt and tt.get("needs_confirmation")))
+            pre_gate = (approval_kind == "pre") or needs_conf
+            if pre_gate:
+                nonce = secrets.token_urlsafe(18)
+                kind = "pre" if approval_kind == "pre" else (approval_kind if approval_kind in
+                                                             ("post", "checkpoint") else "pre")
+                db.stage_for_approval(CX, jid, nonce, approval_kind="pre")
+
+                ar = {"job_id": jid, "nonce": nonce, "gate": "pre",
+                      "task_type": ctx["task_type"],
+                      "summary": req.get("tag") or ctx["task_type"] or "raw command",
+                      "action": {"argv": cmd, "side_effecting": approval_kind == "pre"},
+                      "revise": {"count": 0, "max": 0}}
+
+                if isinstance(req.get("_propose"), dict):
+                    ar["proposal"] = req["_propose"]
+                    ar["summary"] = req["_propose"].get("summary") or ar["summary"]
+                db.add_typed_event(CX, jid, "approval-request", ar)
+                return {"ok": True, "id": jid, "state": "staged", "nonce": nonce,
+                        "needs_confirmation": True, "gate": "pre",
+                        **(_kern_antwort(_kbuch) if _kbuch else {})}
+
+            if approval_kind in ("post", "checkpoint"):
+                CX.execute("UPDATE jobs SET approval_kind=? WHERE id=?", (approval_kind, jid))
+                CX.commit()
+            db.add_typed_event(CX, jid, "state", {"state": "queued"})
+            return {"ok": True, "id": jid, "pos": db.position(CX, jid),
+                    "eta": job_eta(jid, None),
+                    "group_id": group_id, "parent_job": parent_job,
+                    "approval": approval_kind if approval_kind != "none" else None,
+                    **(_kern_antwort(_kbuch) if _kbuch else {})}
+
+        if verb == "submit-dag":
+            nodes = req.get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                return {"ok": False, "error": "submit-dag requires a non-empty 'nodes' list"}
+            gid = req.get("group_id") or ("wf-" + secrets.token_urlsafe(8))
+
+            ident = {k: req.get(k) for k in ("_peer_uid", "_method", "_selector", "via_device")}
+
+            for i, node in enumerate(nodes):
+                for d in (node.get("deps") or []):
+                    if not isinstance(d, int) or d < 0 or d >= i:
+                        return {"ok": False, "error": f"node {i}: local dep {d!r} must reference an "
+                                f"EARLIER node (0..{i-1}) — the DAG must be acyclic/forward-only"}
+            created = []
+            local = {}
+            for i, node in enumerate(nodes):
+                real_deps = [local[d] for d in (node.get("deps") or [])]
+                sub = dict(node)
+                sub.update(ident)
+                sub["verb"] = "submit"
+                sub["deps"] = real_deps
+                sub["group_id"] = gid
+
+                if "parent_job" not in sub and req.get("parent_job") is not None:
+                    sub["parent_job"] = req.get("parent_job")
+                r = handle(sub)
+                if not r.get("ok"):
+
+                    for jid_done in created:
+                        db.cancel_blocked_dep_failed(CX, jid_done)
+                    return {"ok": False, "error": f"node {i} rejected: {r.get('error')}",
+                            "rolled_back": created}
+                local[i] = r["id"]
+                created.append(r["id"])
+
+            owner = db.group_owner(CX, gid)
+            gs = db.group_status(CX, gid, principal=owner, scope_all=False)
+            if owner and gs:
+                db.add_typed_event(CX, created[0], "group-status", gs,
+                                   topics=[db.group_topic(owner, gid)])
+            return {"ok": True, "group_id": gid, "job_ids": created,
+                    "node_map": local, "group": gs}
+
+        try:
+            caller, caller_caps, _is_broker = _resolve_caller(req)
+        except AuthzError as e:
+            return {"ok": False, "error": str(e)}
+        view_all = "view:all" in caller_caps
+
+        approver = "approval:resolve" in caller_caps
+        read_scope = view_all or approver
+        if verb == "progress":
+            if not db.get(CX, req.get("id"), principal=caller, scope_all=view_all):
+                return {"ok": False, "error": "no such job"}
+            db.update_progress(CX, req["id"], done=req.get("done"),
+                               total=req.get("total"), msg=req.get("msg"))
+            db.add_typed_event(CX, req["id"], "progress",
+                               {"done": req.get("done"), "total": req.get("total"),
+                                "msg": req.get("msg")})
+            return {"ok": True}
+        if verb == "checkpoint":
+            if not db.get(CX, req.get("id"), principal=caller, scope_all=view_all):
+                return {"ok": False, "error": "no such job"}
+
+            db.add_typed_event(CX, req["id"], req.get("kind") or "partial", req.get("data"))
+            return {"ok": True}
+
+        if verb == "steer":
+            j = db.get(CX, req.get("id"), principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            if j["state"] != "running":
+                return {"ok": False, "error": f"job is {j['state']}, not running (cannot steer)"}
+            ws = j.get("workspace_path") or record.workspace_path(j["id"])
+            seq = db.enqueue_steer(CX, j["id"])
+            try:
+                path = record.write_steer(ws, seq, req.get("input"))
+            except Exception as e:
+                return {"ok": False, "error": f"steer write failed: {type(e).__name__}: {e}"}
+            db.add_typed_event(CX, j["id"], "steer",
+                               {"seq": seq, "input": req.get("input")})
+            return {"ok": True, "seq": seq, "path": path}
+
+        if verb in ("approve", "deny", "reject", "revise"):
+
+            authorized = view_all or ("approval:resolve" in caller_caps)
+
+            if (_is_broker and verb in ("approve", "deny", "reject")
+                    and db.submitter_for_nonce(CX, req.get("nonce")) == caller):
+                return {"ok": False,
+                        "error": "a relayed device cannot self-approve its own submission "
+                                 "(separation of duties)"}
+            res = db.resolve_approval(CX, req.get("nonce"), verb,
+                                      principal=caller, scope_all=authorized,
+                                      feedback=req.get("feedback"))
+            if not res.get("ok"):
+                return res
+            jid = res.get("id")
+
+            if res.get("finalize") and not res.get("idempotent"):
+                j = db.get(CX, jid, scope_all=True)
+                term = finalize_approved(j) if j else None
+                res["state"] = term or res.get("state")
+                return res
+            if res.get("idempotent"):
+                return res
+
+            if res.get("decision") == "revise":
+                j = db.get(CX, jid, scope_all=True)
+                ws = (j or {}).get("workspace_path") or record.workspace_path(jid)
+                seq = db.enqueue_steer(CX, jid)
+                fb = {"revise": True, "feedback": req.get("feedback"),
+                      "revise_count": res.get("revise_count")}
+                try:
+                    record.write_steer(ws, seq, fb)
+                except Exception as e:
+                    db.add_event(CX, jid, "error",
+                                 f"revise steer write failed: {type(e).__name__}: {e}")
+                db.add_typed_event(CX, jid, "steer", {"seq": seq, "input": fb})
+                db.add_typed_event(CX, jid, "approval-result",
+                                   {"decision": "revise", "feedback": req.get("feedback"),
+                                    "revise_count": res.get("revise_count")})
+                db.add_typed_event(CX, jid, "state", {"state": "queued", "decision": "revise"})
+                return res
+
+            db.add_typed_event(CX, jid, "state",
+                               {"state": res["state"], "decision": res["decision"]})
+            if res["decision"] in ("rejected", "denied"):
+                db.add_typed_event(CX, jid, "approval-result",
+                                   {"decision": res["decision"], "state": res["state"]})
+            return res
+
+        if verb in ("egress-pending", "egress-approve", "egress-deny"):
+            if not view_all:
+                return {"ok": False, "error": "egress approval requires the human operator "
+                        "(view:all); the brain cannot self-approve a new egress"}
+            try:
+                from pnlib import egress as _egress, DATA_DIR as _DD
+                ecx = _egress.connect(os.environ.get(
+                    "PN_EGRESS_DB", os.path.join(_DD, "egress", "allow.db")))
+            except Exception as e:
+                return {"ok": False, "error": f"egress store unavailable: {e}"}
+            if verb == "egress-pending":
+                pend = [dict(r) for r in ecx.execute(
+                    "SELECT * FROM egress_pending WHERE state='pending' ORDER BY created_at").fetchall()]
+                ecx.close()
+                return {"ok": True, "egress_pending": pend}
+            decision = "approve" if verb == "egress-approve" else "deny"
+            res = _egress.resolve_proposal(ecx, req.get("nonce"), decision,
+                                           approved_by=caller or "admin")
+            ecx.close()
+            return res
+        if verb == "extend":
+
+            j = db.get(CX, req.get("id"), principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            if j["state"] != "running":
+                return {"ok": False, "error": f"job is {j['state']}, not running (cannot extend)"}
+            try:
+                secs = int(req.get("seconds") or 0)
+            except (TypeError, ValueError):
+                secs = 0
+            if secs <= 0:
+                return {"ok": False, "error": "seconds must be a positive integer"}
+            prof = ResourceProfile.from_json(j["profile"])
+            already = j.get("walltime_extra_s") or 0.0
+            if not view_all:
+                if prof.max_extend_s <= 0:
+                    return {"ok": False, "error": "self-service extension not allowed for this job "
+                                                  "class — ask an admin"}
+                if already + secs > prof.max_extend_s:
+                    return {"ok": False, "error": f"extension cap reached "
+                            f"({int(already)}s used of {prof.max_extend_s}s allowance)"}
+            total = db.grant_extension(CX, j["id"], secs)
+            if total is None:
+                return {"ok": False, "error": "job no longer running"}
+            db.add_event(CX, j["id"], "note",
+                         f"walltime extended +{secs}s by {caller} (total extra {int(total)}s)")
+            db.add_typed_event(CX, j["id"], "notify",
+                               {"job_id": j["id"], "state": "walltime-extended",
+                                "kind": "walltime-extended", "task_type": j.get("task_type"),
+                                "principal": j.get("submitter_principal"),
+                                "reply_to": j.get("reply_to"),
+                                "granted_s": secs, "total_extra_s": int(total), "by": caller})
+            return {"ok": True, "granted_s": secs, "total_extra_s": int(total),
+                    "new_walltime_s": int(prof.timeout_s + total)}
+        if verb == "cancel":
+            j = db.get(CX, req["id"], principal=caller, scope_all=view_all)
+            if not j:
+                return {"ok": False, "error": "no such job"}
+            if j["state"] == "queued":
+                db.mark_terminal(CX, j["id"], "cancelled", None)
+            elif j["state"] == "running":
+                slc.stop_unit(j["id"])
+                pp = PROCS.get(j["id"])
+                if pp:
+                    try:
+                        pp.wait(timeout=5)
+                    except Exception:
+                        pass
+                _drop(j["id"])
+                db.mark_terminal(CX, j["id"], "cancelled", None)
+            return {"ok": True, "state": "cancelled"}
+
+        if verb == "set-approval-pref":
+            tt_name = (req.get("task_type") or "").strip()
+            want = req.get("approval")
+            if not db.get_task_type(CX, tt_name):
+                return {"ok": False, "error": "unbekannter task_type"}
+            may = ("task_type:*" in caller_caps) or (("task_type:%s" % tt_name) in caller_caps)
+            if not may:
+                return {"ok": False, "error": "keine Berechtigung für diesen Auftragstyp"}
+            return db.set_approval_pref(CX, caller, tt_name, want)
+
+        if verb in ("admin-pause", "admin-resume", "admin-queue-status", "admin-set-prio",
+                    "admin-reprioritize", "admin-set-quota", "admin-kill-user", "admin-message",
+                    "admin-clear-queued", "admin-submit-suspend", "admin-submit-resume",
+                    "admin-apply-preset", "admin-set-policy", "admin-fairshare", "get-policy",
+                    "admin-ensure-principal", "admin-grant", "admin-bind-identity"):
+            if not view_all:
+                return {"ok": False, "error": "requires admin (view:all)"}
+
+            _target = req.get("target_principal") or req.get("target")
+            if verb == "get-policy":
+
+                if not _target:
+                    return {"ok": False, "error": "target_principal required"}
+                try:
+                    _gp = db.get_policy(CX, _target) or {}
+                except Exception as _e:
+                    return {"ok": False, "error": str(_e)}
+                return {"ok": True, "principal": _target, "policy": {
+                    "max_sessions": _gp.get("max_sessions"),
+                    "max_submit_jobs": _gp.get("max_submit_jobs"),
+                    "submit_enabled": int(_gp.get("submit_enabled", 1) or 0),
+                    "weight": int(_gp.get("weight") or 1),
+                    "qos_preset": _gp.get("qos_preset")}}
+
+            if verb in ("admin-pause", "admin-resume"):
+                global _ADMISSION_PAUSED
+                paused = (verb == "admin-pause")
+                _ADMISSION_PAUSED = paused
+                db.set_meta(CX, "admission_paused", "1" if paused else "0")
+                db.set_meta(CX, "admission_paused_by", caller if paused else "")
+                db.set_meta(CX, "admission_paused_at", str(time.time()) if paused else "")
+                return {"ok": True, "paused": paused, "by": caller}
+            if verb == "admin-queue-status":
+                pat = db.get_meta(CX, "admission_paused_at", "") or None
+                return {"ok": True, "paused": _ADMISSION_PAUSED,
+                        "paused_by": (db.get_meta(CX, "admission_paused_by", "") or None),
+                        "paused_at": (float(pat) if pat else None),
+                        "counts": db.counts(CX)}
+
+            if verb == "admin-fairshare":
+                snap = meters.snapshot()
+                cfg = _fs_cfg(snap)
+                usage = dict(_fs_usage(cfg))
+                try:
+                    pend, rows_by = _fs.pending_work(DB_PATH, cfg)
+                except Exception:
+                    pend, rows_by = {}, {}
+                accounts = set(usage) | set(pend)
+                weights = _fs_account_weights(accounts, CX)
+                wtot = sum(weights.values()) or 1.0
+                utot = sum(usage.values()) or 1.0
+                out_rows, throttled, suspended = [], 0, 0
+                for a in sorted(accounts):
+                    princ = a.rsplit("/", 1)[0] if "/" in a else a
+                    try:
+                        pol = db.get_policy(CX, princ)
+                    except Exception:
+                        pol = {}
+                    S = weights.get(a, 1.0) / wtot
+                    U = usage.get(a, 0.0)
+                    F = _fs.fair_factor(U / utot, S) if utot else 1.0
+                    if F < 0.34:
+                        throttled += 1
+                    se = int(pol.get("submit_enabled", 1) or 0)
+                    if not se:
+                        suspended += 1
+                    out_rows.append({
+                        "account": a, "principal": princ,
+                        "weight": int(pol.get("weight") or 1),
+                        "qos_preset": pol.get("qos_preset"),
+                        "norm_share": round(S, 4),
+                        "debt": round(U, 1),
+                        "norm_usage": round(U / utot, 4) if utot else 0.0,
+                        "fair_factor": round(F, 4),
+                        "backlog_s": round(pend.get(a, 0.0), 1),
+                        "rows": rows_by.get(a, 0),
+                        "submit_enabled": se,
+                        "max_submit_jobs": pol.get("max_submit_jobs"),
+                        "max_sessions": pol.get("max_sessions"),
+                        "block_reason": (None if se else "admin-suspended"),
+                    })
+                out_rows.sort(key=lambda r: r["fair_factor"])
+                cpu = snap.get("cpu_count") or 1
+                return {"ok": True, "now": time.time(),
+                        "kpi": {"accounts": len(accounts), "throttled": throttled,
+                                "suspended": suspended,
+                                "backlog_total_s": round(sum(pend.values()) or 0.0, 1),
+                                "load1": snap.get("load1"), "cpu_count": cpu,
+                                "util_pct": min(100, int(round((snap.get("load1") or 0) / max(1, cpu) * 100)))},
+                        "weights": {"fairshare": cfg.get("fairshare_weight"), "age": cfg.get("age_weight")},
+                        "rows": out_rows[:80]}
+
+            if verb == "admin-set-prio":
+                target = _target
+                if not target:
+                    return {"ok": False, "error": "admin-set-prio requires 'target_principal'"}
+                try:
+                    bias = int(req.get("prio_bias"))
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "prio_bias must be an integer"}
+                pol = db.set_policy(CX, target, prio_bias=bias, updated_by=caller)
+                return {"ok": True, "principal": target, "prio_bias": pol.get("prio_bias")}
+
+            if verb == "admin-set-quota":
+                target = _target
+                if not target:
+                    return {"ok": False, "error": "admin-set-quota requires 'target_principal'"}
+                fields = {}
+                for k in ("quota_bytes", "quota_inodes"):
+                    if req.get(k) is not None:
+                        try:
+                            fields[k] = int(req.get(k))
+                        except (TypeError, ValueError):
+                            return {"ok": False, "error": f"{k} must be an integer"}
+                if not fields:
+                    return {"ok": False,
+                            "error": "admin-set-quota requires quota_bytes and/or quota_inodes"}
+                pol = db.set_policy(CX, target, updated_by=caller, **fields)
+                return {"ok": True, "principal": target,
+                        "quota_bytes": pol.get("quota_bytes"),
+                        "quota_inodes": pol.get("quota_inodes")}
+
+            if verb in ("admin-submit-suspend", "admin-submit-resume"):
+                target = _target
+                if not target:
+                    return {"ok": False, "error": "requires 'target_principal'"}
+                suspend = (verb == "admin-submit-suspend")
+                reason = req.get("reason")
+                pol = db.set_policy(CX, target, updated_by=caller, reason=reason,
+                                    submit_enabled=(0 if suspend else 1),
+                                    submit_reason=(reason if suspend else None))
+                try:
+                    db.publish_user_notify(CX, target, "notify", {"kind": "governance",
+                        "text": ("Einreichen neuer Jobs wurde durch %s %s%s" % (caller,
+                                 "GESPERRT" if suspend else "wieder freigegeben",
+                                 (" — Grund: " + str(reason)) if reason else "")),
+                        "severity": ("warn" if suspend else "info"), "from": caller})
+                except Exception:
+                    pass
+                return {"ok": True, "principal": target, "submit_enabled": pol.get("submit_enabled")}
+
+            if verb == "admin-apply-preset":
+                target, preset = _target, req.get("preset")
+                if not target or not preset:
+                    return {"ok": False, "error": "requires 'target_principal' and 'preset'"}
+                pol = db.apply_preset(CX, target, preset, updated_by=caller, reason=req.get("reason"))
+                if pol is None:
+                    return {"ok": False, "error": "unknown preset '%s'" % preset}
+                try:
+                    db.publish_user_notify(CX, target, "notify", {"kind": "governance",
+                        "text": "Dein Nutzungsprofil wurde auf '%s' gesetzt (durch %s)%s" % (preset,
+                                caller, (" — Grund: " + str(req.get("reason"))) if req.get("reason") else ""),
+                        "severity": "info", "from": caller})
+                except Exception:
+                    pass
+                return {"ok": True, "principal": target, "qos_preset": pol.get("qos_preset"),
+                        "weight": pol.get("weight")}
+
+            if verb == "admin-set-policy":
+                target = _target
+                if not target:
+                    return {"ok": False, "error": "requires 'target_principal'"}
+                _ALLOWED = ("weight", "max_submit_jobs", "max_sessions", "priority_boost",
+                            "boost_expiry", "exclusive_entitled", "preempt_entitled", "qos_preset")
+                fields = {k: req.get(k) for k in _ALLOWED if k in req}
+                if not fields:
+                    return {"ok": False, "error": "no policy fields given"}
+                pol = db.set_policy(CX, target, updated_by=caller, reason=req.get("reason"), **fields)
+                try:
+                    db.publish_user_notify(CX, target, "notify", {"kind": "governance",
+                        "text": "Deine Governance-Richtlinie wurde angepasst (durch %s)%s" % (caller,
+                                (" — Grund: " + str(req.get("reason"))) if req.get("reason") else ""),
+                        "severity": "info", "from": caller})
+                except Exception:
+                    pass
+                return {"ok": True, "principal": target, "policy": {k: pol.get(k) for k in _ALLOWED}}
+
+            if verb == "admin-kill-user":
+                target = _target
+                if not target:
+                    return {"ok": False, "error": "admin-kill-user requires 'target_principal'"}
+                cancelled = []
+                for jrow in db.nonterminal_for_principal(CX, target):
+                    jid = jrow["id"]
+                    if jrow["state"] == "running":
+                        slc.stop_unit(jid)
+                        pp = PROCS.get(jid)
+                        if pp:
+                            try:
+                                pp.wait(timeout=5)
+                            except Exception:
+                                pass
+                        _drop(jid)
+                    db.mark_terminal(CX, jid, "cancelled", None)
+                    cancelled.append(jid)
+                return {"ok": True, "cancelled": cancelled, "count": len(cancelled)}
+
+            if verb == "admin-clear-queued":
+                cancelled = []
+                for jid in db.queued_ids(CX, exclude_source=SESSION_SOURCE):
+                    j = db.get(CX, jid, scope_all=True)
+                    if j and j["state"] == "queued":
+                        db.mark_terminal(CX, jid, "cancelled", None)
+                        cancelled.append(jid)
+                print("[pnd] admin-clear-queued by %s: %d job(s)" % (caller, len(cancelled)),
+                      file=sys.stderr, flush=True)
+                return {"ok": True, "count": len(cancelled)}
+
+            if verb == "admin-message":
+                target = _target
+                text = req.get("text")
+                if not target or not text:
+                    return {"ok": False, "error": "admin-message requires 'target' and 'text'"}
+                severity = req.get("severity") or "info"
+                db.publish_user_notify(CX, target, "notify",
+                                       {"kind": "admin-message", "text": str(text),
+                                        "severity": severity, "from": caller})
+                return {"ok": True, "target": target, "severity": severity}
+
+            if verb == "admin-ensure-principal":
+                name = req.get("name")
+                if not name:
+                    return {"ok": False, "error": "admin-ensure-principal requires 'name'"}
+                db.ensure_principal(CX, name, uid=req.get("uid"),
+                                    kind=req.get("kind") or "user", note=req.get("note"))
+                return {"ok": True, "principal": name}
+            if verb == "admin-grant":
+                p, cap = _target, req.get("cap")
+                if not p or not cap:
+                    return {"ok": False, "error": "admin-grant requires 'target_principal' and 'cap'"}
+
+                if cap in db.WILDCARD_CAPS:
+                    return {"ok": False,
+                            "error": f"refusing to grant wildcard cap {cap!r} via admin-grant"}
+                db.grant_cap(CX, p, cap)
+                return {"ok": True, "principal": p, "cap": cap}
+            if verb == "admin-bind-identity":
+                method, selector, p = req.get("method"), req.get("selector"), _target
+                if not method or selector is None or not p:
+                    return {"ok": False,
+                            "error": "admin-bind-identity requires 'method', 'selector', 'target_principal'"}
+                db.bind_identity(CX, method, str(selector), p, verified=int(req.get("verified") or 0))
+                return {"ok": True, "method": method, "selector": selector, "principal": p}
+
+            if verb == "admin-reprioritize":
+                jid = req.get("id")
+                j = db.get(CX, jid, principal=caller, scope_all=view_all)
+                if not j:
+                    return {"ok": False, "error": "no such job"}
+                if j["state"] != "queued":
+                    return {"ok": False,
+                            "error": f"job is {j['state']}, not queued (cannot reprioritize)"}
+                old = int(j.get("prio") or 100)
+                if req.get("prio") is not None:
+                    try:
+                        new = int(req.get("prio"))
+                    except (TypeError, ValueError):
+                        return {"ok": False, "error": "prio must be an integer"}
+                elif req.get("delta") is not None:
+                    try:
+                        new = old + int(req.get("delta"))
+                    except (TypeError, ValueError):
+                        return {"ok": False, "error": "delta must be an integer"}
+                else:
+                    return {"ok": False, "error": "admin-reprioritize requires 'prio' or 'delta'"}
+                new = max(0, min(300, new))
+                if not db.set_job_prio(CX, jid, new):
+                    return {"ok": False, "error": "job no longer queued"}
+                db.add_event(CX, jid, "note", f"prio {old}->{new} by {caller}")
+                db.add_typed_event(CX, jid, "notify",
+                                   {"kind": "reprioritized", "job_id": jid, "prio": new,
+                                    "old_prio": old, "by": caller, "task_type": j.get("task_type"),
+                                    "principal": j.get("submitter_principal"),
+                                    "reply_to": j.get("reply_to")})
+                return {"ok": True, "id": jid, "prio": new, "old_prio": old,
+                        "position": db.position(CX, jid)}
+        if verb == "fairshare":
+            if _fs is None:
+                return {"ok": False, "error": "fairshare-Modul nicht ladbar"}
+            if req.get("unban"):
+                return {"ok": _fs.ban_lift(str(req["unban"])), "unbanned": req["unban"]}
+            snap = meters.snapshot()
+            cfg = _fs_cfg(snap)
+            pend, rows = _fs.pending_work(DB_PATH, cfg)
+            usage = _fs_usage(cfg)
+            active = [a for a, v in pend.items() if v > 0]
+            weights = {a: 1.0 for a in set(active) | set(usage)}
+            tot = sum(usage.values()) or 1.0
+            shares = 1.0 / max(1, len(usage) or 1)
+            now = time.time()
+            accounts = []
+            for a in sorted(set(list(pend) + list(usage))):
+                until, lvl = _fs.ban_check(a, now)
+                accounts.append({
+                    "account": a, "queued_rows": rows.get(a, 0),
+                    "reserved_box_s": round(pend.get(a, 0.0)),
+                    "allowance_box_s": round(_fs.allowance(a, active, weights, cfg)),
+                    "usage_box_s": round(usage.get(a, 0.0)),
+                    "fair_factor": round(_fs.fair_factor(usage.get(a, 0.0) / tot, shares), 4),
+                    "banned_for": _fs.human_duration(until - now) if until else None,
+                    "ban_level": lvl,
+                })
+            return {"ok": True, "cfg": {k: v for k, v in cfg.items() if not k.startswith("_")},
+                    "accounts": accounts, "shape": _fs.shape_report(DB_PATH, cfg),
+                    "enforcing": _truthy_env("PN_FAIRSHARE_ENFORCE", "1")}
+        return {"ok": False, "error": f"unknown verb {verb}"}
+
+def reconcile():
+
+    live = slc.live_units()
+    with LK:
+        for job in db.running(CX):
+            jid = job["id"]
+            if job.get("source") == SESSION_SOURCE:
+                _session_supervise(job)
+                continue
+            _, _, rcp = out_err_rc_for(jid)
+            if slc.unit_name(jid) in live:
+                continue
+            code = slc.read_rc(rcp)
+            if code is not None:
+
+                finalize_job(job, code, "done" if code == 0 else "failed")
+
+                _reconcile_llm_release(job)
+                continue
+            prof = ResourceProfile.from_json(job["profile"])
+            attempts = job.get("attempts") or 0
+
+            _reconcile_llm_release(job)
+            if prof.idempotent and attempts < prof.max_retries:
+                nb = db.requeue(CX, jid)
+                _wait = (" — Backoff, nächster Anlauf in %ds" % max(0, int(nb - time.time()))
+                         if nb else "")
+                db.add_event(CX, jid, "note",
+                             f"crash-orphaned -> auto-requeue "
+                             f"(attempt {attempts + 1}/{prof.max_retries}){_wait}")
+            else:
+                reason = "not idempotent" if not prof.idempotent else f"retries exhausted ({attempts})"
+                db.add_event(CX, jid, "error", f"crash-orphaned -> failed ({reason})")
+                db.mark_terminal(CX, jid, "failed", None, fail_class=failklasse.TRANSIENT)
+
+        try:
+            keep = {j["id"] for j in db.running(CX)}
+            n = slc.sweep_stale_leaves(keep)
+            if n:
+                sys.stderr.write(f"pnd: reconcile swept {n} stale empty job cgroup leaves\n")
+        except Exception as e:
+            sys.stderr.write(f"pnd: stale-leaf sweep skipped ({type(e).__name__}: {e})\n")
+
+def _ensure_cgroup_placement():
+
+    try:
+        cg = open("/proc/self/cgroup").read()
+    except OSError:
+        return
+    if "/pn.slice/" in cg:
+        return
+    try:
+        import subprocess
+        r = subprocess.run(["sudo", "-n", "/usr/local/bin/pn-cgmove"],
+                           capture_output=True, text=True, timeout=30)
+        cg2 = open("/proc/self/cgroup").read()
+        if "/pn.slice/" in cg2:
+            sys.stderr.write("pnd: cgroup self-heal placed into pn.slice/critical/pnd via pn-cgmove\n")
+        else:
+            sys.stderr.write("pnd: WARNING pn-cgmove did not place into pn.slice "
+                             "(rc=%s %s); jobs may refuse with rc126 until fixed\n"
+                             % (r.returncode, (r.stderr or '').strip()[:120]))
+    except Exception as e:
+        sys.stderr.write("pnd: WARNING cgroup self-heal failed (%s); jobs may refuse with rc126\n" % e)
+
+def _load_envfile_fallback():
+
+    path = os.environ.get("PND_ENVFILE", "/etc/brainbox/pnd.env")
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        k, _, v = ln.partition("=")
+        k, v = k.strip(), v.strip()
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+def main():
+    global CX, CFG, GATE, IO_ENABLED, _ADMISSION_PAUSED
+    os.makedirs(LOG_DIR, exist_ok=True)
+    _load_envfile_fallback()
+    _ensure_cgroup_placement()
+
+    from pnlib import WORK_DIR, INDEX_DIR, TRASH_DIR, CAS_DIR
+    for d in (WORK_DIR, INDEX_DIR, TRASH_DIR, CAS_DIR):
+        os.makedirs(d, exist_ok=True)
+
+    try:
+        from pnlib import recordcfg
+        recordcfg.apply_retention(record)
+    except Exception as e:
+        sys.stderr.write(f"pnd: record retention config not applied ({e}); using defaults\n")
+    CX = db.connect(DB_PATH)
+
+    _ADMISSION_PAUSED = (db.get_meta(CX, "admission_paused", "0") == "1")
+    CFG = sched.Config.autoscale()
+
+    if not (os.environ.get("PN_BATCH_HIGH") or "").strip():
+        try:
+            from pnlib import cgdispatch as _cgd
+            _td = _cgd.batch_tier_dir()
+            _cap_b = (meters._read_int(os.path.join(_td, "memory.high"))
+                      or meters._read_int(os.path.join(_td, "memory.max"))) if _td else None
+            if _cap_b:
+                _cap_mib = int(_cap_b) // (1024 * 1024)
+                if _cap_mib and CFG.batch_high > _cap_mib:
+                    sys.stderr.write("pnd: batch_high %dM > kernel batch-tier cap %dM -> "
+                                     "clamped (admission never promises RAM the tier "
+                                     "squeezes/kills at)\n" % (CFG.batch_high, _cap_mib))
+                    CFG.batch_high = _cap_mib
+        except Exception as e:
+            sys.stderr.write("pnd: batch tier cap reconcile skipped (%s: %s)\n"
+                             % (type(e).__name__, e))
+    GATE = sched.PressureGate(CFG)
+    IO_ENABLED = detect_io_delegation()
+    reconcile()
+    srv = ipc.Server(handle)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    bsock = ipc.broker_sock_path()
+    if bsock:
+        try:
+            grp_name = ipc.broker_group()
+            srv.also_listen(bsock, mode=0o660, group=grp_name)
+            st = os.stat(bsock)
+            sys.stderr.write(f"pnd: broker socket up at {bsock} "
+                             f"(mode {oct(st.st_mode & 0o777)}, gid {st.st_gid}, group target "
+                             f"'{grp_name}') — de-privileged broker reachability, authz unchanged\n")
+            sys.stderr.flush()
+        except Exception as e:
+
+            sys.stderr.write(f"pnd: could not bind broker socket {bsock}: "
+                             f"{type(e).__name__}: {e} (default socket unaffected)\n")
+            sys.stderr.flush()
+    stop = {"v": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(v=True))
+    signal.signal(signal.SIGINT, lambda *_: stop.update(v=True))
+    sd_notify("READY=1")
+    sys.stderr.write(f"pnd {VERSION} up: floor={CFG.mem_floor}M batch_high={CFG.batch_high}M "
+                     f"max_concurrent={CFG.max_concurrent} io_delegated={IO_ENABLED}\n")
+    sys.stderr.flush()
+    while not stop["v"]:
+        t0 = time.time()
+        try:
+            tick()
+        except Exception as e:
+            sys.stderr.write(f"pnd tick error: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+        try:
+
+            maybe_hausmeister()
+        except Exception as e:
+            sys.stderr.write(f"pnd hausmeister trigger error: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+        dt = time.time() - t0
+        time.sleep(max(0.1, CFG.poll_interval - dt))
+    sd_notify("STOPPING=1")
+
+if __name__ == "__main__":
+    main()

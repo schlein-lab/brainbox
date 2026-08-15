@@ -1,0 +1,116 @@
+{
+  "$comment": "Machine-readable manifest of the Brainarbeit MCP tools. Each tool maps to a one-contract verb, proxied through the authenticated gateway (durable token + mandatory TOTP 2FA, broker act-as, cap-intersection). An MCP-capable LLM/agent drives the Brainbox by calling these. Trigger conditions are written into each description (prescriptive when-to-call) so conservative models still reach for them.",
+  "server": {
+    "name": "brainarbeit",
+    "version": "1.0.0",
+    "description": "Drive a Brainarbeit Brainbox and receive its reality as MCP tools."
+  },
+  "tools": [
+    {
+      "name": "brainarbeit_submit",
+      "description": "Hand a task to the Brainbox. Call this whenever the user wants real work done that the box can run autonomously: fill a form, run an HPC/compute pipeline, prepare a shipping/customs document, write an application (Antrag), answer emails, operate an app. Submits a TYPED task (task_type + params); raw shell commands are not accepted. Attach files inline (base64) or reference files already on the box. Returns a job id; the box works it and notifies on completion. If the task_type has an approval gate, the job parks until you call brainarbeit_resolve_approval.",
+      "input_schema": {
+        "type": "object",
+        "required": ["task_type"],
+        "properties": {
+          "task_type": {"type": "string", "description": "the server-side typed task template to run"},
+          "params": {"type": "object", "description": "task parameters"},
+          "attachments": {
+            "type": "array",
+            "description": "files to upload; staged on the box and passed to the job as path refs",
+            "items": {
+              "type": "object",
+              "required": ["filename", "content_b64"],
+              "properties": {
+                "filename": {"type": "string"},
+                "content_b64": {"type": "string"}
+              }
+            }
+          },
+          "path_refs": {"type": "array", "items": {"type": "string"}, "description": "files already on the box (e.g. a discovered share)"},
+          "reply_to": {"type": "string", "description": "deliver the result to <adapter>:<address> (webhook:/telegram:/email:)"},
+          "needs_confirmation": {"type": "boolean", "description": "force a human approval gate before any side effect"},
+          "tag": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "brainarbeit_status",
+      "description": "Check on a job you submitted. Call this when the user asks whether a task is done, in progress, queued, or waiting for approval. Returns the Canonical View Model: state, queue position, progress, latest events.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {"id": {"type": "integer", "description": "the job id from brainarbeit_submit"}}
+      }
+    },
+    {
+      "name": "brainarbeit_result",
+      "description": "Fetch the typed result of a finished job (artifacts, verdict, confidence). Call this once a job is done to retrieve what it produced.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {"id": {"type": "integer"}}
+      }
+    },
+    {
+      "name": "brainarbeit_list_jobs",
+      "description": "List the caller's jobs. Call this when the user asks 'what's running', 'show my tasks', or wants an overview. Optionally filter by state (queued/running/awaiting_approval/done/failed).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "state": {"type": "string"},
+          "limit": {"type": "integer", "default": 50}
+        }
+      }
+    },
+    {
+      "name": "brainarbeit_pending_approvals",
+      "description": "List jobs waiting for the human's yes. Call this when the user asks what needs approval, or before deciding whether to approve/reject. Each item carries the nonce to pass to brainarbeit_resolve_approval and a summary of the about-to-happen side effect.",
+      "input_schema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 100}}}
+    },
+    {
+      "name": "brainarbeit_resolve_approval",
+      "description": "Approve, reject, revise, or deny a job's approval gate. Call this to let an irreversible action fire (approve), block it but keep the artifact (reject), re-run with feedback (revise), or cancel a pre-dispatch staged job (deny). Nonce-gated and idempotent. NEVER approve on the user's behalf without their explicit yes.",
+      "input_schema": {
+        "type": "object",
+        "required": ["nonce", "decision"],
+        "properties": {
+          "nonce": {"type": "string", "description": "from brainarbeit_pending_approvals or the submit response"},
+          "decision": {"type": "string", "enum": ["approve", "reject", "revise", "deny"]},
+          "feedback": {"type": "string", "description": "notes to re-run with (for revise)"}
+        }
+      }
+    },
+    {
+      "name": "brainarbeit_steer",
+      "description": "Send live feedback into a RUNNING job. Call this when the user wants to nudge, correct, or add information to a task that is currently in progress (not queued, not finished).",
+      "input_schema": {
+        "type": "object",
+        "required": ["id", "input"],
+        "properties": {
+          "id": {"type": "integer"},
+          "input": {"description": "the steering message/data to feed the worker"}
+        }
+      }
+    },
+    {
+      "name": "brainarbeit_cancel",
+      "description": "Cancel a queued or running job. Call this when the user wants to stop a task.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {"id": {"type": "integer"}}
+      }
+    },
+    {
+      "name": "brainarbeit_outputs",
+      "description": "List the outputs the caller's jobs have emitted (results, files, artifacts). Call this when the user asks for everything the box has produced for them.",
+      "input_schema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 200}}}
+    },
+    {
+      "name": "brainarbeit_engine_status",
+      "description": "Get the box's governor/queue snapshot: how busy it is, queued/running counts, reserved RAM, memory pressure. Call this when the user asks how loaded the box is or whether it has capacity.",
+      "input_schema": {"type": "object", "properties": {}}
+    }
+  ]
+}

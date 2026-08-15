@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import signal
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+RC_CANCELED = 143
+RC_UNREACHABLE = 125
+HTTP_TIMEOUT_S = 6
+LOST_AFTER_S = 45
+POLL_MIN_S, POLL_MAX_S = 0.5, 2.0
+
+STOP = {"flag": False}
+
+def _on_term(signum, frame):
+    STOP["flag"] = True
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(prog="pn-remote-run", add_help=True)
+    ap.add_argument("--endpoint", required=True)
+    ap.add_argument("--token-file", required=True)
+    ap.add_argument("--job-id", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--err", required=True)
+    ap.add_argument("--rc", required=True)
+    ap.add_argument("--timeout", type=int, default=0)
+    ap.add_argument("--exec-env-file", default=None)
+    ap.add_argument("--exec-cwd", default=None)
+    if "--" in argv:
+        i = argv.index("--")
+        args, cmd = ap.parse_args(argv[:i]), argv[i + 1:]
+    else:
+        args, cmd = ap.parse_args(argv), []
+    if not cmd:
+        ap.error("missing job argv after --")
+    return args, cmd
+
+class Node:
+    def __init__(self, endpoint, token):
+        self.base = endpoint.rstrip("/")
+        self.token = token
+
+    def _req(self, method, path, body=None):
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers={"X-Node-Token": self.token,
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as r:
+            return r.status, dict(r.headers), r.read()
+
+    def json(self, method, path, body=None):
+        status, _, raw = self._req(method, path, body)
+        try:
+            return status, json.loads(raw or b"{}")
+        except ValueError:
+            return status, {}
+
+    def out_chunk(self, job_id, stream, offset):
+
+        q = urllib.parse.urlencode({"stream": stream, "offset": offset})
+        status, headers, raw = self._req("GET", f"/jobs/{job_id}/out?{q}")
+        if status != 200:
+            return b"", False
+        return raw, headers.get("X-Eof", "0").strip() == "1"
+
+def append(path, data):
+    if not data:
+        return
+    with open(path, "ab") as f:
+        f.write(data)
+
+def write_rc(path, code):
+    try:
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            f.write(str(int(code)))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+def note_err(err_path, msg):
+    line = f"=== pn-remote-run: {msg} ===\n".encode()
+    try:
+        append(err_path, line)
+    except OSError:
+        pass
+    try:
+        sys.stderr.write(line.decode())
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+def finish(args, code):
+    write_rc(args.rc, code)
+    sys.exit(int(code))
+
+def cancel_remote(node, job_id):
+    for _ in range(2):
+        try:
+            node.json("POST", f"/jobs/{job_id}/cancel", {})
+            return True
+        except Exception:
+            time.sleep(0.5)
+    return False
+
+def main():
+    args, cmd = parse_args(sys.argv[1:])
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _on_term)
+    try:
+        with open(args.token_file) as f:
+            token = f.read().strip()
+    except OSError as e:
+        note_err(args.err, f"cannot read token file: {e}")
+        finish(args, RC_UNREACHABLE)
+    node = Node(args.endpoint, token)
+
+    for p in (args.out, args.err):
+        try:
+            open(p, "wb").close()
+        except OSError:
+            pass
+
+    body = {"job_id": str(args.job_id), "argv": cmd, "kind": "process"}
+    if args.timeout > 0:
+        body["timeout_s"] = args.timeout
+    if args.exec_cwd:
+        body["cwd"] = args.exec_cwd
+    if args.exec_env_file:
+        try:
+            with open(args.exec_env_file) as _f:
+                _ee = json.load(_f)
+            if isinstance(_ee, dict):
+                body["env"] = _ee
+        except Exception:
+            pass
+    posted = False
+    for attempt in range(3):
+        try:
+            status, resp = node.json("POST", "/exec", body)
+            if status in (200, 202) and resp.get("ok"):
+                posted = True
+                if args.exec_env_file:
+                    try: os.unlink(args.exec_env_file)
+                    except OSError: pass
+                break
+            note_err(args.err, f"/exec refused: http {status} {resp}")
+            finish(args, RC_UNREACHABLE)
+        except Exception as e:
+            if attempt == 2:
+                note_err(args.err, f"node unreachable ({args.endpoint}): {e}")
+                finish(args, RC_UNREACHABLE)
+            time.sleep(1.5)
+    if not posted:
+        finish(args, RC_UNREACHABLE)
+
+    off = {"stdout": 0, "stderr": 0}
+    files = {"stdout": args.out, "stderr": args.err}
+    interval = POLL_MIN_S
+    last_ok = time.monotonic()
+
+    def pump():
+        moved = False
+        for stream in ("stdout", "stderr"):
+            try:
+                data, _eof = node.out_chunk(args.job_id, stream, off[stream])
+            except Exception:
+                return moved, False
+            if data:
+                append(files[stream], data)
+                off[stream] += len(data)
+                moved = True
+        return moved, True
+
+    while True:
+        if STOP["flag"]:
+            cancel_remote(node, args.job_id)
+            pump()
+            note_err(args.err, "canceled (SIGTERM -> remote cancel)")
+            finish(args, RC_CANCELED)
+        moved, io_ok = pump()
+        state, rc = None, None
+        try:
+            status, st = node.json("GET", f"/jobs/{args.job_id}")
+            if status == 200 and st.get("ok"):
+                state, rc = st.get("state"), st.get("rc")
+                last_ok = time.monotonic()
+        except Exception:
+            pass
+        if io_ok:
+            last_ok = time.monotonic()
+        if state in ("done", "error", "canceled"):
+
+            for _ in range(20):
+                m, _ok = pump()
+                if not m:
+                    break
+            if state == "canceled":
+                finish(args, RC_CANCELED if rc is None else int(rc))
+            if rc is None:
+                rc = 0 if state == "done" else 1
+            finish(args, int(rc))
+        if time.monotonic() - last_ok > LOST_AFTER_S:
+            note_err(args.err, f"node lost mid-job ({args.endpoint}): no answer for {LOST_AFTER_S}s")
+            finish(args, RC_UNREACHABLE)
+
+        interval = POLL_MIN_S if moved else min(POLL_MAX_S, interval * 1.5)
+        deadline = time.monotonic() + interval
+        while time.monotonic() < deadline and not STOP["flag"]:
+            time.sleep(0.1)
+
+if __name__ == "__main__":
+    main()

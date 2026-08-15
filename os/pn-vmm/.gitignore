@@ -1,0 +1,12 @@
+/target
+Cargo.lock
+/kernel/*
+!/kernel/build_rng_kernel.sh
+!/kernel/build-guest-kernel.sh
+!/kernel/build_guest_kernel_arm64.sh
+!/kernel/Makefile
+!/kernel/BUILD.md
+!/kernel/config-x86_64-6.1
+!/kernel/config-aarch64-6.1
+Cargo.toml.bak
+.2b_commit.txt

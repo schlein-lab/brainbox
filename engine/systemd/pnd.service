@@ -1,0 +1,18 @@
+[Unit]
+Description=portioneer queue daemon (pnd)
+After=default.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/portioneer/tools/pnd
+Slice=pn-interactive.slice
+OOMScoreAdjust=-700
+Restart=always
+RestartSec=2
+WatchdogSec=30
+MemoryAccounting=yes
+MemoryLow=128M
+
+[Install]
+WantedBy=default.target

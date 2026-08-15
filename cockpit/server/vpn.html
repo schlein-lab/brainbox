@@ -1,0 +1,116 @@
+<!doctype html><html lang=de><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>VPN — Brainbox</title>
+<style>
+:root{--bg:#0f1216;--card:#171b21;--ln:#242a33;--tx:#e7ecf3;--mut:#93a0b0;--acc:#43c59e;--warn:#e0b341;--bad:#e0614f;--blue:#5b9dff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:720px;margin:0 auto;padding:26px 18px 60px}
+a.back{color:var(--mut);text-decoration:none;font-size:14px}
+h1{font-size:22px;margin:14px 0 4px}
+.sub{color:var(--mut);font-size:14px;margin-bottom:22px}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:20px;margin-bottom:16px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pill{font-size:13px;font-weight:600;padding:4px 11px;border-radius:999px;border:1px solid var(--ln)}
+.pill.on{color:#0d130f;background:var(--acc);border-color:var(--acc)}
+.pill.off{color:var(--mut)}
+.pill.wait{color:#12100a;background:var(--warn);border-color:var(--warn)}
+.pill.unknown{color:var(--warn);border-color:var(--warn)}
+h3{margin:2px 0 6px;font-size:17px}
+.meta{color:var(--mut);font-size:13px;margin:2px 0 4px}
+.meta b{color:var(--tx);font-weight:600}
+.btns{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+button{font:600 15px/1 inherit;padding:11px 18px;border-radius:10px;border:1px solid var(--ln);cursor:pointer;background:#1e242c;color:var(--tx)}
+button.go{background:var(--acc);border-color:var(--acc);color:#08130d}
+button.stop{background:transparent;border-color:var(--bad);color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+.msg{margin-top:12px;font-size:13.5px;min-height:18px}
+.msg.ok{color:var(--acc)}.msg.err{color:var(--bad)}.msg.warn{color:var(--warn)}
+.auth{margin-top:14px;background:#0b0e12;border:1px solid var(--blue);border-radius:12px;padding:14px}
+.auth .lbl{font-size:13px;color:var(--blue);font-weight:600;margin-bottom:8px}
+.auth a.url{display:block;word-break:break-all;color:var(--tx);font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;margin-bottom:10px;text-decoration:none;border-bottom:1px dotted var(--mut)}
+.auth .arow{display:flex;gap:10px;flex-wrap:wrap}
+.auth button.open{background:var(--blue);border-color:var(--blue);color:#04101f}
+.note{font-size:12.5px;color:var(--mut);margin-top:10px;line-height:1.5}
+</style><script src="/portal-nav.js" defer></script></head><body><div class=wrap>
+<a class=back href="/">&larr; Zurueck</a>
+<h1>🔒 VPN</h1>
+<div class=sub>Netz-Tunnel starten und die 2-Faktor-Anmeldung im Browser bestaetigen. Nur du (Owner, am LAN) startest sie; die Box verbindet nie von selbst.</div>
+<div id=list>Lade…</div>
+<div class=note>Ablauf: <b>Verbinden</b> loest auf der Brainbox die bestehende Anmeldung aus (per Single-Sign-on). Sobald der
+<b>2FA-Link</b> erscheint, oeffne ihn, bestaetige mit deinem zweiten Faktor — danach steht der Tunnel. Auf- und
+Abbau macht ausschliesslich dieser Knopf.</div>
+<script>
+const listEl=document.getElementById('list');
+let VPNS=[], AUTH=null, CELL=null, POLL=null, BUSY={};
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function jget(u){const r=await fetch(u,{cache:'no-store'});return await r.json();}
+async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});return await r.json();}
+async function load(){
+ try{
+  const j=await jget('/api/vpns');
+  if(!j.ok){listEl.innerHTML='<div class="card msg err">'+esc(j.error||'Fehler')+'</div>';return;}
+  VPNS=j.vpns||[];
+  try{const s=await jget('/api/vpn/status');
+   if(s&&s.state==='connected'){AUTH=null;CELL=null;BUSY={};stopPoll();}
+   else if(s&&(s.auth_url||s.stream_cell)){AUTH=s.auth_url||null;CELL=s.stream_cell||null;startPoll();}
+  }catch(e){}
+  render();
+ }catch(e){listEl.innerHTML='<div class="card msg err">'+esc(e)+'</div>';}}
+function pill(v){
+ if(v.status==='up')return '<span class="pill on">● verbunden</span>';
+ if(BUSY[v.id]||AUTH||CELL)return '<span class="pill wait">◔ Anmeldung…</span>';
+ if(v.status==='unknown')return '<span class="pill unknown">? Status unbekannt</span>';
+ return '<span class="pill off">○ getrennt</span>';}
+function render(){
+ if(!VPNS.length){listEl.innerHTML='<div class=card>Keine VPNs konfiguriert.<div class=meta>Registry: ~/.config/pn-vpn/registry.json</div></div>';return;}
+ listEl.innerHTML=VPNS.map(function(v){
+  const up=v.status==='up';
+  let h='<div class=card>';
+  h+='<div class=row><h3 style=flex:1>'+esc(v.name||v.id)+'</h3>'+pill(v)+'</div>';
+  if(v.gateway)h+='<div class=meta>Gateway: <b>'+esc(v.gateway)+'</b></div>';
+  if(v.user)h+='<div class=meta>Nutzer: <b>'+esc(v.user)+'</b></div>';
+  if(v.purpose)h+='<div class=meta>'+esc(v.purpose)+'</div>';
+  h+='<div class=btns>';
+  if(up)h+='<button class=stop onclick="disconnect(\''+esc(v.id)+'\')">Trennen</button>';
+  else h+='<button class=go id="c-'+esc(v.id)+'" onclick="connect(\''+esc(v.id)+'\')">Verbinden</button>';
+  h+='<button title="Reißt die VPN-Verbindung und das Anmelde-Fenster komplett ab und baut beim nächsten Verbinden frisch auf — das meint Ciscos „please restart“." onclick="restart(\''+esc(v.id)+'\')">🔄 Neu starten</button>';
+  h+='</div><div class=msg id="m-'+esc(v.id)+'"></div>';
+  if(!up&&(AUTH||CELL))h+=authBox();
+  h+='</div>';return h;
+ }).join('');}
+function authBox(){
+ var h='<div class=auth><div class=lbl>🔐 2-Faktor-Anmeldung</div>';
+ if(CELL){
+  h+='<a class=url style="border-color:var(--acc);color:var(--acc);border-bottom-style:solid" href="/vnc3?cell='+encodeURIComponent(CELL)+'" target=_blank rel=noopener>🖥 Login-Bildschirm oeffnen — im Anmelde-Fenster anmelden</a>';
+  h+='<div class=note><b>Wichtig:</b> Hier — <b>im Anmelde-Fenster</b> — anmelden, <b>nicht</b> im eigenen Browser. Die 2FA-Bestaetigung laeuft im Anmelde-Fenster; ein Browser auf deinem Rechner erreicht sie nicht und der Login scheitert.</div>';
+  if(AUTH)h+='<div class=note style="margin-top:8px">Direktlink (nur Notfall, <b>im Anmelde-Fenster</b> einfuegen): <span style="word-break:break-all;color:var(--mut)">'+esc(AUTH)+'</span> <button style="padding:4px 10px" onclick="copyUrl()">kopieren</button></div>';
+ } else if(AUTH){
+  h+='<a class=url href="'+esc(AUTH)+'" target=_blank rel=noopener>'+esc(AUTH)+'</a>'
+   +'<div class=arow><button class=open onclick="window.open(\''+esc(AUTH)+'\',\'_blank\')">Im Browser oeffnen</button>'
+   +'<button onclick="copyUrl()">Link kopieren</button></div>'
+   +'<div class=note>Hinweis: Die 2FA-Bestaetigung muss im Anmelde-Fenster erfolgen — oeffnet sich der Login im eigenen Browser statt im Anmelde-Fenster, schlaegt die Anmeldung fehl.</div>';
+ }
+ h+='</div>';return h;}
+function copyUrl(){if(AUTH){try{navigator.clipboard.writeText(AUTH);}catch(e){}}}
+function msg(id,t,c){const m=document.getElementById('m-'+id);if(m){m.textContent=t;m.className='msg '+(c||'');}}
+async function connect(id){
+ const b=document.getElementById('c-'+id);if(b)b.disabled=true;BUSY[id]=true;render();msg(id,'Starte Anmeldung auf der Brainbox…','warn');
+ try{const j=await jpost('/api/vpn/request',{vpn:id});
+  if(j.state==='forbidden'){BUSY[id]=false;AUTH=null;render();msg(id,'✗ '+(j.error||'nicht erlaubt'),'err');return;}
+  if(j.state==='connected'){BUSY[id]=false;msg(id,'✓ verbunden.','ok');await load();return;}
+  if(j.auth_url||j.stream_cell){AUTH=j.auth_url||null;CELL=j.stream_cell||null;render();msg(id,CELL?'Login-Bildschirm bereit — im Anmelde-Fenster anmelden.':'2FA-Link bereit — bitte oeffnen.','warn');startPoll();return;}
+  render();msg(id,'Aufbau laeuft — 2FA-Link folgt in Kuerze…','warn');startPoll();
+ }catch(e){BUSY[id]=false;render();msg(id,'✗ '+e,'err');}}
+async function disconnect(id){msg(id,'Trenne…','warn');try{await jpost('/api/vpn/cancel',{vpn:id});}catch(e){}AUTH=null;CELL=null;BUSY={};stopPoll();setTimeout(load,1000);}
+async function restart(id){msg(id,'Setze VPN-/Cisco-Stack zurück…','warn');AUTH=null;CELL=null;BUSY={};stopPoll();
+ try{const r=await jpost('/api/vpn/restart',{vpn:id});msg(id,(r&&r.ok)?'✓ zurückgesetzt — jetzt neu „Verbinden“.':'✗ '+((r&&r.error)||'Fehler'),(r&&r.ok)?'ok':'err');}
+ catch(e){msg(id,'✗ '+e,'err');}
+ setTimeout(load,1200);}
+function startPoll(){if(!POLL)POLL=setInterval(pollStatus,3000);}
+function stopPoll(){if(POLL){clearInterval(POLL);POLL=null;}}
+async function pollStatus(){
+ try{const j=await jget('/api/vpn/status');
+  if(j.state==='connected'||(j.active&&j.active.length)){AUTH=null;CELL=null;BUSY={};stopPoll();await load();return;}
+  if((j.stream_cell&&j.stream_cell!==CELL)||(j.auth_url&&j.auth_url!==AUTH)){AUTH=j.auth_url||AUTH;CELL=j.stream_cell||CELL;render();}
+ }catch(e){}}
+load();setInterval(function(){if(!POLL)load();},15000);
+</script></div></body></html>

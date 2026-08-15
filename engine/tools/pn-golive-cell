@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+
+import os, sys, json, subprocess, argparse
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, REPO)
+from relaylib import deaddrop, registry
+from relaylib.keys import ApplianceKeys
+from pnlib import db, DB_PATH
+
+CELL_RUNNER = os.environ.get("CELL_RUNNER", "pn-cell-sealed-run")
+LETTERBOX = os.environ.get("LETTERBOX_URL", "https://drop.brainarbeit.com")
+
+def sh(*a, **kw):
+    return subprocess.run(a, capture_output=True, text=True, **kw)
+
+def keygen_in_cell(principal):
+
+    r = sh(os.path.join(REPO, "tools", "pn-cell"), "run-in-cell", principal, "--",
+           CELL_RUNNER, "keygen")
+    if r.returncode != 0:
+        sys.exit(f"[golive] keygen-in-cell failed (is the cell booted under its own uid?):\n{r.stderr}")
+    pub = json.loads(r.stdout.strip().splitlines()[-1])
+    return pub["cell_x_pub"], pub["cell_id_pub"]
+
+def reseal_seed(principal, device_x_pub):
+
+    reg = registry.connect()
+    secret = registry.arm_2fa(reg, principal)
+    r = subprocess.run([os.path.join(REPO, "tools", "pn-cell"), "run-in-cell", principal, "--",
+                        CELL_RUNNER, "sealseed", "--device-x-pub", device_x_pub],
+                       input=secret, capture_output=True, text=True)
+    return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
+
+def register_task_type():
+
+    cx = db.connect(DB_PATH)
+    row = cx.execute("SELECT name FROM task_types WHERE name='cell.exec'").fetchone()
+    if row:
+        print("[golive] task_type cell.exec already registered")
+        return
+    prof_tpl = json.dumps({"prio": 160, "cpu_weight": 25, "mem": 256})
+    cx.execute(
+        "INSERT INTO task_types(name,cmd_template,params_schema,isolation_tier,needs_confirmation,"
+        "klass,approval,profile_template) VALUES(?,?,?,?,?,?,?,?)",
+        ("cell.exec", json.dumps(["/bin/sh", "-c", "{command}"]),
+         json.dumps({"command": "str"}), "cell", 0, "cell", "none", prof_tpl))
+    cx.commit()
+    print("[golive] registered cell.exec (isolation_tier=cell, deferrable prio=160, net=bulk)")
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-golive-cell")
+    ap.add_argument("principal")
+    ap.add_argument("--device-id-pub"); ap.add_argument("--device-x-pub")
+    ap.add_argument("--share", default=None, help="dir to write the final bundle into")
+    a = ap.parse_args()
+
+    print(f"[golive] {a.principal}: keygen inside the de-priv cell …")
+    cx_pub, cid_pub = keygen_in_cell(a.principal)
+    print(f"[golive]   cell_x_pub={cx_pub}\n[golive]   cell_id_pub={cid_pub}")
+
+    reg = registry.connect()
+    al = next((x for x in registry.list_alliances(reg)
+               if x.get("principal") == a.principal and not x.get("revoked_at")), None)
+    did_pub = a.device_id_pub or (al and al.get("device_pubkey"))
+    dx_pub = a.device_x_pub or (al and al.get("device_x_pubkey"))
+    if not (did_pub and dx_pub):
+        sys.exit("[golive] need --device-id-pub/--device-x-pub (no active alliance found)")
+
+    print("[golive] re-issuing final bundle …")
+    r = sh(os.path.join(REPO, "tools", "pn-pair"), "--enroll-device", "--principal", a.principal,
+           "--device-id-pub", did_pub, "--device-x-pub", dx_pub,
+           "--cell-x-pub", cx_pub, "--cell-id-pub", cid_pub,
+           "--cap", "task_type:cell.exec", "--label", a.principal,
+           "--letterbox-url", LETTERBOX)
+    bundle = None
+    if r.returncode == 0:
+        import re
+        m = re.search(r"\{.*\}", r.stdout, re.S)
+        bundle = json.loads(m.group(0)) if m else None
+    else:
+        print(f"[golive] re-enrol note (alliance may already exist): {r.stderr.strip()[:200]}")
+
+    register_task_type()
+
+    if bundle and a.share:
+        os.makedirs(a.share, exist_ok=True)
+        json.dump(bundle, open(os.path.join(a.share, "pairing-bundle.json"), "w"), indent=2)
+        seed_env = reseal_seed(a.principal, dx_pub)
+        if seed_env:
+            json.dump(seed_env, open(os.path.join(a.share, "twofa-seed.sealed.json"), "w"), indent=2)
+        try:
+            os.remove(os.path.join(a.share, "pairing-bundle.partial.json"))
+        except OSError:
+            pass
+        print(f"[golive] wrote final bundle -> {a.share}/pairing-bundle.json")
+
+    print("\n[golive] FINAL STEP (operator, needs sudo): arm the poller as the adapter uid:")
+    print("  sudo -u adapter env LETTERBOX_URL=%s PN_RELAY_POLL_INTERVAL=15 \\" % LETTERBOX)
+    print("       LETTERBOX_BOX_TOKEN=<box-token> CELL_RUNNER=%s \\" % CELL_RUNNER)
+    print("       setsid --fork python3 %s/tools/pn-deaddrop-poll </dev/null >>/tmp/ddpoll.log 2>&1 &" % REPO)
+    print("[golive] then the client's first sealed off-LAN job routes blind into the cell.")
+
+if __name__ == "__main__":
+    main()

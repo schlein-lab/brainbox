@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+
+import os, sys, argparse, json, secrets, urllib.request, urllib.error, urllib.parse
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+import relaylib
+from relaylib import registry, crypto, totp, audit, deaddrop
+from relaylib.keys import ApplianceKeys
+from pnlib import db, DB_PATH
+
+def minter_principal_and_caps():
+
+    cx = db.connect(DB_PATH)
+    uid = os.getuid()
+    principal = db.principal_for_uid(cx, uid)
+    caps = db.caps_for(cx, principal)
+    return principal, caps
+
+def box_stable_bundle(letterbox_url):
+
+    k = ApplianceKeys()
+    b = {
+        "box_id_pub":   k.id_pub.hex(),
+        "box_x_pub":    k.sx_pub.hex(),
+        "box_topic":    deaddrop.inbox_topic(k.sx_pub),
+        "inbox_topic":  deaddrop.inbox_topic(k.sx_pub),
+        "grants_topic": deaddrop.grants_topic(k.sx_pub),
+        "letterbox_url": letterbox_url,
+        "req_info":     deaddrop.REQ_INFO.decode(),
+        "res_info":     deaddrop.RES_INFO.decode(),
+        "approq_info":  deaddrop.APPROQ_INFO.decode(),
+        "apgrant_info": deaddrop.APGRANT_INFO.decode(),
+    }
+
+    ks = os.environ.get("BRAINBOX_CELL_KEYS")
+    if ks and os.path.exists(ks):
+        try:
+            d = json.load(open(ks))
+            cxp = d.get("cell_x_pub") or d.get("x_pub"); cip = d.get("cell_id_pub") or d.get("id_pub")
+            if cxp and cip:
+                b.update({"protocol": "v2-cellsealed", "cell_x_pub": cxp, "cell_id_pub": cip,
+                          "cellreq_info": deaddrop.CELLREQ_INFO.decode(),
+                          "cellres_info": deaddrop.CELLRES_INFO.decode()})
+        except Exception:
+            pass
+    b.setdefault("protocol", "v2-cellsealed")
+    return b
+
+def publish_bundle(bundle, letterbox_url, digits, ttl, token=None):
+
+    code = "".join(secrets.choice("0123456789") for _ in range(max(4, digits)))
+    body = json.dumps({"code": code, "bundle": bundle}).encode()
+    req = urllib.request.Request(letterbox_url.rstrip("/") + "/pair", data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    tok = token or os.environ.get("LETTERBOX_BOX_TOKEN")
+    if tok:
+        req.add_header("Authorization", "Bearer " + tok)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        resp = json.loads(r.read() or b"{}")
+    return code, resp.get("ttl")
+
+def _print_pairing_code(code, letterbox_url, ttl):
+    print("=== Kopplungs-Code (Forderung 5) ===")
+    print("  Pairing-Code:  %s" % code)
+    print("  Im Client EIN Feld 'Kopplungs-Code' eingeben -> zieht das Bundle -> prueft -> speichert.")
+    print("  fetch (was der Client tut): GET %s/pair?code=%s" % (letterbox_url.rstrip("/"), code))
+    if ttl:
+        print("  gueltig ~%ds (danach neu publizieren)." % ttl)
+
+def fetch_code(letterbox_url, code):
+
+    url = letterbox_url.rstrip("/") + "/pair?code=" + urllib.parse.quote(str(code))
+    with urllib.request.urlopen(url, timeout=15) as r:
+        return json.loads(r.read() or b"{}").get("bundle")
+
+def main():
+    ap = argparse.ArgumentParser(prog="pn-pair")
+    ap.add_argument("--principal", help="the user principal the device will act AS")
+    ap.add_argument("--cap", action="append", default=[],
+                    help="a cap to grant the device (repeatable); must be one YOU may delegate")
+    ap.add_argument("--label", default=None)
+    ap.add_argument("--ttl", type=int, default=900, help="OOB code lifetime in seconds")
+    ap.add_argument("--rate", type=int, default=30, help="per-device submits / 60s ceiling")
+    ap.add_argument("--concurrency", type=int, default=2, help="per-device in-flight ceiling")
+    ap.add_argument("--control", "--can-approve", dest="control", action="store_true",
+                    help="pair this device WITH approval authority: grants the device principal the "
+                         "`approval:resolve` cap so it can approve/deny/reject jobs OVER THE RELAY "
+                         "(separation of duties still forbids self-approval). Default: submit-only.")
+    ap.add_argument("--arm-2fa", action="store_true",
+                    help="arm/replace the principal's MANDATORY TOTP second factor (prints secret)")
+    ap.add_argument("--unlock-2fa", action="store_true",
+                    help="clear a 2FA lockout WITHOUT rotating the secret (operator anti-griefing "
+                         "unlock); with --did clears that device's step-up lockout, else the "
+                         "principal-wide redeem/enroll lockout")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--revoke", metavar="DID")
+    ap.add_argument("--audit", action="store_true", help="tail the tamper-evident audit log")
+    ap.add_argument("--verify", action="store_true", help="verify the audit-log hash chain")
+    ap.add_argument("--did", default=None, help="filter --audit by device did")
+    ap.add_argument("--enroll-device", action="store_true",
+                    help="DEAD-DROP enrolment: register a device's PUBLIC keys DIRECTLY (no OOB "
+                         "code, no live redemption). The device authenticates every sealed envelope "
+                         "by Ed25519 signature; prints the pairing bundle for the thin client.")
+    ap.add_argument("--device-id-pub", help="device Ed25519 identity pubkey (hex), from the thin "
+                                            "client's first run (dead-drop enrolment)")
+    ap.add_argument("--device-x-pub", help="device X25519 receiving pubkey (hex) for box->device "
+                                           "approvals (dead-drop enrolment)")
+    ap.add_argument("--letterbox-url", default=os.environ.get("LETTERBOX_URL", "https://drop.brainarbeit.com"),
+                    help="the blind letterbox base URL to ship in the pairing bundle")
+    ap.add_argument("--cell-x-pub", help="v2 CELL-SEALED: tenant cell X25519 pubkey (from "
+                                         "`pn-cell-sealed-run keygen` INSIDE the tenant cell). The "
+                                         "device seals the job to THIS key; the box never holds the priv.")
+    ap.add_argument("--cell-id-pub", help="v2 CELL-SEALED: tenant cell Ed25519 pubkey (verifies the "
+                                          "cell-sealed result). Ship both to enable admin-blind v2.")
+    ap.add_argument("--publish", action="store_true",
+                    help="Forderung 5: instead of printing the pairing bundle for copy-paste, publish "
+                         "it to the letterbox under a random N-digit code + short TTL and print the "
+                         "code. With --enroll-device the enrolled bundle is published; standalone it "
+                         "publishes the box-stable public bundle. Client enters ONE 'Kopplungs-Code'.")
+    ap.add_argument("--fetch-code", metavar="CODE",
+                    help="reference CLIENT fetch: GET the public pairing bundle for CODE and print it "
+                         "(what the thin client does with one 'Kopplungs-Code'). No auth (open).")
+    ap.add_argument("--code-digits", type=int, default=8, help="length of the --publish pairing code")
+    ap.add_argument("--letterbox-token", default=os.environ.get("LETTERBOX_BOX_TOKEN"),
+                    help="bearer token to publish to the letterbox (POST /pair); env LETTERBOX_BOX_TOKEN")
+    args = ap.parse_args()
+
+    if args.fetch_code:
+        b = fetch_code(args.letterbox_url, args.fetch_code)
+        if b is None:
+            sys.stderr.write("pn-pair: no bundle for that code (expired or wrong).\n"); sys.exit(1)
+        print(json.dumps(b, indent=2)); sys.exit(0)
+
+    if args.publish and not args.enroll_device:
+        bundle = box_stable_bundle(args.letterbox_url)
+        try:
+            code, ttl = publish_bundle(bundle, args.letterbox_url, args.code_digits, args.ttl,
+                                       args.letterbox_token)
+        except Exception as e:
+            sys.stderr.write("pn-pair: publish failed: %s\n" % e); sys.exit(1)
+        _print_pairing_code(code, args.letterbox_url, ttl); sys.exit(0)
+
+    reg = registry.connect()
+
+    if args.audit:
+        if args.verify:
+            ok, broken, why = audit.verify_chain(reg)
+            print(json.dumps({"chain_intact": ok, "broken_seq": broken, "reason": why}, indent=2))
+            sys.exit(0 if ok else 1)
+        for r in audit.tail(reg, limit=200, device_did=args.did):
+            print(f"{int(r['ts'])}  {r['event']:<18} did={r['device_did'] or '-':<40} "
+                  f"principal={r['principal'] or '-':<12} {json.dumps(r['detail'])}")
+        sys.exit(0)
+
+    if args.revoke:
+        ok = registry.revoke(reg, args.revoke)
+        print("revoked" if ok else "no live alliance for that did")
+        sys.exit(0 if ok else 1)
+
+    if args.list:
+        for a in registry.list_alliances(reg, principal=args.principal):
+            state = "REVOKED" if a["revoked_at"] else "active"
+            print(f"{a['device_did']}  {a['principal']:<12} {state:<8} "
+                  f"caps={json.loads(a['caps'])} label={a['label']!r}")
+        sys.exit(0)
+
+    minter, minter_caps = minter_principal_and_caps()
+    if not minter:
+        sys.stderr.write(f"pn-pair: your uid {os.getuid()} maps to no principal; cannot mint.\n")
+        sys.exit(2)
+    principal = args.principal or minter
+
+    if args.arm_2fa:
+
+        may_admin = "view:all" in minter_caps or "task_type:*" in minter_caps
+        if principal != minter and not may_admin:
+            sys.stderr.write(f"pn-pair: only admin may arm 2FA for another principal.\n")
+            sys.exit(3)
+        secret = registry.arm_2fa(reg, principal)
+        uri = totp.provisioning_uri(secret, principal)
+        print("=== Brainarbeit 2FA enrollment (MANDATORY for the relay) ===")
+        print(f"principal:   {principal}")
+        print(f"TOTP secret: {secret}")
+        print(f"otpauth URI: {uri}")
+        print("--- enroll this in an authenticator app NOW (shown only once) ---")
+        print("Then mint a pairing: pn-pair --principal "
+              f"{principal} --cap task_type:echo.test")
+        sys.exit(0)
+
+    if args.unlock_2fa:
+
+        may_admin = "view:all" in minter_caps or "task_type:*" in minter_caps
+        if not args.did and principal != minter and not may_admin:
+            sys.stderr.write("pn-pair: only admin may unlock 2FA for another principal.\n")
+            sys.exit(3)
+        cleared = registry.unlock_2fa(reg, principal, device_did=args.did)
+        if args.did:
+            print(f"step-up 2FA lockout cleared for device {args.did}"
+                  if cleared else f"no step-up lockout state for device {args.did}")
+        else:
+            print(f"principal-wide 2FA lockout cleared for {principal}"
+                  if cleared else f"no 2FA lockout state for {principal}")
+        sys.exit(0)
+
+    if args.enroll_device:
+
+        if not args.device_id_pub or not args.device_x_pub:
+            sys.stderr.write("pn-pair: --enroll-device needs --device-id-pub and --device-x-pub "
+                             "(the two hex pubkeys the thin client prints on first run).\n")
+            sys.exit(2)
+        try:
+            did_pub = bytes.fromhex(args.device_id_pub.strip())
+            dx_pub = bytes.fromhex(args.device_x_pub.strip())
+            assert len(did_pub) == 32 and len(dx_pub) == 32
+        except Exception:
+            sys.stderr.write("pn-pair: --device-id-pub / --device-x-pub must each be 32-byte hex.\n")
+            sys.exit(2)
+
+        if db.is_lan_only_principal(db.connect(DB_PATH), principal):
+            sys.stderr.write(f"pn-pair: principal {principal!r} is admin-tier (LAN-only by "
+                             f"definition). Refusing off-LAN dead-drop enrolment.\n")
+            sys.exit(5)
+        caps = set(args.cap) or {"task_type:cell.exec"}
+        if args.control:
+            caps.add("approval:resolve")
+        may_delegate_all = "task_type:*" in minter_caps or "view:all" in minter_caps
+        if not may_delegate_all:
+            not_yours = caps - minter_caps
+            if not_yours:
+                sys.stderr.write(f"pn-pair: you ({minter}) may not delegate {sorted(not_yours)} "
+                                 f"(you hold {sorted(minter_caps)}).\n")
+                sys.exit(3)
+        if not registry.has_2fa(reg, principal):
+            sys.stderr.write(
+                f"pn-pair: principal {principal!r} has NO armed second factor. 2FA is MANDATORY for "
+                f"the off-LAN dead-drop. Arm it first:\n    pn-pair --arm-2fa --principal {principal}\n")
+            sys.exit(4)
+        did = crypto.did_for(did_pub)
+        registry.create_alliance(reg, device_did=did, device_pubkey_hex=did_pub.hex(),
+                                 device_x_pubkey_hex=dx_pub.hex(), principal=principal,
+                                 parent_principal=minter, caps=caps, label=args.label,
+                                 max_rate=args.rate, max_concurrency=args.concurrency)
+
+        cxe = db.connect(DB_PATH)
+        db.bind_identity(cxe, relaylib.ID_METHOD, did, principal, verified=1)
+        k = ApplianceKeys()
+        bundle = {
+            "box_id_pub":      k.id_pub.hex(),
+            "box_x_pub":       k.sx_pub.hex(),
+            "inbox_topic":     deaddrop.inbox_topic(k.sx_pub),
+            "approvals_topic": deaddrop.approvals_topic(dx_pub),
+            "grants_topic":    deaddrop.grants_topic(k.sx_pub),
+            "letterbox_url":   args.letterbox_url,
+            "req_info":        deaddrop.REQ_INFO.decode(),
+            "res_info":        deaddrop.RES_INFO.decode(),
+            "approq_info":     deaddrop.APPROQ_INFO.decode(),
+            "apgrant_info":    deaddrop.APGRANT_INFO.decode(),
+        }
+
+        if args.cell_x_pub and args.cell_id_pub:
+            bundle["protocol"] = "v2-cellsealed"
+            bundle["cell_x_pub"] = args.cell_x_pub.strip()
+            bundle["cell_id_pub"] = args.cell_id_pub.strip()
+            bundle["cellreq_info"] = deaddrop.CELLREQ_INFO.decode()
+            bundle["cellres_info"] = deaddrop.CELLRES_INFO.decode()
+        else:
+            bundle["protocol"] = "v1-boxterminated"
+        print("=== Brainbox DEAD-DROP device enrolment ===")
+        print(f"principal:   {principal}   (parent: {minter})")
+        print(f"caps:        {sorted(caps)}")
+        print(f"device_did:  {did}")
+        print(f"ceilings:    rate={args.rate}/60s  concurrency={args.concurrency}")
+        print(f"2FA:         REQUIRED per submit AND per approval (device presents a fresh TOTP code)")
+        if args.publish:
+
+            try:
+                code, ttl = publish_bundle(bundle, args.letterbox_url, args.code_digits, args.ttl,
+                                           args.letterbox_token)
+                _print_pairing_code(code, args.letterbox_url, ttl)
+            except Exception as e:
+                sys.stderr.write("pn-pair: publish failed (%s) — falling back to copy-paste bundle.\n" % e)
+                print("--- pairing bundle: paste into the thin client (all public, safe to ship OOB) ---")
+                print(json.dumps(bundle, indent=2))
+        else:
+            print("--- pairing bundle: paste into the thin client (all public, safe to ship OOB) ---")
+            print(json.dumps(bundle, indent=2))
+        sys.exit(0)
+
+    caps = set(args.cap)
+
+    if args.control:
+        caps.add("approval:resolve")
+    if not caps:
+        sys.stderr.write("pn-pair: specify at least one --cap for the device.\n")
+        sys.exit(2)
+
+    may_delegate_all = "task_type:*" in minter_caps or "view:all" in minter_caps
+    if not may_delegate_all:
+        not_yours = caps - minter_caps
+        if not_yours:
+            sys.stderr.write(f"pn-pair: you ({minter}) may not delegate {sorted(not_yours)} "
+                             f"(you hold {sorted(minter_caps)}).\n")
+            sys.exit(3)
+
+    if not registry.has_2fa(reg, principal):
+        sys.stderr.write(
+            f"pn-pair: principal {principal!r} has NO armed second factor. 2FA is MANDATORY for "
+            f"the off-LAN relay. Arm it first:\n    pn-pair --arm-2fa --principal {principal}\n")
+        sys.exit(4)
+
+    code = registry.mint_pairing(reg, principal, caps, parent_principal=minter,
+                                 label=args.label, ttl_s=args.ttl, max_rate=args.rate,
+                                 max_concurrency=args.concurrency)
+    k = ApplianceKeys()
+    print("=== Brainarbeit device pairing (one-time) ===")
+    print(f"code:        {code}")
+    print(f"principal:   {principal}   (parent: {minter})")
+    print(f"caps:        {sorted(caps)}")
+    print(f"ceilings:    rate={args.rate}/60s  concurrency={args.concurrency}")
+    print(f"2FA:         REQUIRED at redemption (the device must present a TOTP code)")
+    print(f"expires in:  {args.ttl}s   (the ALLIANCE is durable; only this CODE expires)")
+    print("--- ship these to the device OUT OF BAND (with the code) ---")
+    print(f"relay_url:           {os.environ.get('RELAY_URL', '(set RELAY_URL)')}")
+    print(f"appliance_id_pubkey: {k.id_pub.hex()}")
+    print(f"appliance_x_pubkey:  {k.sx_pub.hex()}")
+    print(f"rendezvous_topic:    {crypto.rendezvous_topic(k.sx_pub)}")
+
+if __name__ == "__main__":
+    main()

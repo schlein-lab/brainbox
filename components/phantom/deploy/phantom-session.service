@@ -1,0 +1,17 @@
+[Unit]
+Description=phantom session — the foreground app(s) hosted by the compositor
+After=phantom-compositor.service
+Requires=phantom-compositor.service
+
+[Service]
+Type=simple
+Environment=XDG_RUNTIME_DIR=/run/phantom
+Environment=WAYLAND_DISPLAY=phantom-0
+Environment=TERM=xterm-256color
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do [ -S /run/phantom/phantom-0 ] && exit 0; sleep 0.1; done; exit 1'
+ExecStart=/usr/bin/foot
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=graphical.target

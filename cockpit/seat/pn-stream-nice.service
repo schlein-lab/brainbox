@@ -1,0 +1,13 @@
+[Unit]
+Description=pn-stream-nice — keep live desktop stream ahead of dev fleet (portioneer Layer-A, user-scope)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pn-stream-nice
+Nice=10
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

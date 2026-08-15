@@ -1,0 +1,592 @@
+#!/usr/bin/env python3
+
+import os, sys, time, json, threading, signal, secrets as _secrets
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from pnlib import ipc, VERSION
+from pnlib import secrets as pnsecrets
+from pnlib import redact as pnredact
+from pnlib.llmpool import Pool, LeaseTable, SLOT_TENTHS, lease_tenths
+from pnlib.warmsession import PinnedReasoner, Saturated
+from pnlib.admission import AdmissionQueue, INTERACTIVE, BATCH
+
+POOL_SIZE = int(os.environ.get("PN_LLM_POOL", "2"))
+MODEL = os.environ.get("PN_LLM_MODEL", "sonnet")
+CMD_TMPL = os.environ.get("PN_LLM_CMD", "claude -p --model {model}")
+CMD_CODEX = os.environ.get("PN_LLM_CMD_CODEX", "codex exec --model {model}")
+
+CMD_PIN = os.environ.get("PN_LLM_PIN_CMD") or os.environ.get("PN_LLM_CMD") or "claude -p --model {model}"
+PIN_MODEL = os.environ.get("PN_LLM_PIN_MODEL", MODEL)
+PIN_REQ_TIMEOUT = int(os.environ.get("PN_LLM_PIN_TIMEOUT", "300"))
+DEF_TIMEOUT = int(os.environ.get("PN_LLM_TIMEOUT", "300"))
+CANARY_INTERVAL = int(os.environ.get("PN_LLM_CANARY_INTERVAL", "1200"))
+OWNER_UID = int(os.environ.get("PN_LLMD_OWNER_UID", str(os.getuid())))
+SETCRED_UIDS = {int(x) for x in os.environ.get("PN_LLMD_SETCRED_UIDS", str(OWNER_UID)).split(",") if x.strip()}
+SOCK = os.environ.get("PN_LLM_SOCK") or os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "pn-llmd.sock")
+
+STARTED = time.time()
+
+AUTH_REASON_MARKERS = (
+    ("org_disabled", ("disabled claude subscription access",
+                      "oauth authentication is currently not allowed for this organization",
+                      "oauth_not_allowed_for_organization",
+                      "ask your admin to enable access")),
+    ("logged_out",   ("not logged in", "please run /login", "please run `claude /login`")),
+    ("expired",      ("oauth token has expired", "refresh token has expired")),
+    ("invalid",      ("invalid api key",)),
+    ("balance",      ("credit balance is too low",)),
+)
+
+AUTH_REASON_DE = {
+    "org_disabled": ("Claude-Zugang abgelehnt: dieses Konto hat Claude Code deaktiviert "
+                     "— bitte anderes Konto verbinden."),
+    "logged_out":   "Claude-Zugang nicht verbunden: bitte Konto neu anmelden.",
+    "expired":      "Claude-Zugang abgelaufen: bitte Konto neu anmelden.",
+    "invalid":      ("Claude-Zugang ungültig: die hinterlegte Anmeldung wird abgelehnt "
+                     "— bitte Konto neu verbinden."),
+    "balance":      "Claude-Kontingent aufgebraucht: bitte Abo oder Guthaben prüfen.",
+}
+
+AUTH_OWNER_ONLY = ("org_disabled",)
+
+AUTH_MARKERS = tuple(m for _r, ms in AUTH_REASON_MARKERS for m in ms)
+
+def auth_reason_for(text):
+
+    low = (text or "").lower()
+    for reason, markers in AUTH_REASON_MARKERS:
+        if any(m in low for m in markers):
+            return reason
+    return None
+
+HEALTH = {"degraded": False, "reason": None, "last_canary": 0.0, "last_canary_ok": None}
+HLK = threading.Lock()
+
+SHELL_TOKENS = {}
+STK = threading.Lock()
+
+def _brain_env():
+
+    kind = pnsecrets.read_kind()
+    env = {}
+    cmd = CMD_TMPL
+
+    home = os.environ.get("PN_LLM_HOME") or ""
+    if not home:
+        try:
+            with open(os.path.expanduser("~/.config/pn/llm_home")) as f:
+                home = f.read().strip()
+        except OSError:
+            home = ""
+    if home and os.path.isdir(home):
+        env["HOME"] = home
+    if kind == "api-key":
+        val = pnsecrets.read_cred()
+        if val:
+            env["ANTHROPIC_API_KEY"] = val
+            pnredact.register_secret(val)
+    elif kind == "codex":
+        cmd = CMD_CODEX
+        val = pnsecrets.read_cred()
+        if val:
+
+            env["CODEX_API_KEY"] = val
+            pnredact.register_secret(val)
+    elif kind == "max-token":
+
+        val = pnsecrets.read_cred()
+        if val:
+            pnredact.register_secret(val)
+    return cmd, env
+
+def _make_pool() -> Pool:
+    cmd, env = _brain_env()
+    return Pool(POOL_SIZE, MODEL, cmd, env=env)
+
+POOL = _make_pool()
+PLK = threading.Lock()
+
+LEASES = LeaseTable(POOL_SIZE)
+
+_ADMIT_SLOTS_DEFAULT = max(1, POOL_SIZE * SLOT_TENTHS // max(1, lease_tenths(1, "loose")))
+ADMIT_SLOTS = int(os.environ.get("PN_ADMIT_SLOTS", str(_ADMIT_SLOTS_DEFAULT)) or _ADMIT_SLOTS_DEFAULT)
+ADMIT = AdmissionQueue(ADMIT_SLOTS)
+
+AIMD_ON = (os.environ.get("PN_ADMIT_AIMD", "1") or "1") != "0"
+AIMD_MIN = max(1, int(os.environ.get("PN_ADMIT_MIN", "2") or 2))
+AIMD_MAX = max(AIMD_MIN, int(os.environ.get("PN_ADMIT_MAX", "24") or 24))
+AIMD_GROW_EVERY = max(1, int(os.environ.get("PN_ADMIT_GROW_EVERY", "3") or 3))
+AIMD_COOLDOWN_S = float(os.environ.get("PN_ADMIT_COOLDOWN_S", "30") or 30)
+
+class _Aimd:
+
+    def __init__(self, start):
+        self.cur = min(AIMD_MAX, max(AIMD_MIN, int(start)))
+        self.streak = 0
+        self.cooldown_until = 0.0
+        self.shrinks = 0
+        self.grows = 0
+        self._lk = threading.Lock()
+
+    def on_turn(self, status, rate_hits, served, waiting_now):
+        if not AIMD_ON:
+            return
+        now = time.time()
+        with self._lk:
+            if rate_hits > 0 or status in (429, 503, 529) or not served:
+
+                if now >= self.cooldown_until:
+                    new = max(AIMD_MIN, self.cur // 2)
+                    if new != self.cur:
+                        self.cur = new
+                        self.shrinks += 1
+                        ADMIT.set_slots(new)
+                    self.cooldown_until = now + AIMD_COOLDOWN_S
+                self.streak = 0
+                return
+            if status and status < 400:
+                self.streak += 1
+                if (self.streak >= AIMD_GROW_EVERY and now >= self.cooldown_until
+                        and waiting_now > 0 and self.cur < AIMD_MAX):
+                    self.cur += 1
+                    self.grows += 1
+                    self.streak = 0
+                    ADMIT.set_slots(self.cur)
+
+    def snapshot(self):
+        return {"on": AIMD_ON, "cur": self.cur, "min": AIMD_MIN, "max": AIMD_MAX,
+                "streak": self.streak, "grow_every": AIMD_GROW_EVERY,
+                "cooldown_until": round(self.cooldown_until, 1),
+                "shrinks": self.shrinks, "grows": self.grows}
+
+AIMD = _Aimd(ADMIT_SLOTS)
+
+_EXEC_SLOTS_DEFAULT = max(1, (os.cpu_count() or 2) * 2)
+ADMIT_EXEC_SLOTS = int(os.environ.get("PN_ADMIT_EXEC_SLOTS", str(_EXEC_SLOTS_DEFAULT)) or _EXEC_SLOTS_DEFAULT)
+
+ADMIT_EXEC = AdmissionQueue(ADMIT_EXEC_SLOTS, ttl_s=float(os.environ.get("PN_ADMIT_EXEC_TTL", "3600")))
+
+_ACT_SLOTS_DEFAULT = max(1, (os.cpu_count() or 2))
+ADMIT_ACT_SLOTS = int(os.environ.get("PN_ADMIT_ACT_SLOTS", str(_ACT_SLOTS_DEFAULT)) or _ACT_SLOTS_DEFAULT)
+ADMIT_ACT = AdmissionQueue(ADMIT_ACT_SLOTS, ttl_s=float(os.environ.get("PN_ADMIT_ACT_TTL", "900")))
+
+def _admit_couple_batch():
+
+    try:
+        ADMIT.set_external_used(int(round(LEASES.headroom().get("llm_in_use", 0))))
+    except Exception:
+        pass
+
+def _make_pin() -> PinnedReasoner:
+    _, env = _brain_env()
+    return PinnedReasoner(PIN_MODEL, CMD_PIN, env=env, request_timeout=PIN_REQ_TIMEOUT)
+
+PIN = _make_pin()
+PINLK = threading.Lock()
+
+def _classify(res: dict) -> dict:
+
+    raw = (res.get("raw") or res.get("text") or res.get("error") or "")
+    reason = auth_reason_for(raw)
+    if reason:
+        res = {"ok": False,
+               "error": "LLM auth down — " + AUTH_REASON_DE[reason],
+               "auth": True,
+               "auth_reason": reason,
+               "status_de": AUTH_REASON_DE[reason],
+               "owner_action_required": reason in AUTH_OWNER_ONLY,
+               "session": res.get("session"), "routing": res.get("routing")}
+
+    if res.get("text"):
+        res["text"] = pnredact.redact(res["text"])
+    if res.get("error"):
+        res["error"] = pnredact.redact(res["error"])
+    res.pop("raw", None)
+    return res
+
+def v_ask(req):
+    prompt = req.get("prompt") or ""
+    if not prompt:
+        return {"ok": False, "error": "empty prompt"}
+    model = req.get("model") or MODEL
+    timeout = int(req.get("timeout") or DEF_TIMEOUT)
+    kind = req.get("kind") or "loose"
+    if kind not in ("loose", "dedicated"):
+        kind = "loose"
+    res = POOL.ask(prompt, timeout, kind=kind)
+    return _classify(res)
+
+def v_setcred(req):
+
+    uid = req.get("_peer_uid")
+    if uid is None or uid not in SETCRED_UIDS:
+        return {"ok": False, "error": "not authorized to set credential (owner only)"}
+    value = req.get("value")
+    kind = req.get("brain_kind") or req.get("kind")
+    if not value:
+        return {"ok": False, "error": "missing value"}
+    if kind not in pnsecrets.VALID_KINDS:
+        return {"ok": False, "error": f"brain_kind must be one of {pnsecrets.VALID_KINDS}"}
+    try:
+        receipt = pnsecrets.write_cred(value, kind)
+    except Exception as e:
+        return {"ok": False, "error": f"seal/write failed: {type(e).__name__}: {e}"}
+    finally:
+
+        value = "\0" * len(value)
+        del value
+
+    global POOL, PIN
+    with PLK:
+        try:
+            POOL.kill()
+        except Exception:
+            pass
+        POOL = _make_pool()
+
+    with PINLK:
+        try:
+            PIN.retire()
+        except Exception:
+            pass
+        PIN = _make_pin()
+
+    with HLK:
+        HEALTH["degraded"] = False; HEALTH["reason"] = None; HEALTH["last_canary_ok"] = None
+
+    return {"ok": True, "set": True, "kind": receipt["kind"],
+            "sealed_with": receipt["backend"], "binding": receipt["binding"],
+            "sealed_bytes": receipt["sealed_bytes"], "fingerprint": receipt["fingerprint"]}
+
+def v_issue_shell_token(req):
+
+    uid = req.get("_peer_uid")
+    if uid is None or uid != OWNER_UID:
+        return {"ok": False, "error": "not authorized (owner only)"}
+    tok = _secrets.token_urlsafe(32)
+    with STK:
+        SHELL_TOKENS[tok] = {"principal": "owner", "uid": OWNER_UID,
+                             "exp": time.time() + 120}
+
+    return {"ok": True, "token": tok, "principal": "owner", "expires_in": 120}
+
+def v_redeem_shell_token(req):
+
+    tok = req.get("token")
+    now = time.time()
+    with STK:
+        ent = SHELL_TOKENS.pop(tok, None)
+    if not ent or ent["exp"] < now:
+        return {"ok": False, "error": "invalid or expired token"}
+    return {"ok": True, "principal": ent["principal"], "uid": ent["uid"]}
+
+def v_peek(req):
+    return POOL.peek(req.get("session"))
+
+def v_pkill(req):
+
+    if req.get("_peer_uid") != OWNER_UID:
+        return {"ok": False, "error": "not authorized (owner only)"}
+    return POOL.kill(req.get("session"))
+
+def v_health(req):
+    with HLK:
+        h = dict(HEALTH)
+    return {"ok": True, "health": h, "credential": pnsecrets.status()}
+
+def v_status(req):
+    with HLK:
+        degraded = HEALTH["degraded"]; reason = HEALTH["reason"]
+    return {"ok": True, "version": VERSION, "pool": POOL_SIZE, "model": MODEL,
+            "backend": POOL.cmd_tmpl, "uptime": time.time() - STARTED,
+            "degraded": degraded, "degraded_reason": reason,
+            "credential": pnsecrets.status(), "llm_headroom": LEASES.headroom(),
+            "admission": ADMIT.headroom(), **POOL.info()}
+
+def v_llm_headroom(req):
+
+    hr = LEASES.headroom()
+    return {"ok": True, **hr}
+
+def v_lease(req):
+
+    jid = req.get("job_id")
+    if jid is None:
+        return {"ok": False, "error": "lease needs job_id"}
+    weight = req.get("weight") or 0
+    kind = req.get("kind") or "loose"
+    if kind not in ("loose", "dedicated"):
+        kind = "loose"
+    return LEASES.lease(jid, weight, kind)
+
+def v_release(req):
+
+    jid = req.get("job_id")
+    if jid is None:
+        return {"ok": False, "error": "release needs job_id"}
+    return LEASES.release(jid)
+
+def v_admit(req):
+
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "admit needs id"}
+    klass = req.get("klass") or INTERACTIVE
+    if klass not in (INTERACTIVE, BATCH):
+        klass = INTERACTIVE
+
+    principal = req.get("cell_principal") or req.get("principal") or "owner"
+    _admit_couple_batch()
+    r = ADMIT.admit(tid, principal, req.get("cell") or "",
+                    klass, req.get("weight") or 1)
+    r["ok"] = True
+    return r
+
+def v_admit_poll(req):
+
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "admit-poll needs id"}
+    _admit_couple_batch()
+    r = ADMIT.poll(tid)
+    r["ok"] = True
+    return r
+
+def v_admit_release(req):
+
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "admit-release needs id"}
+    waiting_now = ADMIT.snapshot().get("waiting", 0)
+    r = ADMIT.release(tid)
+    _admit_couple_batch()
+    if "status" in req or "rate_hits" in req:
+        try:
+            AIMD.on_turn(int(req.get("status") or 0), int(req.get("rate_hits") or 0),
+                         bool(req.get("served", True)), waiting_now)
+        except Exception:
+            pass
+    return r
+
+def v_admit_snapshot(req):
+
+    _admit_couple_batch()
+    return {"ok": True, "aimd": AIMD.snapshot(), **ADMIT.snapshot()}
+
+def v_exec_admit(req):
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "exec-admit needs id"}
+    klass = req.get("klass") or INTERACTIVE
+    if klass not in (INTERACTIVE, BATCH):
+        klass = INTERACTIVE
+    principal = req.get("cell_principal") or req.get("principal") or "owner"
+    r = ADMIT_EXEC.admit(tid, principal, req.get("cell") or "", klass, req.get("weight") or 1)
+    r["ok"] = True
+    r["argv0"] = req.get("argv0") or ""
+    return r
+
+def v_exec_admit_poll(req):
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "exec-admit-poll needs id"}
+    r = ADMIT_EXEC.poll(tid)
+    r["ok"] = True
+    return r
+
+def v_exec_admit_release(req):
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "exec-admit-release needs id"}
+    return ADMIT_EXEC.release(tid)
+
+def v_exec_admit_snapshot(req):
+    return {"ok": True, **ADMIT_EXEC.snapshot()}
+
+def v_act_admit(req):
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "act-admit needs id"}
+    klass = req.get("klass") or INTERACTIVE
+    if klass not in (INTERACTIVE, BATCH):
+        klass = INTERACTIVE
+    principal = req.get("cell_principal") or req.get("principal") or "owner"
+    r = ADMIT_ACT.admit(tid, principal, req.get("cell") or "", klass, req.get("weight") or 1)
+    r["ok"] = True
+    r["tool"] = req.get("tool") or ""
+    return r
+
+def v_act_admit_poll(req):
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "act-admit-poll needs id"}
+    r = ADMIT_ACT.poll(tid)
+    r["ok"] = True
+    return r
+
+def v_act_admit_release(req):
+    tid = req.get("id") or req.get("job_id")
+    if tid is None:
+        return {"ok": False, "error": "act-admit-release needs id"}
+    return ADMIT_ACT.release(tid)
+
+def v_act_admit_snapshot(req):
+    return {"ok": True, **ADMIT_ACT.snapshot()}
+
+def v_reason(req):
+
+    prompt = req.get("prompt") or ""
+    if not prompt:
+        return {"ok": False, "error": "empty prompt"}
+    block = req.get("block", True)
+    try:
+        res = PIN.ask(prompt, block=block)
+    except Saturated:
+        return {"ok": False, "error": "pinned reasoning session saturated", "saturated": True}
+    return _classify(res)
+
+def v_pin_health(req):
+
+    return {"ok": True, "alive": bool(PIN.health()), "info": PIN.info()}
+
+def v_pin_rotate(req):
+
+    if req.get("_peer_uid") != OWNER_UID:
+        return {"ok": False, "error": "not authorized (owner only)"}
+    digest = req.get("digest")
+    with PINLK:
+        new_id, old_id = PIN.rotate(digest=digest)
+    return {"ok": True, "rotated": True, "new_session": new_id, "old_session": old_id}
+
+def v_pin_retire(req):
+
+    if req.get("_peer_uid") != OWNER_UID:
+        return {"ok": False, "error": "not authorized (owner only)"}
+    with PINLK:
+        PIN.retire()
+    return {"ok": True, "retired": True}
+
+def v_pin_info(req):
+    return {"ok": True, "pin": PIN.info()}
+
+VERBS = {
+    "ask": v_ask,
+
+    "llm.headroom": v_llm_headroom, "llm-headroom": v_llm_headroom,
+    "lease": v_lease, "release": v_release,
+
+    "admit": v_admit, "admit-poll": v_admit_poll, "admit-release": v_admit_release,
+    "admit-snapshot": v_admit_snapshot,
+
+    "exec-admit": v_exec_admit, "exec-admit-poll": v_exec_admit_poll,
+    "exec-admit-release": v_exec_admit_release, "exec-admit-snapshot": v_exec_admit_snapshot,
+
+    "act-admit": v_act_admit, "act-admit-poll": v_act_admit_poll,
+    "act-admit-release": v_act_admit_release, "act-admit-snapshot": v_act_admit_snapshot,
+    "reason": v_reason,
+    "pin-health": v_pin_health,
+    "pin-rotate": v_pin_rotate,
+    "pin-retire": v_pin_retire,
+    "pin-info": v_pin_info,
+    "setcred": v_setcred,
+    "issue-shell-token": v_issue_shell_token,
+    "redeem-shell-token": v_redeem_shell_token,
+    "peek": v_peek,
+    "kill": v_pkill,
+    "health": v_health,
+    "ping": v_status, "lstatus": v_status, "status": v_status,
+}
+
+def handle(req):
+    verb = req.get("verb")
+    fn = VERBS.get(verb)
+    if not fn:
+        return {"ok": False, "error": f"unknown verb {verb}"}
+    resp = fn(req)
+
+    if verb in ("issue-shell-token", "redeem-shell-token"):
+        return resp
+    return pnredact.redact_obj(resp)
+
+def _canary_once():
+
+    res = _classify(POOL.ask("ping", timeout=min(DEF_TIMEOUT, 60), kind="loose"))
+    ok = bool(res.get("ok"))
+    with HLK:
+        HEALTH["last_canary"] = time.time()
+        HEALTH["last_canary_ok"] = ok
+        if not ok:
+            HEALTH["degraded"] = True
+            HEALTH["reason"] = "credential" if res.get("auth") else "backend"
+        else:
+            HEALTH["degraded"] = False
+            HEALTH["reason"] = None
+    if not ok:
+
+        sys.stderr.write(json.dumps({"event": "health.degraded", "reason": HEALTH["reason"],
+                                     "at": time.time()}) + "\n")
+        sys.stderr.flush()
+    return ok
+
+def _canary_loop():
+    while True:
+        time.sleep(CANARY_INTERVAL)
+        try:
+            _canary_once()
+        except Exception as e:
+            sys.stderr.write(f"canary error: {type(e).__name__}: {e}\n"); sys.stderr.flush()
+
+LEASE_SWEEP_INTERVAL = int(os.environ.get("PN_LLM_LEASE_SWEEP", "30"))
+
+def _lease_sweep_loop():
+    while True:
+        time.sleep(LEASE_SWEEP_INTERVAL)
+        try:
+            rep = LEASES.sweep_expired()
+            if rep.get("expired"):
+                sys.stderr.write(json.dumps({"event": "llm.lease.expired",
+                                             "jobs": rep["expired"], "at": time.time()}) + "\n")
+                sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"lease sweep error: {type(e).__name__}: {e}\n"); sys.stderr.flush()
+
+        for q, ev in ((ADMIT, "llm.admit.swept"), (ADMIT_EXEC, "llm.exec.swept"),
+                      (ADMIT_ACT, "llm.act.swept")):
+            try:
+                arep = q.sweep()
+                if arep.get("swept"):
+                    sys.stderr.write(json.dumps({"event": ev, "tickets": arep["swept"],
+                                                 "at": time.time()}) + "\n")
+                    sys.stderr.flush()
+            except Exception as e:
+                sys.stderr.write(f"admit sweep error ({ev}): {type(e).__name__}: {e}\n"); sys.stderr.flush()
+
+def _shutdown(*_):
+    try:
+        PIN.retire()
+    except Exception:
+        pass
+    os._exit(0)
+
+def main():
+    srv = ipc.Server(handle, path=SOCK)
+    signal.signal(signal.SIGTERM, _shutdown)
+    sys.stderr.write(f"pn-llmd {VERSION} up: pool={POOL_SIZE} model={MODEL} "
+                     f"backend={POOL.cmd_tmpl!r} pin={CMD_PIN!r} "
+                     f"kind={pnsecrets.read_kind()} sock={SOCK}\n")
+    sys.stderr.flush()
+    threading.Thread(target=_canary_loop, daemon=True).start()
+    threading.Thread(target=_lease_sweep_loop, daemon=True).start()
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if addr:
+        try:
+            import socket as _s
+            a = "\0" + addr[1:] if addr[0] == "@" else addr
+            _s.socket(_s.AF_UNIX, _s.SOCK_DGRAM).sendto(b"READY=1", a)
+        except Exception:
+            pass
+    srv.serve_forever()
+
+if __name__ == "__main__":
+    main()

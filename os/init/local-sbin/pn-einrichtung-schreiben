@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import re
+import sys
+
+SITE_CONF = "/etc/brainbox/site.conf"
+SECRETS_ENV = "/etc/brainbox/secrets.env"
+
+ERLAUBT = {
+    "nas": {
+        "offen": ["NAS_ENABLED", "NAS_URL"],
+        "geheim": ["NAS_USER", "NAS_PASS"],
+    },
+    "relay": {
+        "offen": ["RELAY_ENABLED", "RELAY_URL"],
+        "geheim": [],
+    },
+    "hochverfuegbarkeit": {
+        "offen": ["HA_ENABLED", "HA_VIP", "HA_VRID"],
+        "geheim": ["VRRP_AUTH_PASS"],
+    },
+}
+
+MAX_LAENGE = 512
+
+def shq(v):
+
+    s = "" if v is None else str(v)
+    return "'" + s.replace("'", "'\\''") + "'"
+
+def wert_pruefen(k, v):
+
+    s = "" if v is None else str(v)
+    if len(s) > MAX_LAENGE:
+        return "%s ist zu lang (%d Zeichen, erlaubt sind %d)" % (k, len(s), MAX_LAENGE)
+    for z in s:
+        if ord(z) < 0x20 or ord(z) == 0x7F:
+            return "%s enthält ein Steuerzeichen (Position %d)" % (k, s.index(z) + 1)
+    return None
+
+def _atomar_setzen(pfad, paare, modus):
+
+    try:
+        with open(pfad, encoding="utf-8") as f:
+            zeilen = f.read().splitlines()
+        gab_es = True
+    except FileNotFoundError:
+        zeilen = ["# von der Einrichtung im Portal angelegt"]
+        gab_es = False
+
+    offen = dict(paare)
+    raus = []
+    for z in zeilen:
+        m = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", z)
+        if m and m.group(1) in offen:
+            k = m.group(1)
+            raus.append("%s=%s" % (k, shq(offen.pop(k))))
+        else:
+            raus.append(z)
+    for k in sorted(offen):
+        raus.append("%s=%s" % (k, shq(offen[k])))
+
+    d = os.path.dirname(pfad)
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, ".%s.einrichtung.%d" % (os.path.basename(pfad), os.getpid()))
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, modus)
+    try:
+        os.write(fd, ("\n".join(raus) + "\n").encode("utf-8"))
+        os.fchmod(fd, modus)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    else:
+        os.close(fd)
+    try:
+        os.chown(tmp, 0, 0)
+    except OSError:
+        pass
+    os.replace(tmp, pfad)
+    return gab_es
+
+def _lesen(pfad):
+
+    da = {}
+    try:
+        with open(pfad, encoding="utf-8") as f:
+            for z in f:
+                m = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$", z)
+                if m:
+                    da[m.group(1)] = m.group(2).strip("'\"")
+    except OSError:
+        pass
+    return da
+
+def stand(bereich):
+
+    liste = ERLAUBT[bereich]
+    offen_alle = _lesen(SITE_CONF)
+    geheim_alle = _lesen(SECRETS_ENV)
+    return {"ok": True, "bereich": bereich,
+            "offen": {k: offen_alle[k] for k in liste["offen"] if offen_alle.get(k)},
+            "geheim_gesetzt": [k for k in liste["geheim"] if geheim_alle.get(k)]}
+
+def main(argv):
+    nurlesen = len(argv) == 3 and argv[1] == "--stand"
+    if nurlesen:
+        argv = [argv[0], argv[2]]
+    if len(argv) != 2 or argv[1] not in ERLAUBT:
+        sys.stderr.write("Aufruf: pn-einrichtung-schreiben [--stand] <%s>  < JSON auf stdin\n"
+                         % "|".join(sorted(ERLAUBT)))
+        return 2
+    bereich = argv[1]
+    if os.geteuid() != 0:
+        sys.stderr.write("Dieser Helfer muss als root laufen (über die sudoers-Zeile).\n")
+        return 3
+
+    if nurlesen:
+        sys.stdout.write(json.dumps(stand(bereich)) + "\n")
+        return 0
+
+    try:
+        neu = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        sys.stderr.write("Die Standardeingabe war kein JSON-Objekt.\n")
+        return 4
+    if not isinstance(neu, dict):
+        sys.stderr.write("Die Standardeingabe war kein JSON-Objekt.\n")
+        return 4
+
+    liste = ERLAUBT[bereich]
+    bekannt = set(liste["offen"]) | set(liste["geheim"])
+    fremd = sorted(set(neu) - bekannt)
+    if fremd:
+
+        sys.stderr.write("Nicht erlaubt für Bereich '%s': %s\n" % (bereich, ", ".join(fremd)))
+        return 5
+    for k in sorted(neu):
+        fehler = wert_pruefen(k, neu[k])
+        if fehler:
+            sys.stderr.write(fehler + "\n")
+            return 6
+
+    offen = {k: neu[k] for k in liste["offen"] if k in neu}
+    geheim = {k: neu[k] for k in liste["geheim"] if k in neu}
+    geschrieben = []
+    if offen:
+        _atomar_setzen(SITE_CONF, offen, 0o644)
+        geschrieben += sorted(offen)
+    if geheim:
+        _atomar_setzen(SECRETS_ENV, geheim, 0o600)
+        geschrieben += sorted(geheim)
+
+    sys.stdout.write(json.dumps({"ok": True, "bereich": bereich,
+                                 "geschrieben": geschrieben}) + "\n")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

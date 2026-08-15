@@ -1,0 +1,30 @@
+#!/bin/sh
+# run-engine — exec a pinned engine entry point from the DATA venv.
+#
+# The golden A/B root is read-only and carries NO mutable Python state (product.md §7). The
+# engine (schlein-lab/portioneer: pnd / pn-llmd / pn-portal / pn) is installed into a pinned
+# venv on the DATA partition at first boot (firstboot.sh -> install-engine). This shim is the
+# stable argv0 that /etc/pn-init.conf references; it resolves the real binary at run time.
+#
+# Usage:  run-engine <tool> [args...]      e.g.  run-engine pnd --serve --sock /run/pnd.sock
+#
+# If the venv is not seeded yet (very first boot, before the wizard), exit non-zero so pn-init
+# applies its normal capped backoff and retries — never crash PID1, never run a half-built engine.
+set -eu
+
+DATA="${BRAINARBEIT_DATA:-/var/lib/brainarbeit}"
+VENV="$DATA/engine/.venv"
+TOOL="${1:?run-engine: missing tool name}"
+shift || true
+
+if [ ! -x "$VENV/bin/$TOOL" ]; then
+    echo "[run-engine] $TOOL not installed yet ($VENV/bin/$TOOL) — engine venv unseeded; backing off" >&2
+    exit 69   # EX_UNAVAILABLE: pn-init backs off and retries once first-boot seeds the venv
+fi
+
+# Common runtime env: one DATA path string everywhere (the §4 aliases all point here).
+export BRAINARBEIT_DATA="$DATA"
+export PORTIONEER_DATA="$DATA"          # §4 alias: /var/lib/portioneer == this mount
+export PN_DATA="$DATA"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
+exec "$VENV/bin/$TOOL" "$@"

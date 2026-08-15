@@ -1,0 +1,15 @@
+[Unit]
+Description=Brainarbeit greenboot health gate (A/B auto-revert on failed boot)
+After=multi-user.target brainarbeit-firstboot.service
+Wants=multi-user.target
+RequiresMountsFor=/var/lib/brainarbeit /boot
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/brainarbeit/greenboot-health.sh
+SuccessExitStatus=0 1
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

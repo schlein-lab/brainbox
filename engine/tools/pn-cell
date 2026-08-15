@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+
+import os, sys, json, argparse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+from pnlib import cell
+
+def _print(obj):
+    print(json.dumps(obj, indent=2, default=str))
+
+def cmd_caps(a):
+    caps = cell.host_capabilities()
+
+    resolved = {}
+    for t in ("cell-vm", "cell-ns", "cell-sandbox"):
+        try:
+            eff, deg = cell.choose_tier(t, caps)
+            resolved[t] = {"effective": eff, "degraded_from": deg}
+        except cell.EnrollRefused as e:
+            resolved[t] = {"effective": None, "refused": str(e)}
+    _print({"host": caps, "tier_resolution": resolved})
+
+def cmd_provision(a):
+    try:
+        r = cell.provision(a.principal, a.tier, high_blast=a.high_blast,
+                           mem_max=a.mem, cpu_quota_pct=a.cpu, pids_max=a.pids,
+                           note=a.note or "")
+    except cell.EnrollRefused as e:
+        sys.stderr.write(f"pn-cell: ENROLL REFUSED: {e}\n")
+        sys.exit(2)
+    if r.get("degraded_from"):
+        sys.stderr.write(
+            f"pn-cell: NOTICE — tier degraded {r['degraded_from']} -> {r['tier']} "
+            f"(host tier_color={r['tier_color']}); see `pn-cell caps`.\n")
+    _print(r)
+
+def cmd_setcred(a):
+
+    if a.value == "-":
+        val = sys.stdin.readline().strip()
+    elif a.value:
+        val = a.value
+    else:
+        import getpass
+        val = getpass.getpass(f"value for {a.principal}/{a.kind} (masked): ")
+    if not val:
+        sys.stderr.write("pn-cell: empty credential\n"); sys.exit(1)
+    if not cell.get(a.principal):
+        sys.stderr.write(f"pn-cell: no cell for {a.principal!r}; provision first\n"); sys.exit(1)
+    try:
+        receipt = cell.seal_cell_cred(a.principal, val, a.kind)
+    except Exception as e:
+        val = "\0" * len(val); del val
+        sys.stderr.write(f"pn-cell: setcred failed: {e}\n"); sys.exit(1)
+    val = "\0" * len(val); del val
+    _print({"principal": a.principal, **receipt})
+
+def cmd_run(a):
+    try:
+        r = cell.run_in_cell(a.principal, a.cmd, timeout=a.timeout)
+    except Exception as e:
+        sys.stderr.write(f"pn-cell: run-in-cell failed: {e}\n"); sys.exit(1)
+
+    if r.get("stdout"):
+        sys.stdout.write(r["stdout"])
+    if r.get("stderr"):
+        sys.stderr.write(r["stderr"])
+    sys.exit(r["rc"] if r["rc"] is not None else 1)
+
+def cmd_list(a):
+    _print({"cells": cell.list_cells()})
+
+def cmd_show(a):
+    c = cell.get(a.principal)
+    if not c:
+        sys.stderr.write(f"pn-cell: no cell for {a.principal!r}\n"); sys.exit(1)
+    _print(c)
+
+def cmd_suspend(a):
+    _print(cell.suspend(a.principal))
+
+def cmd_resume(a):
+    _print(cell.resume(a.principal))
+
+def cmd_teardown(a):
+    _print(cell.teardown(a.principal, wipe=not a.keep))
+
+def main():
+    p = argparse.ArgumentParser(prog="pn-cell")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("caps").set_defaults(fn=cmd_caps)
+
+    sp = sub.add_parser("provision"); sp.set_defaults(fn=cmd_provision)
+    sp.add_argument("principal")
+    sp.add_argument("--tier", default="cell-ns", choices=cell.VALID_TIERS)
+    sp.add_argument("--high-blast", action="store_true",
+                    help="refuse to enroll into a shared kernel if CELL-VM is unavailable")
+    sp.add_argument("--mem", type=int, default=256, help="MiB hard cap")
+    sp.add_argument("--cpu", type=int, default=50, help="CPUQuota %%")
+    sp.add_argument("--pids", type=int, default=128, help="TasksMax")
+    sp.add_argument("--note", default="")
+
+    sp = sub.add_parser("setcred"); sp.set_defaults(fn=cmd_setcred)
+    sp.add_argument("principal")
+    sp.add_argument("kind", choices=("max-token", "api-key", "codex"))
+    sp.add_argument("--value", help="value, or '-' to read one line from stdin")
+
+    sp = sub.add_parser("run-in-cell"); sp.set_defaults(fn=cmd_run)
+    sp.add_argument("principal")
+    sp.add_argument("--timeout", type=int, default=None)
+    sp.add_argument("cmd", nargs=argparse.REMAINDER,
+                    help="-- <command and args> to run inside the cell")
+
+    for name, fn in (("list", cmd_list), ("show", cmd_show), ("suspend", cmd_suspend),
+                     ("resume", cmd_resume), ("teardown", cmd_teardown)):
+        sp = sub.add_parser(name); sp.set_defaults(fn=fn)
+        if name != "list":
+            sp.add_argument("principal")
+        if name == "teardown":
+            sp.add_argument("--keep", action="store_true", help="keep the sealed store/home")
+
+    a = p.parse_args()
+
+    if getattr(a, "cmd", None) and a.cmd and a.cmd[0] == "--":
+        a.cmd = a.cmd[1:]
+    a.fn(a)
+
+if __name__ == "__main__":
+    main()

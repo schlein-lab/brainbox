@@ -1,0 +1,1946 @@
+[
+ {
+  "method": "GET",
+  "path": "/",
+  "handler": "",
+  "note": "",
+  "auth": "public",
+  "n": 1
+ },
+ {
+  "method": "GET",
+  "path": "/api/actions",
+  "handler": "_api_actions",
+  "note": "",
+  "auth": "auth",
+  "n": 2
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/advisor",
+  "handler": "",
+  "note": "autonomous prio-advisor status + decision log",
+  "auth": "auth",
+  "n": 3
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/advisor",
+  "handler": "",
+  "note": "{action: enable|disable|run}",
+  "auth": "auth",
+  "n": 4
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/llm/oauth/cancel",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 5
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/llm/oauth/code",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 6
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/llm/oauth/start",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 7
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/llm/oauth/status",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 8
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/llm/pool",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 9
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/llm/pool",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 10
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/mail/config",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 11
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/mail/config",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 12
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/mail/senders",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 13
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/mail/test",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 14
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/overview",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 15
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/reserved_cores",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 16
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/reserved_cores",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 17
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/rights",
+  "handler": "_api_admin_rights_list",
+  "note": "",
+  "auth": "auth",
+  "n": 18
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/stats",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 19
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/usage",
+  "handler": "",
+  "note": "Statistik v2: per-user resource history",
+  "auth": "auth",
+  "n": 20
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/user-floor",
+  "handler": "_api_admin_user_floor_get",
+  "note": "",
+  "auth": "auth",
+  "n": 21
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/user-floor",
+  "handler": "_api_admin_user_floor_set",
+  "note": "owner sets a user's per-user rights ceiling",
+  "auth": "auth",
+  "n": 22
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/user-vpn",
+  "handler": "_api_admin_user_vpn",
+  "note": "owner grants a user account a VPN",
+  "auth": "auth",
+  "n": 23
+ },
+ {
+  "method": "POST",
+  "path": "/api/admin/user/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 24
+ },
+ {
+  "method": "GET",
+  "path": "/api/admin/users",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 25
+ },
+ {
+  "method": "POST",
+  "path": "/api/agent/exec",
+  "handler": "_api_vpn_request",
+  "note": "per-user portal control (verb+args), scoped to _principal()",
+  "auth": "auth",
+  "n": 26
+ },
+ {
+  "method": "GET",
+  "path": "/api/agent/state",
+  "handler": "",
+  "note": "",
+  "auth": "admin",
+  "n": 27
+ },
+ {
+  "method": "GET",
+  "path": "/api/approvals",
+  "handler": "_api_approvals",
+  "note": "",
+  "auth": "auth",
+  "n": 28
+ },
+ {
+  "method": "POST",
+  "path": "/api/approvals/relay-arm/approve",
+  "handler": "_api_approval_approve",
+  "note": "",
+  "auth": "admin",
+  "n": 29
+ },
+ {
+  "method": "POST",
+  "path": "/api/approvals/relay-arm/revoke",
+  "handler": "_api_approval_revoke",
+  "note": "",
+  "auth": "admin",
+  "n": 30
+ },
+ {
+  "method": "GET",
+  "path": "/api/attachments",
+  "handler": "",
+  "note": "H1: only attachments referenced by own jobs",
+  "auth": "admin",
+  "n": 31
+ },
+ {
+  "method": "POST",
+  "path": "/api/auth/forgot",
+  "handler": "",
+  "note": "public: request a password-reset email",
+  "auth": "auth",
+  "n": 32
+ },
+ {
+  "method": "POST",
+  "path": "/api/auth/reset",
+  "handler": "",
+  "note": "public: set a new password with a token",
+  "auth": "auth",
+  "n": 33
+ },
+ {
+  "method": "POST",
+  "path": "/api/auth/send-verification",
+  "handler": "",
+  "note": "session: email me a verification link",
+  "auth": "auth",
+  "n": 34
+ },
+ {
+  "method": "GET",
+  "path": "/api/auth/verify",
+  "handler": "",
+  "note": "public: email verification (emailed link)",
+  "auth": "public",
+  "n": 35
+ },
+ {
+  "method": "GET",
+  "path": "/api/autonomy",
+  "handler": "_api_autonomy",
+  "note": "",
+  "auth": "auth",
+  "n": 36
+ },
+ {
+  "method": "POST",
+  "path": "/api/autonomy",
+  "handler": "_api_autonomy_set",
+  "note": "Nachtrag 2: set per-session autonomy dial",
+  "auth": "auth",
+  "n": 37
+ },
+ {
+  "method": "GET",
+  "path": "/api/blueprints",
+  "handler": "_api_blueprints",
+  "note": "",
+  "auth": "auth",
+  "n": 38
+ },
+ {
+  "method": "GET",
+  "path": "/api/blueprints/resolve",
+  "handler": "_api_blueprint_resolve",
+  "note": "",
+  "auth": "auth",
+  "n": 39
+ },
+ {
+  "method": "GET",
+  "path": "/api/browse",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 40
+ },
+ {
+  "method": "POST",
+  "path": "/api/browse",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 41
+ },
+ {
+  "method": "POST",
+  "path": "/api/browser/navigate",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 42
+ },
+ {
+  "method": "POST",
+  "path": "/api/cast/start",
+  "handler": "_api_cast_start",
+  "note": "cast screen -> a LAN cast device",
+  "auth": "auth",
+  "n": 43
+ },
+ {
+  "method": "GET",
+  "path": "/api/cast/status",
+  "handler": "_api_cast_status",
+  "note": "",
+  "auth": "auth",
+  "n": 44
+ },
+ {
+  "method": "POST",
+  "path": "/api/cast/stop",
+  "handler": "_api_cast_stop",
+  "note": "",
+  "auth": "auth",
+  "n": 45
+ },
+ {
+  "method": "POST",
+  "path": "/api/cellfs/write",
+  "handler": "_api_cellfs",
+  "note": "caged cell writes a granted path",
+  "auth": "auth",
+  "n": 46
+ },
+ {
+  "method": "POST",
+  "path": "/api/ceremony/cancel",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 47
+ },
+ {
+  "method": "POST",
+  "path": "/api/ceremony/confirm",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 48
+ },
+ {
+  "method": "GET",
+  "path": "/api/ceremony/status",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 49
+ },
+ {
+  "method": "POST",
+  "path": "/api/channels/bind",
+  "handler": "_api_channels_bind",
+  "note": "",
+  "auth": "auth",
+  "n": 50
+ },
+ {
+  "method": "POST",
+  "path": "/api/channels/disable",
+  "handler": "_api_channels_disable",
+  "note": "",
+  "auth": "auth",
+  "n": 51
+ },
+ {
+  "method": "POST",
+  "path": "/api/channels/enroll",
+  "handler": "_api_channels_enroll",
+  "note": "BYO bot: JIT-inject this user's token into the RAM vault",
+  "auth": "auth",
+  "n": 52
+ },
+ {
+  "method": "GET",
+  "path": "/api/channels/status",
+  "handler": "_api_channels_status",
+  "note": "",
+  "auth": "auth",
+  "n": 53
+ },
+ {
+  "method": "POST",
+  "path": "/api/clarify",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 54
+ },
+ {
+  "method": "GET",
+  "path": "/api/client-actions",
+  "handler": "_api_client_actions",
+  "note": "",
+  "auth": "auth",
+  "n": 55
+ },
+ {
+  "method": "POST",
+  "path": "/api/cockpit/paste",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 56
+ },
+ {
+  "method": "GET",
+  "path": "/api/contract/selfcheck",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 57
+ },
+ {
+  "method": "POST",
+  "path": "/api/control",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 58
+ },
+ {
+  "method": "GET",
+  "path": "/api/devices",
+  "handler": "_api_devices",
+  "note": "",
+  "auth": "auth",
+  "n": 59
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/attach",
+  "handler": "_api_device_attach",
+  "note": "couple a device to a session (admin)",
+  "auth": "auth",
+  "n": 60
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/control",
+  "handler": "_api_device_control",
+  "note": "a coupled session's agent drives its device",
+  "auth": "auth",
+  "n": 61
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/detach",
+  "handler": "_api_device_detach",
+  "note": "un-couple a device from a session (admin)",
+  "auth": "auth",
+  "n": 62
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/discovered",
+  "handler": "_api_device_discovered",
+  "note": "discovery job callback (loopback + token)",
+  "auth": "auth",
+  "n": 63
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/forget",
+  "handler": "_api_device_forget",
+  "note": "hide a device (admin, legacy)",
+  "auth": "auth",
+  "n": 64
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/hide",
+  "handler": "_api_device_hide",
+  "note": "hide/UN-hide a device (admin, reversible)",
+  "auth": "auth",
+  "n": 65
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/label",
+  "handler": "_api_device_label",
+  "note": "rename a device (admin)",
+  "auth": "auth",
+  "n": 66
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/register",
+  "handler": "_api_device_register",
+  "note": "device-visibility: adopt a device (admin)",
+  "auth": "auth",
+  "n": 67
+ },
+ {
+  "method": "POST",
+  "path": "/api/devices/scan",
+  "handler": "_api_device_scan",
+  "note": "host neigh+cast sweep + governed mDNS (admin)",
+  "auth": "auth",
+  "n": 68
+ },
+ {
+  "method": "GET",
+  "path": "/api/displays",
+  "handler": "_api_displays",
+  "note": "",
+  "auth": "auth",
+  "n": 69
+ },
+ {
+  "method": "POST",
+  "path": "/api/displays/label",
+  "handler": "_api_display_label",
+  "note": "rename a Terminal (custom name, admin)",
+  "auth": "auth",
+  "n": 70
+ },
+ {
+  "method": "POST",
+  "path": "/api/displays/register",
+  "handler": "_api_display_register",
+  "note": "3d-C/D: pair a LAN display (admin)",
+  "auth": "auth",
+  "n": 71
+ },
+ {
+  "method": "POST",
+  "path": "/api/displays/restore",
+  "handler": "_api_display_restore",
+  "note": "3d-C: return a display to idle",
+  "auth": "auth",
+  "n": 72
+ },
+ {
+  "method": "POST",
+  "path": "/api/displays/show",
+  "handler": "_api_display_show",
+  "note": "3d-C: drive a display to show a ref",
+  "auth": "auth",
+  "n": 73
+ },
+ {
+  "method": "GET",
+  "path": "/api/fabric/catalogue",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 74
+ },
+ {
+  "method": "POST",
+  "path": "/api/fabric/launch",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 75
+ },
+ {
+  "method": "GET",
+  "path": "/api/fabric/launcher",
+  "handler": "_term_page",
+  "note": "",
+  "auth": "auth",
+  "n": 76
+ },
+ {
+  "method": "GET",
+  "path": "/api/fs",
+  "handler": "",
+  "note": "",
+  "auth": "admin",
+  "n": 77
+ },
+ {
+  "method": "POST",
+  "path": "/api/fs",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 78
+ },
+ {
+  "method": "GET",
+  "path": "/api/funding/acct",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 79
+ },
+ {
+  "method": "GET",
+  "path": "/api/funding/route",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 80
+ },
+ {
+  "method": "GET",
+  "path": "/api/hpc/status",
+  "handler": "_api_hpc_status",
+  "note": "",
+  "auth": "auth",
+  "n": 81
+ },
+ {
+  "method": "POST",
+  "path": "/api/hpc/submit",
+  "handler": "_api_hpc_submit",
+  "note": "HPC lane: submit a SLURM computation",
+  "auth": "auth",
+  "n": 82
+ },
+ {
+  "method": "GET",
+  "path": "/api/identity/selftest",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 83
+ },
+ {
+  "method": "GET",
+  "path": "/api/identity/status",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 84
+ },
+ {
+  "method": "GET",
+  "path": "/api/jobs",
+  "handler": "",
+  "note": "H1: only the caller's own commissions (admin: all)",
+  "auth": "admin",
+  "n": 85
+ },
+ {
+  "method": "POST",
+  "path": "/api/jobs",
+  "handler": "",
+  "note": "",
+  "auth": "admin",
+  "n": 86
+ },
+ {
+  "method": "GET",
+  "path": "/api/jobs/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 87
+ },
+ {
+  "method": "GET",
+  "path": "/api/keys",
+  "handler": "",
+  "note": "headless machine keys (list, metadata only)",
+  "auth": "auth",
+  "n": 88
+ },
+ {
+  "method": "POST",
+  "path": "/api/keys",
+  "handler": "",
+  "note": "headless machine keys: mint (shown once)",
+  "auth": "auth",
+  "n": 89
+ },
+ {
+  "method": "POST",
+  "path": "/api/keys/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 90
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/ask",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 91
+ },
+ {
+  "method": "GET",
+  "path": "/api/kids/home",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 92
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/home/light",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 93
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/home/rollo",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 94
+ },
+ {
+  "method": "GET",
+  "path": "/api/kids/music",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 95
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/music/play",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 96
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/music/search",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 97
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/music/stop",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 98
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/music/volume",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 99
+ },
+ {
+  "method": "POST",
+  "path": "/api/kids/print-coloring",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 100
+ },
+ {
+  "method": "GET",
+  "path": "/api/kids/status",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 101
+ },
+ {
+  "method": "GET",
+  "path": "/api/links",
+  "handler": "",
+  "note": "NAS-side captured links for this principal (thin-client view)",
+  "auth": "auth",
+  "n": 102
+ },
+ {
+  "method": "POST",
+  "path": "/api/links/clear",
+  "handler": "",
+  "note": "empty this principal's captured-link store",
+  "auth": "auth",
+  "n": 103
+ },
+ {
+  "method": "POST",
+  "path": "/api/llm/chat",
+  "handler": "",
+  "note": "governed oneshot LLM completion (headless)",
+  "auth": "auth",
+  "n": 104
+ },
+ {
+  "method": "POST",
+  "path": "/api/login",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 105
+ },
+ {
+  "method": "POST",
+  "path": "/api/logout",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 106
+ },
+ {
+  "method": "POST",
+  "path": "/api/metasession",
+  "handler": "_api_metasession_create",
+  "note": "create a Dauerjob",
+  "auth": "auth",
+  "n": 107
+ },
+ {
+  "method": "GET",
+  "path": "/api/metasession/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 108
+ },
+ {
+  "method": "POST",
+  "path": "/api/metasession/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 109
+ },
+ {
+  "method": "GET",
+  "path": "/api/metasessions",
+  "handler": "_api_metasessions",
+  "note": "",
+  "auth": "auth",
+  "n": 110
+ },
+ {
+  "method": "GET",
+  "path": "/api/netprofile",
+  "handler": "_api_netprofile",
+  "note": "",
+  "auth": "auth",
+  "n": 111
+ },
+ {
+  "method": "GET",
+  "path": "/api/overview",
+  "handler": "_api_overview",
+  "note": "",
+  "auth": "auth",
+  "n": 112
+ },
+ {
+  "method": "GET",
+  "path": "/api/pipelines",
+  "handler": "",
+  "note": "H2: only the caller's own pipelines (admin: all)",
+  "auth": "admin",
+  "n": 113
+ },
+ {
+  "method": "POST",
+  "path": "/api/pipelines",
+  "handler": "",
+  "note": "create a saved pipeline template",
+  "auth": "admin",
+  "n": 114
+ },
+ {
+  "method": "POST",
+  "path": "/api/pipelines/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 115
+ },
+ {
+  "method": "GET",
+  "path": "/api/placement",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 116
+ },
+ {
+  "method": "GET",
+  "path": "/api/policy",
+  "handler": "_api_policy_get",
+  "note": "",
+  "auth": "auth",
+  "n": 117
+ },
+ {
+  "method": "POST",
+  "path": "/api/policy",
+  "handler": "_api_policy_set",
+  "note": "save this session's allowlist",
+  "auth": "auth",
+  "n": 118
+ },
+ {
+  "method": "GET",
+  "path": "/api/policy/catalog",
+  "handler": "_api_policy_catalog",
+  "note": "",
+  "auth": "auth",
+  "n": 119
+ },
+ {
+  "method": "GET",
+  "path": "/api/policy/default",
+  "handler": "_api_policy_default_get",
+  "note": "",
+  "auth": "auth",
+  "n": 120
+ },
+ {
+  "method": "POST",
+  "path": "/api/policy/default",
+  "handler": "_api_policy_default_set",
+  "note": "save the default template for new sessions",
+  "auth": "auth",
+  "n": 121
+ },
+ {
+  "method": "GET",
+  "path": "/api/provenance",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 122
+ },
+ {
+  "method": "GET",
+  "path": "/api/queue",
+  "handler": "",
+  "note": "role-differentiated queue (user: own+ETA · admin: all+headroom)",
+  "auth": "auth",
+  "n": 123
+ },
+ {
+  "method": "POST",
+  "path": "/api/queue",
+  "handler": "",
+  "note": "add a task to the unified governed queue",
+  "auth": "auth",
+  "n": 124
+ },
+ {
+  "method": "GET",
+  "path": "/api/queue/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 125
+ },
+ {
+  "method": "POST",
+  "path": "/api/queue/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 126
+ },
+ {
+  "method": "POST",
+  "path": "/api/read",
+  "handler": "_api_read",
+  "note": "3c: text|ref -> resolved text + spoken WAV",
+  "auth": "auth",
+  "n": 127
+ },
+ {
+  "method": "GET",
+  "path": "/api/rooms",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 128
+ },
+ {
+  "method": "GET",
+  "path": "/api/screen/apps",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 129
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/firefox-restart",
+  "handler": "",
+  "note": "user-triggered hard recovery for a broken window",
+  "auth": "auth",
+  "n": 130
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/input",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 131
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/key",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 132
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/launch",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 133
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/open",
+  "handler": "",
+  "note": "the ANY→browser handoff: show a URL in the Screen",
+  "auth": "auth",
+  "n": 134
+ },
+ {
+  "method": "GET",
+  "path": "/api/screen/placement",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 135
+ },
+ {
+  "method": "GET",
+  "path": "/api/screen/scene",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 136
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/spawn",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 137
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/start",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 138
+ },
+ {
+  "method": "POST",
+  "path": "/api/screen/stop",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 139
+ },
+ {
+  "method": "POST",
+  "path": "/api/secret/forget",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 140
+ },
+ {
+  "method": "GET",
+  "path": "/api/secret/list",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 141
+ },
+ {
+  "method": "POST",
+  "path": "/api/secret/store",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 142
+ },
+ {
+  "method": "POST",
+  "path": "/api/secrets/delete",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 143
+ },
+ {
+  "method": "GET",
+  "path": "/api/secrets/list",
+  "handler": "",
+  "note": "strand #5: durable per-user vault",
+  "auth": "auth",
+  "n": 144
+ },
+ {
+  "method": "POST",
+  "path": "/api/secrets/set",
+  "handler": "",
+  "note": "strand #5: durable per-user vault",
+  "auth": "auth",
+  "n": 145
+ },
+ {
+  "method": "GET",
+  "path": "/api/selftest",
+  "handler": "_api_selftest",
+  "note": "",
+  "auth": "auth",
+  "n": 146
+ },
+ {
+  "method": "GET",
+  "path": "/api/session-cells",
+  "handler": "_api_session_cells",
+  "note": "",
+  "auth": "auth",
+  "n": 147
+ },
+ {
+  "method": "GET",
+  "path": "/api/session-cells/notify",
+  "handler": "_api_session_notify",
+  "note": "",
+  "auth": "auth",
+  "n": 148
+ },
+ {
+  "method": "POST",
+  "path": "/api/session/archive",
+  "handler": "",
+  "note": "Archiv: hide from the main list (NOT a delete)",
+  "auth": "auth",
+  "n": 149
+ },
+ {
+  "method": "GET",
+  "path": "/api/session/board",
+  "handler": "_api_session_board",
+  "note": "",
+  "auth": "auth",
+  "n": 150
+ },
+ {
+  "method": "GET",
+  "path": "/api/session/cellprobe",
+  "handler": "_api_cellprobe",
+  "note": "",
+  "auth": "auth",
+  "n": 151
+ },
+ {
+  "method": "POST",
+  "path": "/api/session/kill",
+  "handler": "_api_session_kill",
+  "note": "NOT-AUS: immediate non-bypassable stop (cgroup.kill)",
+  "auth": "auth",
+  "n": 152
+ },
+ {
+  "method": "POST",
+  "path": "/api/session/pause",
+  "handler": "_api_session_pause",
+  "note": "HARD freeze/thaw a session's agent (cgroup.freeze)",
+  "auth": "auth",
+  "n": 153
+ },
+ {
+  "method": "POST",
+  "path": "/api/session/power",
+  "handler": "_api_session_power",
+  "note": "VM on/off: free CPU+RAM but KEEP the delta (resume)",
+  "auth": "auth",
+  "n": 154
+ },
+ {
+  "method": "POST",
+  "path": "/api/session/provision",
+  "handler": "_api_session_provision",
+  "note": "equip a session BEFORE work",
+  "auth": "auth",
+  "n": 155
+ },
+ {
+  "method": "POST",
+  "path": "/api/session/say",
+  "handler": "_api_session_say",
+  "note": "single inbound door: deliver text INTO a session (fail-closed)",
+  "auth": "auth",
+  "n": 156
+ },
+ {
+  "method": "GET",
+  "path": "/api/session/summary",
+  "handler": "_api_session_summary",
+  "note": "",
+  "auth": "auth",
+  "n": 157
+ },
+ {
+  "method": "GET",
+  "path": "/api/sessions",
+  "handler": "_sessions_list",
+  "note": "",
+  "auth": "auth",
+  "n": 158
+ },
+ {
+  "method": "POST",
+  "path": "/api/sessions",
+  "handler": "",
+  "note": "canonical create (+ legacy alias)",
+  "auth": "auth",
+  "n": 159
+ },
+ {
+  "method": "GET",
+  "path": "/api/sessions/download",
+  "handler": "_sessions_download",
+  "note": "",
+  "auth": "auth",
+  "n": 160
+ },
+ {
+  "method": "POST",
+  "path": "/api/sessions/keep",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 161
+ },
+ {
+  "method": "GET",
+  "path": "/api/sessions/last",
+  "handler": "_sessions_last",
+  "note": "",
+  "auth": "auth",
+  "n": 162
+ },
+ {
+  "method": "GET",
+  "path": "/api/sessions/live",
+  "handler": "_api_sessions_live",
+  "note": "",
+  "auth": "auth",
+  "n": 163
+ },
+ {
+  "method": "POST",
+  "path": "/api/sessions/new",
+  "handler": "",
+  "note": "canonical create (+ legacy alias)",
+  "auth": "auth",
+  "n": 164
+ },
+ {
+  "method": "POST",
+  "path": "/api/sessions/rename",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 165
+ },
+ {
+  "method": "POST",
+  "path": "/api/shortcut/claude-login",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 166
+ },
+ {
+  "method": "POST",
+  "path": "/api/shortcut/vpn",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 167
+ },
+ {
+  "method": "GET",
+  "path": "/api/status",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 168
+ },
+ {
+  "method": "POST",
+  "path": "/api/stt",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 169
+ },
+ {
+  "method": "POST",
+  "path": "/api/talk",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 170
+ },
+ {
+  "method": "GET",
+  "path": "/api/term",
+  "handler": "_notes_page",
+  "note": "",
+  "auth": "auth",
+  "n": 175
+ },
+ {
+  "method": "POST",
+  "path": "/api/term/send",
+  "handler": "",
+  "note": "shortcut: type a line into a terminal session",
+  "auth": "auth",
+  "n": 176
+ },
+ {
+  "method": "GET",
+  "path": "/api/transcript",
+  "handler": "_api_transcript",
+  "note": "",
+  "auth": "auth",
+  "n": 177
+ },
+ {
+  "method": "POST",
+  "path": "/api/tts",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 178
+ },
+ {
+  "method": "POST",
+  "path": "/api/upload",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 179
+ },
+ {
+  "method": "GET",
+  "path": "/api/uservpn",
+  "handler": "_api_uservpn",
+  "note": "",
+  "auth": "auth",
+  "n": 180
+ },
+ {
+  "method": "GET",
+  "path": "/api/vault/blob",
+  "handler": "_vault_get",
+  "note": "",
+  "auth": "auth",
+  "n": 181
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/blob",
+  "handler": "",
+  "note": "box-blind: upload this principal's ciphertext vault",
+  "auth": "auth",
+  "n": 182
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/blob/delete",
+  "handler": "",
+  "note": "versioned wipe (account reset)",
+  "auth": "auth",
+  "n": 183
+ },
+ {
+  "method": "GET",
+  "path": "/api/vault/link/get",
+  "handler": "_link_get",
+  "note": "",
+  "auth": "auth",
+  "n": 184
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/link/offer",
+  "handler": "",
+  "note": "enrolled device posts the sealed VMK",
+  "auth": "auth",
+  "n": 185
+ },
+ {
+  "method": "GET",
+  "path": "/api/vault/link/resolve",
+  "handler": "_link_resolve",
+  "note": "",
+  "auth": "auth",
+  "n": 186
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/link/start",
+  "handler": "",
+  "note": "new device opens a link session",
+  "auth": "auth",
+  "n": 187
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/release/consume",
+  "handler": "",
+  "note": "requesting task pulls the plaintext once",
+  "auth": "auth",
+  "n": 188
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/release/deny",
+  "handler": "",
+  "note": "client refuses (policy=ask → user declined)",
+  "auth": "auth",
+  "n": 189
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/release/fulfill",
+  "handler": "",
+  "note": "client delivers the sealed credential",
+  "auth": "auth",
+  "n": 190
+ },
+ {
+  "method": "GET",
+  "path": "/api/vault/release/pending",
+  "handler": "_rel_pending",
+  "note": "",
+  "auth": "auth",
+  "n": 191
+ },
+ {
+  "method": "POST",
+  "path": "/api/vault/release/request",
+  "handler": "",
+  "note": "box task asks for a JIT credential release",
+  "auth": "auth",
+  "n": 192
+ },
+ {
+  "method": "GET",
+  "path": "/api/vault/release/status",
+  "handler": "_rel_status",
+  "note": "",
+  "auth": "auth",
+  "n": 193
+ },
+ {
+  "method": "POST",
+  "path": "/api/verb/act",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 194
+ },
+ {
+  "method": "POST",
+  "path": "/api/verb/credential_enter",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 195
+ },
+ {
+  "method": "GET",
+  "path": "/api/verb/sense",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 196
+ },
+ {
+  "method": "GET",
+  "path": "/api/vmcells",
+  "handler": "_api_vmcells",
+  "note": "cell-picker: microVM GUI cells (Bildschirm targets)",
+  "auth": "admin",
+  "n": 197
+ },
+ {
+  "method": "POST",
+  "path": "/api/voice",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 198
+ },
+ {
+  "method": "GET",
+  "path": "/api/voice/history",
+  "handler": "",
+  "note": "Sessions-board Verlauf-Panel (voice = kein Terminal)",
+  "auth": "auth",
+  "n": 199
+ },
+ {
+  "method": "GET",
+  "path": "/api/voice/route",
+  "handler": "_api_voice_route_get",
+  "note": "",
+  "auth": "auth",
+  "n": 200
+ },
+ {
+  "method": "POST",
+  "path": "/api/voice/route",
+  "handler": "_api_voice_route_set",
+  "note": "bind voice to a session (or back to daily)",
+  "auth": "auth",
+  "n": 201
+ },
+ {
+  "method": "GET",
+  "path": "/api/voice/tail",
+  "handler": "",
+  "note": "gestuftes Nabu-Vorlesen: Rest nach Cursor",
+  "auth": "auth",
+  "n": 202
+ },
+ {
+  "method": "GET",
+  "path": "/api/vpn",
+  "handler": "_api_vpn",
+  "note": "Nachtrag 14-B1: VPN registry + live status (read-only)",
+  "auth": "auth",
+  "n": 203
+ },
+ {
+  "method": "POST",
+  "path": "/api/vpn/cancel",
+  "handler": "_api_vpn_cancel",
+  "note": "",
+  "auth": "auth",
+  "n": 204
+ },
+ {
+  "method": "POST",
+  "path": "/api/vpn/request",
+  "handler": "_api_vpn_request",
+  "note": "T3: owner-initiated VPN start (link/2FA)",
+  "auth": "auth",
+  "n": 205
+ },
+ {
+  "method": "POST",
+  "path": "/api/vpn/restart",
+  "handler": "_api_vpn_restart",
+  "note": "hard-reset VPN/Cisco stack (Cisco \"please restart\")",
+  "auth": "auth",
+  "n": 206
+ },
+ {
+  "method": "GET",
+  "path": "/api/vpn/status",
+  "handler": "_api_vpn_status",
+  "note": "",
+  "auth": "auth",
+  "n": 207
+ },
+ {
+  "method": "GET",
+  "path": "/api/vpns",
+  "handler": "_api_vpn",
+  "note": "Nachtrag 14-B1: VPN registry + live status (read-only)",
+  "auth": "auth",
+  "n": 208
+ },
+ {
+  "method": "GET",
+  "path": "/api/workers",
+  "handler": "_api_workers",
+  "note": "",
+  "auth": "auth",
+  "n": 209
+ },
+ {
+  "method": "GET",
+  "path": "/api/workers/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 210
+ },
+ {
+  "method": "POST",
+  "path": "/api/workers/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 211
+ },
+ {
+  "method": "POST",
+  "path": "/api/workers/register",
+  "handler": "_api_worker_register",
+  "note": "node-lane §2: pair a compute worker (admin)",
+  "auth": "auth",
+  "n": 212
+ },
+ {
+  "method": "GET",
+  "path": "/app",
+  "handler": "",
+  "note": "",
+  "auth": "public",
+  "n": 213
+ },
+ {
+  "method": "GET",
+  "path": "/app/",
+  "handler": "",
+  "note": "",
+  "auth": "public",
+  "n": 214
+ },
+ {
+  "method": "GET",
+  "path": "/app/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 215
+ },
+ {
+  "method": "GET",
+  "path": "/apps/notes",
+  "handler": "_notes_page",
+  "note": "",
+  "auth": "public",
+  "n": 216
+ },
+ {
+  "method": "GET",
+  "path": "/attach/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 217
+ },
+ {
+  "method": "PAGE",
+  "path": "/blueprints",
+  "handler": "_blueprints_page",
+  "note": "",
+  "auth": "auth",
+  "n": 218
+ },
+ {
+  "method": "GET",
+  "path": "/brand/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 219
+ },
+ {
+  "method": "GET",
+  "path": "/classic",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 220
+ },
+ {
+  "method": "PAGE",
+  "path": "/devices",
+  "handler": "_devices_live_page",
+  "note": "",
+  "auth": "auth",
+  "n": 221
+ },
+ {
+  "method": "PAGE",
+  "path": "/freigaben",
+  "handler": "_freigaben_page",
+  "note": "",
+  "auth": "auth",
+  "n": 222
+ },
+ {
+  "method": "GET",
+  "path": "/index.html",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 223
+ },
+ {
+  "method": "GET",
+  "path": "/job/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 224
+ },
+ {
+  "method": "GET",
+  "path": "/login",
+  "handler": "_auth_reset_page",
+  "note": "",
+  "auth": "public",
+  "n": 225
+ },
+ {
+  "method": "GET",
+  "path": "/manifest.webmanifest",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 226
+ },
+ {
+  "method": "PAGE",
+  "path": "/netprofile",
+  "handler": "_netprofile_page",
+  "note": "",
+  "auth": "auth",
+  "n": 227
+ },
+ {
+  "method": "GET",
+  "path": "/novnc/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 228
+ },
+ {
+  "method": "PAGE",
+  "path": "/policy",
+  "handler": "_policy_editor_page",
+  "note": "",
+  "auth": "auth",
+  "n": 229
+ },
+ {
+  "method": "GET",
+  "path": "/reset",
+  "handler": "_auth_reset_page",
+  "note": "public: password-reset form (emailed link)",
+  "auth": "public",
+  "n": 230
+ },
+ {
+  "method": "GET",
+  "path": "/screen/stream",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 231
+ },
+ {
+  "method": "PAGE",
+  "path": "/selftest",
+  "handler": "_selftest_page",
+  "note": "",
+  "auth": "auth",
+  "n": 232
+ },
+ {
+  "method": "PAGE",
+  "path": "/sessions",
+  "handler": "_sessions_live_page",
+  "note": "",
+  "auth": "auth",
+  "n": 233
+ },
+ {
+  "method": "PAGE",
+  "path": "/settings",
+  "handler": "_settings_page",
+  "note": "",
+  "auth": "auth",
+  "n": 234
+ },
+ {
+  "method": "GET",
+  "path": "/static/*",
+  "handler": "",
+  "note": "prefix route",
+  "auth": "auth",
+  "n": 235
+ },
+ {
+  "method": "GET",
+  "path": "/term",
+  "handler": "_term_page",
+  "note": "",
+  "auth": "auth",
+  "n": 236
+ },
+ {
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "handler": "",
+  "note": "OpenAI-compatible shim (swap base_url → /v1)",
+  "auth": "auth",
+  "n": 237
+ },
+ {
+  "method": "POST",
+  "path": "/v1/messages",
+  "handler": "",
+  "note": "Anthropic-compatible shim",
+  "auth": "auth",
+  "n": 238
+ },
+ {
+  "method": "GET",
+  "path": "/v1/models",
+  "handler": "",
+  "note": "provider-compat shim: model catalogue probe",
+  "auth": "auth",
+  "n": 239
+ },
+ {
+  "method": "GET",
+  "path": "/vnc",
+  "handler": "_vnc_page",
+  "note": "",
+  "auth": "auth",
+  "n": 240
+ },
+ {
+  "method": "GET",
+  "path": "/vnc2",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 241
+ },
+ {
+  "method": "GET",
+  "path": "/vnc3",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 242
+ },
+ {
+  "method": "PAGE",
+  "path": "/vpn",
+  "handler": "_vpn_page",
+  "note": "",
+  "auth": "auth",
+  "n": 243
+ },
+ {
+  "method": "WS",
+  "path": "/ws/feed",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 244
+ },
+ {
+  "method": "WS",
+  "path": "/ws/hpc",
+  "handler": "",
+  "note": "",
+  "auth": "admin",
+  "n": 245
+ },
+ {
+  "method": "WS",
+  "path": "/ws/term",
+  "handler": "",
+  "note": "",
+  "auth": "auth",
+  "n": 246
+ },
+ {
+  "method": "WS",
+  "path": "/ws/vnc",
+  "handler": "",
+  "note": "",
+  "auth": "admin",
+  "n": 247
+ }
+]

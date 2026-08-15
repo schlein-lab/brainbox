@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+import sys, os, json, base64, argparse, mimetypes
+
+class Bridge:
+
+    def __init__(self, notifier=None, badge_setter=None, file_chooser=None):
+
+        self._notify = notifier or (lambda title, body: None)
+        self._badge = badge_setter or (lambda n: None)
+        self._choose = file_chooser or (lambda: [])
+        self._deeplink_cb = None
+        self.last = {}
+
+    def notify(self, title: str, body: str = "") -> dict:
+        self.last["notify"] = (title, body)
+        self._notify(str(title), str(body))
+        return {"ok": True}
+
+    def set_badge(self, n) -> dict:
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "badge must be an integer"}
+        self.last["badge"] = n
+        self._badge(n)
+        return {"ok": True, "n": n}
+
+    def attach_picker(self) -> list:
+
+        out = []
+        for path in (self._choose() or []):
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            out.append({
+                "name": os.path.basename(path),
+                "bytes": base64.b64encode(raw).decode("ascii"),
+                "mime": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                "path": path,
+            })
+        self.last["attach"] = [o["name"] for o in out]
+        return out
+
+    def register_deep_link(self, cb):
+        self._deeplink_cb = cb
+
+    def fire_deep_link(self, url: str):
+        self.last["deeplink"] = url
+        if self._deeplink_cb:
+            self._deeplink_cb(url)
+
+BRIDGE_JS = r"""
+(function () {
+  if (window.pncockpit) return;
+  let _seq = 0; const _pending = {};
+  function _send(method, args) {
+    return new Promise((resolve) => {
+      const id = ++_seq; _pending[id] = resolve;
+      window.webkit.messageHandlers.pnbridge.postMessage(
+        JSON.stringify({ id: id, method: method, args: args || [] }));
+    });
+  }
+  // the shell calls this to resolve a pending promise (attachPicker) or fire a deep link.
+  window.__pncockpit_resolve = function (id, value) {
+    if (_pending[id]) { _pending[id](value); delete _pending[id]; }
+  };
+  window.__pncockpit_deeplink = null;
+  window.pncockpit = {
+    notify: (title, body) => _send("notify", [title, body]),
+    setBadge: (n) => _send("setBadge", [n]),
+    attachPicker: () => _send("attachPicker", []),
+    onDeepLink: (cb) => { window.__pncockpit_deeplink = cb; },
+    shell: "native-webkitgtk",
+  };
+})();
+"""
+
+def _run_gtk(url: str):
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("WebKit2", "4.1")
+    from gi.repository import Gtk, WebKit2, GLib
+    try:
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify
+        Notify.init("pn-cockpit")
+        have_notify = True
+    except Exception:
+        have_notify = False
+
+    win = Gtk.Window(title="Brainarbeit Cockpit")
+    win.set_default_size(420, 720)
+    win.connect("destroy", Gtk.main_quit)
+
+    ctx = WebKit2.WebContext.get_default()
+    ucm = WebKit2.UserContentManager()
+    script = WebKit2.UserScript(
+        BRIDGE_JS, WebKit2.UserContentInjectedFrames.TOP_FRAME,
+        WebKit2.UserScriptInjectionTime.START, None, None)
+    ucm.add_script(script)
+    web = WebKit2.WebView.new_with_user_content_manager(ucm)
+
+    def desktop_notify(title, body):
+        if have_notify:
+            from gi.repository import Notify
+            Notify.Notification.new(title, body, "dialog-information").show()
+
+    def set_badge(n):
+        win.set_title(f"Brainarbeit Cockpit{f'  ({n})' if n else ''}")
+
+    def file_chooser():
+        dlg = Gtk.FileChooserDialog(title="Attach files", parent=win,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        dlg.set_select_multiple(True)
+        files = dlg.get_filenames() if dlg.run() == Gtk.ResponseType.OK else []
+        dlg.destroy()
+        return files
+
+    bridge = Bridge(desktop_notify, set_badge, file_chooser)
+
+    def on_message(_ucm, js_result):
+        try:
+            msg = json.loads(js_result.get_js_value().to_string())
+        except Exception:
+            return
+        mid, method, args = msg.get("id"), msg.get("method"), msg.get("args", [])
+        result = None
+        if method == "notify":
+            bridge.notify(*(args + ["", ""])[:2])
+        elif method == "setBadge":
+            bridge.set_badge(args[0] if args else 0)
+        elif method == "attachPicker":
+            result = bridge.attach_picker()
+        if mid is not None:
+            web.run_javascript(
+                f"window.__pncockpit_resolve({json.dumps(mid)},{json.dumps(result)})")
+
+    ucm.connect("script-message-received::pnbridge", on_message)
+    ucm.register_script_message_handler("pnbridge")
+
+    web.load_uri(url)
+    win.add(web)
+    win.show_all()
+    Gtk.main()
+
+def _selftest():
+
+    log = []
+    b = Bridge(
+        notifier=lambda t, body: log.append(("notify", t, body)),
+        badge_setter=lambda n: log.append(("badge", n)),
+        file_chooser=lambda: [__file__],
+    )
+    assert b.notify("Approval needed", "bind printer")["ok"], "notify failed"
+    assert b.set_badge(3) == {"ok": True, "n": 3}, "setBadge failed"
+    assert b.set_badge("nope")["ok"] is False, "setBadge did not reject non-int"
+    files = b.attach_picker()
+    assert files and files[0]["name"] == os.path.basename(__file__), "attachPicker name wrong"
+    assert base64.b64decode(files[0]["bytes"]).startswith(b"#!/usr/bin/env python3"), \
+        "attachPicker bytes not base64 of the file"
+    fired = {}
+    b.register_deep_link(lambda url: fired.update(url=url))
+    b.fire_deep_link("pn://job/42")
+    assert fired.get("url") == "pn://job/42", "onDeepLink did not fire"
+    print("BRIDGE SELFTEST PASS:", json.dumps(log), "+ attach", files[0]["name"],
+          "+ deeplink", fired["url"])
+
+    for m in ("notify", "setBadge", "attachPicker", "onDeepLink"):
+        assert m in BRIDGE_JS, f"BRIDGE_JS missing {m}"
+    print("BRIDGE_JS exposes all 4 methods on window.pncockpit")
+    return 0
+
+def main():
+    ap = argparse.ArgumentParser(description="pn-cockpit — native webview shell")
+    ap.add_argument("--url", default="https://127.0.0.1:8800/?shell=native")
+    ap.add_argument("--selftest", action="store_true",
+                    help="exercise the bridge logic headless (no display needed) and exit")
+    args = ap.parse_args()
+    if args.selftest:
+        return _selftest()
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        print("pn-cockpit: no DISPLAY/WAYLAND_DISPLAY — cannot open a window.", file=sys.stderr)
+        print("Run with --selftest to prove the bridge logic headless.", file=sys.stderr)
+        return 2
+    _run_gtk(args.url)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

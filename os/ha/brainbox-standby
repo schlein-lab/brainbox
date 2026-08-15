@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -u
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+LOG=${BRAINBOX_STANDBY_LOG:-$HOME/.local/share/brainbox/log/standby.log}
+REPL=${BRAINBOX_REPL_DIR:-$HOME/ha-replica/state}
+SHARE=${BRAINBOX_SHARE_DIR:-$HOME/.local/share}
+UNIT=brainbox-standby-portal.service
+PORT=${BRAINBOX_PORTAL_PORT:-8077}
+mkdir -p "$(dirname "$LOG")"
+ts(){ date '+%Y-%m-%d %H:%M:%S'; }
+log(){ echo "$(ts) $*" >>"$LOG"; logger -t brainbox-standby -- "$*" 2>/dev/null || true; }
+
+unit_pid(){ systemctl --user show -p MainPID --value "$UNIT" 2>/dev/null; }
+
+port_listeners(){
+    ss -ltnpH "sport = :$PORT" 2>/dev/null \
+      | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+fence_port(){
+    local keep="${1:-}" pids p killed=0
+    pids=$(port_listeners)
+    for p in $pids; do
+        [ -n "$keep" ] && [ "$p" = "$keep" ] && continue
+        log "FENCE: killing stray listener pid $p on :$PORT ($(ps -o args= -p "$p" 2>/dev/null | cut -c1-100))"
+        kill "$p" 2>/dev/null; killed=1
+    done
+    if [ "$killed" = 1 ]; then
+        sleep 2
+        for p in $(port_listeners); do
+            [ -n "$keep" ] && [ "$p" = "$keep" ] && continue
+            log "FENCE: pid $p survived TERM -> KILL"
+            kill -9 "$p" 2>/dev/null
+        done
+    fi
+}
+
+sync_state(){
+    for sub in phantom-portal portioneer; do
+        [ -d "$REPL/$sub" ] || continue
+        mkdir -p "$SHARE/$sub"
+        chmod u+rwx "$SHARE/$sub"
+        rsync -a "$REPL/$sub/" "$SHARE/$sub/" 2>>"$LOG"
+        chmod -R u+rwX "$SHARE/$sub"
+    done
+    log "state synced from $REPL -> $SHARE"
+}
+
+case "${1:-}" in
+  promote)
+    log "PROMOTE: VIP acquired -> fencing :$PORT, then bringing up standby portal"
+    fence_port ""
+    sync_state
+    systemctl --user reset-failed "$UNIT" 2>/dev/null
+    systemctl --user start "$UNIT" 2>>"$LOG"
+    ok=""
+    for i in 1 2 3 4 5 6; do
+        sleep 2
+        curl -fsS -k --max-time 4 "https://127.0.0.1:$PORT/api/status" >/dev/null 2>&1 && { ok=1; break; }
+    done
+    if [ -n "$ok" ]; then
+        log "PROMOTE ok: standby portal serving on :$PORT"
+    else
+        log "PROMOTE ERROR: portal not answering on :$PORT after 12s (unit: $(systemctl --user is-active "$UNIT" 2>/dev/null))"
+    fi
+    ;;
+  demote)
+    log "DEMOTE: VIP released -> stopping standby portal + fencing :$PORT"
+    systemctl --user stop "$UNIT" 2>>"$LOG"
+    fence_port ""
+    if [ -z "$(port_listeners)" ]; then
+        log "DEMOTE ok: :$PORT is silent"
+    else
+        log "DEMOTE ERROR: :$PORT still has listeners: $(port_listeners | tr '\n' ' ')"
+    fi
+    ;;
+  fence)
+    fence_port "$(unit_pid)"
+    ;;
+  status)
+    echo "unit: $(systemctl --user is-active "$UNIT" 2>/dev/null)  port :$PORT listeners: $(port_listeners | tr '\n' ' ')"
+    ;;
+  *)
+    echo "usage: brainbox-standby {promote|demote|fence|status}" >&2; exit 2;;
+esac

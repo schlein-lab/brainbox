@@ -1,0 +1,90 @@
+<!doctype html><html lang=de><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Was sendet die Box? — Brainbox</title>
+<style>
+:root{--bg:#0f1216;--card:#171b21;--ln:#242a33;--tx:#e7ecf3;--mut:#93a0b0;--acc:#43c59e;--warn:#e0b341;--bad:#e0614f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:26px 18px 60px}
+a.back{color:var(--mut);text-decoration:none;font-size:14px}
+h1{font-size:22px;margin:14px 0 4px}
+.sub{color:var(--mut);font-size:14px;margin-bottom:22px;max-width:64ch}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:18px 20px;margin-bottom:16px}
+.prof{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.prof .big{font-size:19px;font-weight:700}
+.pill{font-size:12.5px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid var(--ln);white-space:nowrap}
+.pill.home{color:#0d130f;background:var(--acc);border-color:var(--acc)}
+.pill.managed{color:#0d130f;background:var(--warn);border-color:var(--warn)}
+.pill.ok{color:#0d130f;background:var(--acc);border-color:var(--acc)}
+.pill.block{color:var(--bad);border-color:var(--bad)}
+.pill.never{color:var(--mut)}
+.pill.sm{font-size:11.5px;padding:2px 8px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--ln);vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+td.cap{font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--mut);font-size:12.5px;white-space:nowrap}
+.risk-hoch{color:var(--warn)}.risk-sehr\ hoch{color:var(--bad)}.risk-mittel{color:var(--mut)}
+.enf{font-size:11px;color:var(--mut)}
+.led{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--mut);max-height:240px;overflow:auto}
+.led .b{color:var(--bad)}.led .e{color:var(--acc)}
+h2{font-size:15px;margin:24px 0 8px}
+.note{font-size:12.5px;color:var(--mut);margin-top:12px;line-height:1.55}
+code{background:#0b0e12;border:1px solid var(--ln);border-radius:5px;padding:1px 6px;font-size:12px}
+</style><script src="/portal-nav.js" defer></script></head><body><div class=wrap>
+<a class=back href="/">&larr; Zurueck</a>
+<h1>📡 Was sendet die Box?</h1>
+<div class=sub>Volle Transparenz fuers (Firmen-)Netz: jede netz-aktive Faehigkeit, ihr aktueller Status, und was die Box
+zuletzt tatsaechlich gesendet oder — als guter Gast — geblockt hat. Im Profil <b>managed</b> ist alles
+standardmaessig aus; einzeln freischaltbar durch die IT.</div>
+<div id=prof class=card><div class=prof>Lade…</div></div>
+<h2>Netz-aktive Faehigkeiten</h2>
+<div class=card style=padding:6px><div id=caps>Lade…</div></div>
+<h2>Zuletzt (Live-Ledger)</h2>
+<div class=card><div id=led class=led>Lade…</div></div>
+<div class=note>Umschalten: <code>NET_PROFILE=home|managed</code> in <code>/etc/brainbox/site.conf</code>.
+Einzelne Freigaben im managed-Profil: z.B. <code>ALLOW_VIP_CLAIM=1</code>, <code>ALLOW_MDNS=1</code>.
+<b>Garantie</b>-Zeilen (eigener DNS/DHCP) macht die Box <b>nie</b> — dafuer gibt es keinen Schalter.
+<b>✓ erzwungen</b> = ein Code-Pfad fragt dieses Gate wirklich; <b>geplant</b> = Policy sichtbar, Enforcement folgt.</div>
+<script>
+const E=(t,c,h)=>{const x=document.createElement(t);if(c)x.className=c;if(h!=null)x.innerHTML=h;return x;};
+async function load(){
+ let j; try{j=await (await fetch('/api/netprofile',{cache:'no-store'})).json();}catch(e){document.getElementById('prof').textContent=e;return;}
+ if(!j.ok){document.getElementById('prof').innerHTML='<div class="pill block">'+(j.error||'Fehler')+'</div>';return;}
+ const managed=j.profile==='managed';
+ document.getElementById('prof').innerHTML=
+   '<div class=prof><span class=big>Profil</span>'
+   +'<span class="pill '+(managed?'managed':'home')+'">'+j.profile+'</span>'
+   +'<span style="color:var(--mut);font-size:13px">'
+   +(managed?'guter Gast — netz-aktives Verhalten standardmaessig AUS'
+             :'Heimnetz — Geraete-Integration erlaubt. Von SELBST sucht die Box trotzdem nicht: '
+             +'sie antwortet, wenn sie gefragt wird, und funkt erst, wenn jemand darum bittet.')
+   +'</span></div>';
+ const t=E('table');const thead=E('thead',null,'<tr><th>Faehigkeit</th><th>Risiko</th><th>Status</th><th>Freischalter</th><th>Enforcement</th></tr>');t.appendChild(thead);
+ const tb=E('tbody');
+ for(const c of j.capabilities){
+
+   const st = c.mode==='guarantee' ? '<span class="pill never sm">nie (Garantie)</span>'
+            : c.mode==='immer'     ? '<span class="pill ok sm">immer &middot; nur Antwort</span>'
+            : !c.allowed           ? '<span class="pill block sm">geblockt</span>'
+            : c.unaufgefordert     ? '<span class="pill ok sm">erlaubt</span>'
+                                   : '<span class="pill ok sm">nur auf Bitte</span>';
+   const tr=E('tr');
+   tr.title=c.why||'';
+   tr.innerHTML='<td>'+c.title+'<div class="cap">'+c.cap+'</div></td>'
+     +'<td class="risk-'+c.risk.replace(/ /g,"\\ ")+'">'+c.risk+'</td>'
+     +'<td>'+st+'</td>'
+     +'<td>'+(c.opt_in?('<code>'+c.opt_in+'=1</code>'):'<span style="color:var(--mut)">—</span>')+'</td>'
+     +'<td class=enf>'+(c.enforced?'✓ erzwungen':'geplant')+'</td>';
+   tb.appendChild(tr);
+ }
+ t.appendChild(tb);const cw=document.getElementById('caps');cw.innerHTML='';cw.appendChild(t);
+ const led=document.getElementById('led');
+ if(!j.ledger.length){led.textContent='— noch nichts protokolliert —';}
+ else{led.innerHTML=j.ledger.slice().reverse().map(r=>{
+   const d=new Date(r.ts*1000).toLocaleTimeString('de-DE');
+   const tag=r.action==='block'?'<span class=b>BLOCK</span>':'<span class=e>send&nbsp;</span>';
+
+   const wer=r.angefordert===undefined?'':(r.angefordert?'  [auf Bitte]':'  [von selbst]');
+   return d+'  '+tag+'  '+r.cap+wer+(r.what?('  ('+r.what+')'):'');
+ }).join('<br>');}
+}
+load();setInterval(load,5000);
+</script></div></body></html>

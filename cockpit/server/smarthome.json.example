@@ -1,0 +1,109 @@
+{
+ "_comment": "VORLAGE fuer portal_smarthome. Kopiere nach <DATA_DIR>/smarthome.json (i.d.R. ~/.local/share/brainbox-portal/smarthome.json) und setze host/arch + reale Ports. Der Engine-Default ist LEER (Panel inert); erst diese DATEN registrieren einen konkreten Smarthome-Stack als governten Observe-Workload. Hosts sind DATEN, nie im Code (siehe no-private-identifiers-in-code). Der Platzhalter-Host liegt im RFC5737-Doku-Bereich. enabled=false + observe_only=true = READ-ONLY, nicht-disruptiv.",
+ "enabled": false,
+ "observe_only": true,
+ "paused": false,
+ "worker_job_id": null,
+ "host": "192.0.2.85",
+ "arch": "aarch64",
+ "components": [
+  {
+   "name": "postgres",
+   "title": "postgresql@16-main (smarthome DB + TimescaleDB)",
+   "tier": "portable-RPO>0",
+   "deps": ["network"],
+   "probes": [{"kind": "via", "ref": "smarthome-backend", "field": "db", "equals": "ok"}],
+   "flags": ["Cluster nur an 127.0.0.1 gebunden -> Probe indirekt via backend /health db:ok", "RISIKO: Restart=no (Cluster-Crash => kein Auto-Restart => backend db offline)"],
+   "state_store": "/var/lib/postgresql/16/main (auf SD)"
+  },
+  {
+   "name": "mosquitto",
+   "title": "mosquitto MQTT-Broker",
+   "tier": "portable",
+   "deps": ["network"],
+   "probes": [
+    {"kind": "tcp", "port": 1883},
+    {"kind": "mqtt", "port": 1883, "topic": "zigbee2mqtt/bridge/state", "expect": "online"}
+   ],
+   "flags": ["0.0.0.0-exposed, ACL ungeprueft"]
+  },
+  {
+   "name": "zigbee2mqtt",
+   "title": "zigbee2mqtt (Sonoff ZBDongle / EFR32)",
+   "tier": "PINNED",
+   "pinned": true,
+   "deps": ["mosquitto", "serial"],
+   "probes": [
+    {"kind": "http", "port": 8080, "path": "/"},
+    {"kind": "mqtt", "port": 1883, "topic": "zigbee2mqtt/bridge/state", "expect": "online"}
+   ],
+   "pinned_reason": "USB-Radio, RF-range-bound, keine Live-Migration; Netz-Identitaet in NVRAM + coordinator_backup.json. Owner-Umbau auf LAN-Koordinator (SLZB-06 PoE / ser2net socat tcp://ip:6638) macht die Software portabel; coordinator_backup.json off-SD sichern.",
+   "flags": ["/dev/ttyUSB0 via by-id-Symlink", "Frame-Counter/AES-128 im Dongle-NVRAM"]
+  },
+  {
+   "name": "smarthome-backend",
+   "title": "smarthome-backend (FastAPI :8000)",
+   "tier": "portable",
+   "deps": ["postgres"],
+   "probes": [{"kind": "http", "port": 8000, "path": "/health", "expect_json": {"db": "ok"}}],
+   "flags": ["stateless ueber Postgres"]
+  },
+  {
+   "name": "smarthome-brain",
+   "title": "smarthome-brain (:8010, fail-to-local, dry_run)",
+   "tier": "portable",
+   "deps": ["smarthome-backend", "brainbox"],
+   "probes": [{"kind": "http", "port": 8010, "path": "/health", "expect_json": {"ok": true, "plane": "smarthome-brain"}}]
+  },
+  {
+   "name": "smarthome-frontend",
+   "title": "smarthome-frontend (Vite :5173)",
+   "tier": "portable",
+   "deps": ["network"],
+   "probes": [{"kind": "http", "port": 5173, "path": "/"}]
+  },
+  {
+   "name": "smarthome-kiosk-admin",
+   "title": "smarthome-kiosk-admin (:8081)",
+   "tier": "portable",
+   "deps": ["network"],
+   "probes": [{"kind": "http", "port": 8081, "path": "/"}],
+   "flags": ["kein /health"]
+  },
+  {
+   "name": "home-assistant",
+   "title": "home-assistant (docker, host-net, :8123)",
+   "tier": "portable-RPO>0",
+   "deps": [],
+   "probes": [
+    {"kind": "http", "port": 8123, "path": "/"},
+    {"kind": "http", "port": 8123, "path": "/manifest.json"}
+   ],
+   "flags": ["privileged, host-net", "eigene SQLite-Recorder-DB (getrennter State-Store)"],
+   "state_store": "~/homeassistant/home-assistant_v2.db"
+  },
+  {
+   "name": "smarthome-button-room1",
+   "title": "smarthome-button-room1 (MQTT multi-outlet)",
+   "tier": "portable-IF-MQTT/PINNED-IF-GPIO/verify",
+   "deps": ["mosquitto"],
+   "probes": [{"kind": "none"}],
+   "flags": ["verify: Bus-Bindung unbestaetigt (MQTT vs GPIO)"]
+  },
+  {
+   "name": "smarthome-kiosk",
+   "title": "smarthome-kiosk (labwc/PyQt6 Eingangsdisplay)",
+   "tier": "PINNED",
+   "pinned": true,
+   "deps": [],
+   "probes": [{"kind": "none"}],
+   "pinned_reason": "Display-HW, kein HTTP; kein Failover, nur Alert."
+  }
+ ],
+ "state_stores": [
+  {"name": "postgres/timescale", "path": "/var/lib/postgresql/16/main", "backup": "pflichtig", "note": "deckt sich NICHT mit HA-Recorder"},
+  {"name": "ha-recorder-sqlite", "path": "~/homeassistant/home-assistant_v2.db", "backup": "pflichtig", "note": "getrennter State-Store"},
+  {"name": "zigbee-coordinator-backup", "path": "coordinator_backup.json", "backup": "off-SD pflichtig", "note": "Zigbee-Netz-Secret; Voraussetzung fuer Restore ohne Re-Pairing"}
+ ],
+ "last_incident": null
+}

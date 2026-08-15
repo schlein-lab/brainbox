@@ -1,0 +1,13 @@
+[Unit]
+Description=phantGNOME Telegram wake-greeting (one-shot)
+Documentation=file:%h/phantGNOME/greet.sh
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/phantGNOME/greet.sh
+Environment=DISPLAY=:0
+SuccessExitStatus=0
+
+[Install]
+WantedBy=default.target
