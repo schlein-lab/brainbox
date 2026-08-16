@@ -4,7 +4,7 @@ set -euo pipefail
 OUT_DIR=${OUT_DIR:-/var/tmp/bbx}
 OUT_RAW=${OUT_RAW:-$OUT_DIR/brainbox-appliance-amd64.raw}
 OUT_QCOW=${OUT_QCOW:-$OUT_DIR/brainbox-appliance-amd64.qcow2}
-SIZE_MB=${SIZE_MB:-12000}
+SIZE_MB=${SIZE_MB:-20000}
 SUITE=${SUITE:-noble}
 MIRROR=${MIRROR:-http://archive.ubuntu.com/ubuntu}
 SERVICE_USER=${SERVICE_USER:-brainbox}
@@ -88,7 +88,7 @@ echo 'grub-pc grub-pc/install_devices_empty boolean true' | chr debconf-set-sele
 chr apt-get update -y >/tmp/bbx-apt.log 2>&1 || { echo "apt update FAILED"; tail -30 /tmp/bbx-apt.log; exit 1; }
 chr apt-get install -y --no-install-recommends \
     linux-image-generic initramfs-tools grub-pc os-prober git qrencode avahi-utils \
-    tmux ffmpeg espeak-ng e2fsprogs chrony nftables \
+    tmux ffmpeg espeak-ng e2fsprogs chrony nftables acl \
     >>/tmp/bbx-apt.log 2>&1 || { echo "apt install (kernel/grub) FAILED"; tail -40 /tmp/bbx-apt.log; exit 1; }
 for b in tmux ffmpeg espeak-ng mke2fs debugfs nft; do
   chr sh -c "command -v $b >/dev/null" \
@@ -458,9 +458,30 @@ say "6b-cast. celltv-venv (pychromecast + pyte + pillow) for Spiegeln/seatcast"
 chr python3 -m venv "$SVC_HOME/.local/share/celltv-venv" >>/tmp/bbx-pip.log 2>&1   && chr "$SVC_HOME/.local/share/celltv-venv/bin/pip" install --no-input --quiet        pychromecast pyte pillow >>/tmp/bbx-pip.log 2>&1   || echo "  WARN: celltv-venv build failed (see /tmp/bbx-pip.log) — Spiegeln will answer with an honest German error instead of casting"
 chr chown -R "$SERVICE_USER:$SERVICE_USER" "$SVC_HOME/.local/share/celltv-venv" 2>/dev/null || true
 
+say "6b-voice. wyoming STT (faster-whisper) venv — model selected by wizard, fetched on first use"
+chr python3 -m venv "$SVC_HOME/wyoming-venv" >>/tmp/bbx-pip.log 2>&1 \
+  && chr "$SVC_HOME/wyoming-venv/bin/pip" install --no-input --quiet --upgrade pip >>/tmp/bbx-pip.log 2>&1 \
+  && chr "$SVC_HOME/wyoming-venv/bin/pip" install --no-input --quiet wyoming-faster-whisper >>/tmp/bbx-pip.log 2>&1 \
+  || echo "  WARN: wyoming-venv build failed (see /tmp/bbx-pip.log) — voice STT unavailable until re-run"
+chr install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$SVC_HOME/wyoming-data"
+chr chown -R "$SERVICE_USER:$SERVICE_USER" "$SVC_HOME/wyoming-venv" 2>/dev/null || true
+cat > "$MNT/usr/local/bin/wyoming-stt-run" <<'WRAP'
+#!/bin/sh
+set -u
+[ -r /etc/brainbox/voice.env ] && . /etc/brainbox/voice.env
+[ "${VOICE_ENABLED:-1}" = "1" ] || exec sleep 2147483647
+MODEL="${WYOMING_MODEL:-medium}"
+HD="$(getent passwd "$(id -un)" | cut -d: -f6)"
+exec "$HD/wyoming-venv/bin/python" -m wyoming_faster_whisper --uri tcp://0.0.0.0:10300 --model "$MODEL" --data-dir "$HD/wyoming-data" --download-dir "$HD/wyoming-data"
+WRAP
+chmod 0755 "$MNT/usr/local/bin/wyoming-stt-run"
+
 say "7. /etc/brainbox (service.env, site.conf, caps.env, is-appliance) + firstboot + wizard"
 install -d -m 0755 "$MNT/etc/brainbox" "$MNT/var/lib/brainbox"
 touch "$MNT/etc/brainbox/is-appliance"
+printf 'VOICE_ENABLED=1
+WYOMING_MODEL=medium
+' > "$MNT/etc/brainbox/voice.env"
 printf '%s\n' "$BBX_VERSION" > "$MNT/etc/brainbox/version"
 cat > "$MNT/etc/brainbox/service.env" <<EOF
 SERVICE_USER=$SERVICE_USER
@@ -574,6 +595,7 @@ brainbox-setup|sacred|/usr/local/sbin/brainbox-setup serve
 brainbox-portal|sacred user=$SERVICE_UID envfile=/etc/brainbox/secrets.env|/usr/bin/python3 $SVC_HOME/.local/bin/brainbox-portal serve
 mediashare-smbd|oneshot|/usr/local/sbin/brainbox-smbd
 mediashare-dlna|oneshot|/usr/local/sbin/brainbox-dlnad
+wyoming-stt|batch user=$SERVICE_UID|/usr/local/bin/wyoming-stt-run
 cron||/usr/sbin/cron -f
 EOF
 grep -vE '^\s*#|^\s*$' "$MNT/etc/pn-init.conf" | sed 's/^/    /'

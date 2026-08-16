@@ -296,6 +296,7 @@ LABELS = {
         "cells_unavail": "Auf dieser Hardware nicht verfügbar.",
         "voice": "Sprachsteuerung (Voice)",
         "voice_hint": "Modelle werden bei der ersten Nutzung geladen.",
+        "voice_model": "Sprachmodell",
         "netprofile": "In welchem Netz steht die Box?",
         "netp_managed": "Firmen- oder fremdes Netz (empfohlen)",
         "netp_managed_hint": "Die Box bleibt still: keine Netzwerk-Suche, keine Rundrufe, "
@@ -614,6 +615,7 @@ LABELS = {
         "cells_unavail": "Not available on this hardware.",
         "voice": "Voice control",
         "voice_hint": "Models download on first use.",
+        "voice_model": "Voice model",
         "netprofile": "Which network is the box on?",
         "netp_managed": "Company or untrusted network (recommended)",
         "netp_managed_hint": "The box stays quiet: no network scanning, no broadcasts, no file "
@@ -2183,6 +2185,18 @@ def claude_signin_save(token):
     return {"ok": True, "verified": bool(v.get("ok")),
             "detail": v.get("detail") or "", "restart": ", ".join(notes)}
 
+def write_voice_env(cfg):
+    p = os.path.join(BRAINBOX_DIR, "voice.env")
+    model = (cfg.get("VOICE_MODEL") or "medium").strip() or "medium"
+    en = 1 if cfg.get("VOICE_ENABLED", 1) else 0
+    with open(p, "w") as fh:
+        fh.write("VOICE_ENABLED=%d" % en + chr(10) + "WYOMING_MODEL=%s" % model + chr(10))
+    try:
+        os.chmod(p, 0o644)
+    except OSError:
+        pass
+    return "wrote %s (model=%s)" % (p, model)
+
 def write_caps_env(cfg):
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     text = ("# brainbox caps.env — generated %s\n"
@@ -2774,6 +2788,22 @@ def _apply_sshd_password_auth(cfg):
     return "sshd password login %s (active on next sshd start)" % (
         "ON" if want else "off")
 
+def _write_access_file(user, pw):
+    try:
+        p = os.path.join(BRAINBOX_DIR, "access.txt")
+        old = os.umask(0o077)
+        try:
+            with open(p, "w") as f:
+                f.write("user: %s" % user + chr(10) + "password: %s" % pw + chr(10) + "root: sudo -i" + chr(10))
+        finally:
+            os.umask(old)
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
 def _apply_access(cfg):
 
     ident = cfg["_ident"]
@@ -2803,6 +2833,7 @@ def _apply_access(cfg):
             if detect_tool("chage"):
                 run(["chage", "-d", time.strftime("%Y-%m-%d"), user], timeout=10)
             notes.append("console/sudo password set for %s" % user)
+            _write_access_file(user, pw)
         except Exception as e:
             failed.append("password: %s" % e)
     try:
@@ -2826,6 +2857,7 @@ def apply(cfg):
     essential_ok &= _step(report, "site.conf", lambda: (write_site_conf(cfg) or "wrote %s" % SITE_CONF))
     essential_ok &= _step(report, "secrets.env", lambda: (write_secrets_env(cfg) or "wrote %s (0600)" % SECRETS_ENV))
     essential_ok &= _step(report, "caps.env", lambda: (write_caps_env(cfg) or "wrote %s" % CAPS_ENV))
+    _step(report, "voice.env", lambda: write_voice_env(cfg))
     essential_ok &= _step(report, "pnd.env", lambda: (append_pnd_env(cfg) or "merged brain env into %s (0600)" % PND_ENV))
 
     _step(report, "hostname", lambda: _apply_hostname(cfg))
@@ -3030,6 +3062,7 @@ def new_cfg(lang="de"):
                   "base_url": "", "llm_key": "", "model": ""},
         "CELLS_ENABLED": 1 if detect_cells_available(ident["SERVICE_HOME"]) else 0,
         "VOICE_ENABLED": 1,
+        "VOICE_MODEL": "medium",
         "HA_ENABLED": 0, "HA_VIP": "", "HA_VRID": 51, "VRRP_AUTH_PASS": "",
         "TELEGRAM_TOKEN": "",
         "email": {"host": "", "user": "", "pass": "", "from": ""},
@@ -3234,6 +3267,7 @@ def validate_and_merge(cfg, step, fields):
         else:
             cfg["CELLS_ENABLED"] = want_cells
         cfg["VOICE_ENABLED"] = _to_int01(fields.get("VOICE_ENABLED", 1))
+        cfg["VOICE_MODEL"] = (fields.get("VOICE_MODEL") or "medium")
 
         cfg["NET_PROFILE"] = "home" if str(fields.get("NET_PROFILE", "")).strip() == "home" else "managed"
 
@@ -4127,7 +4161,15 @@ function viewFeatures(){
     (av?"":"<div class='hint'>"+h(t("cells_unavail"))+"</div>")+"</div></label>";
   var voice="<label class='check'><input type='checkbox' id='VOICE_ENABLED' checked>"+
     "<div><b>"+h(t("voice"))+"</b><div class='hint'>"+h(t("voice_hint"))+
-    "</div></div></label>";
+    "</div></div></label>"+
+    "<div class='hint' style='margin:6px 0 0 30px'>"+h(t("voice_model"))+": "+
+    "<select id='VOICE_MODEL' style='margin-left:6px'>"+
+    "<option value='medium' selected>medium</option>"+
+    "<option value='large-v3'>large-v3</option>"+
+    "<option value='large-v3-turbo'>large-v3-turbo</option>"+
+    "<option value='distil-large-v3'>distil-large-v3</option>"+
+    "<option value='small'>small</option>"+
+    "</select></div>";
   var netz="<div class='step-title' style='margin-top:18px'>"+h(t("netprofile"))+"</div>"+
     "<label class='check'><input type='radio' name='netp' id='NET_PROFILE_MANAGED' checked>"+
     "<div><b>"+h(t("netp_managed"))+"</b><div class='hint'>"+h(t("netp_managed_hint"))+
@@ -4181,8 +4223,12 @@ function errText(v){
   var out=t(s);
   return n?out.replace("%N%",n):out;
 }
-function showErrs(errs){for(var k in errs){var el=$("e_"+k);
-  if(el)el.textContent=errText(errs[k]);}}
+function showErrs(errs){var first=null;for(var k in errs){var el=$("e_"+k);
+  if(!el)continue;el.textContent=errText(errs[k]);
+  var d=el.closest?el.closest("details"):null;
+  while(d){d.open=true;d=(d.parentNode&&d.parentNode.closest)?d.parentNode.closest("details"):null;}
+  if(!first)first=el;}
+  if(first&&first.scrollIntoView)first.scrollIntoView({block:"center"});}
 
 function collect(name){
   if(name==="language")return{step:"language",fields:{LANG_UI:radioVal("lang")}};
@@ -4200,7 +4246,7 @@ function collect(name){
     wifi_ssid:val("wifi_ssid"),wifi_psk:val("wifi_psk")}};
   if(name==="brain")return{step:"brain",fields:brainFields()};
   if(name==="features")return{step:"features",fields:{
-    CELLS_ENABLED:chkVal("CELLS_ENABLED"),VOICE_ENABLED:chkVal("VOICE_ENABLED"),
+    CELLS_ENABLED:chkVal("CELLS_ENABLED"),VOICE_ENABLED:chkVal("VOICE_ENABLED"),VOICE_MODEL:val("VOICE_MODEL"),
     NET_PROFILE:(document.getElementById("NET_PROFILE_HOME")||{}).checked?"home":"managed"}};
   if(name==="advanced")return{step:"advanced",fields:{
     HA_ENABLED:chkVal("HA_ENABLED"),HA_VIP:val("HA_VIP"),HA_VRID:val("HA_VRID"),

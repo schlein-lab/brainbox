@@ -77,6 +77,12 @@ if [ ${#NEWPW} -ge 20 ] && printf '%s:%s\n' "$APP_USER" "$NEWPW" | chpasswd 2>/d
   ( umask 077; printf '%s\n' "$NEWPW" > /etc/brainbox/initial-console-password )
   chown root:root /etc/brainbox/initial-console-password 2>/dev/null || true
   chmod 0600 /etc/brainbox/initial-console-password 2>/dev/null || true
+  ( umask 077; printf 'user: %s
+password: %s
+root: sudo -i
+' "$APP_USER" "$NEWPW" > /etc/brainbox/access.txt )
+  chown root:root /etc/brainbox/access.txt 2>/dev/null || true
+  chmod 0600 /etc/brainbox/access.txt 2>/dev/null || true
   chage -d -1 "$APP_USER" 2>/dev/null || true
   chage -M 99999 "$APP_USER" 2>/dev/null || true
   log "per-Geraet Konsolen-Passwort gesetzt (der im Image gebackene Wert gilt nicht mehr)"
