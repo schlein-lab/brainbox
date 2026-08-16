@@ -308,6 +308,24 @@ const Admin = {
       el("span", { class: "pill role-" + (ok ? "owner" : "user"), text: ok ? "aktiv" : "nicht konfiguriert" }),
       el("span", { class: "muted", text: ok ? ("Absender: " + (d.sender || "?")) : "Mailjet-Zugang fehlt (System-Ebene)" })
     ]));
+    const wrap = el("div", { style: "margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:440px" });
+    const inp = (ph, val, type) => el("input", { placeholder: ph, value: val || "", type: type || "text", autocomplete: "off", spellcheck: "false", style: "padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel2,#0f1520);color:inherit;font-size:14px" });
+    const kApi = inp("Mailjet API-Key", "");
+    const kSec = inp("Mailjet API-Secret", "", "password");
+    const kSnd = inp("Absender-E-Mail", d.sender || "");
+    const kNam = inp("Absender-Name", d.sender_name || "");
+    const save = el("button", { class: "btn sm", text: "Speichern" });
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const r = await apost("/api/admin/mail/config", { mailjet_apikey: kApi.value.trim(), mailjet_apisecret: kSec.value.trim(), sender: kSnd.value.trim(), sender_name: kNam.value.trim() });
+      save.disabled = false;
+      if (!r || r._forbidden) return;
+      if (r._neterr) { toast("Netzfehler"); return; }
+      toast(r.ok ? ("Gespeichert (" + (r.updated || 0) + " Felder)") : ("Fehler: " + (r.error || "?")));
+      if (r.ok) this.loadMail();
+    });
+    [el("div", { class: "muted", style: "font-size:12px", text: "Mailjet-Zugang (System-Ebene). Key/Secret leer lassen = unveraendert:" }), kApi, kSec, kSnd, kNam, save].forEach((x) => wrap.appendChild(x));
+    box.appendChild(wrap);
   },
   async sendMailTest() {
     const to = ($("#admMailTo").value || "").trim();
