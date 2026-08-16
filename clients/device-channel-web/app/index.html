@@ -88,6 +88,16 @@
   var BOX_ID_PUB = "fd4a012d6be6ff721d225a7d4c2d1decaf2e6b712020fd42a8c61fedbf4b65cc";
   var BOX_SX_PUB = "a44fc373aad4a6fcf56406b438e90debd58ce6d12330032d40ae2c9ff5c8256a";
   var DB="brainbox-device", STORE="kv", KEY="identity";
+  var PAIR_CODE="", PAIR_TOTP="";
+  (function(){ var h=(location.hash||"").replace(/^#/,"");
+    var hl=document.getElementById("hostline"); if(hl) hl.textContent=location.host+" · Ende-zu-Ende";
+    if(!h) return; var p={};
+    h.split("&").forEach(function(kv){var i=kv.indexOf("=");if(i>0)p[kv.slice(0,i)]=decodeURIComponent(kv.slice(i+1));});
+    if(p.id&&/^[0-9a-fA-F]{64}$/.test(p.id)) BOX_ID_PUB=p.id.toLowerCase();
+    if(p.sx&&/^[0-9a-fA-F]{64}$/.test(p.sx)) BOX_SX_PUB=p.sx.toLowerCase();
+    PAIR_CODE=p.c||""; PAIR_TOTP=p.t||"";
+    try{history.replaceState(null,"",location.pathname+location.search);}catch(e){}
+  })();
 
   var $=function(id){return document.getElementById(id)};
   function setStatus(txt, kind){ $("statusText").textContent=txt; var d=$("dot"); d.className="dot"+(kind?(" "+kind):""); }
@@ -139,7 +149,7 @@
     $("pairBtn").disabled=true; setStatus("Koppeln…","work");
     var keys=BBX.generateKeys(), dc=newChannel(keys), token=null;
     dc.connect().then(function(){
-      return dc.pair(code, totp, "Handy (app.brainarbeit.com)");
+      return dc.pair(code, totp, "Handy ("+location.host+")");
     }).then(function(r){
       if(r.t!=="pair_ok"){
         if(r.need_2fa){ throw new Error("2-Faktor-Code fehlt oder ist falsch/abgelaufen — neuen Code eingeben."); }
@@ -178,6 +188,7 @@
       });
     }
     startPairing();
+    if(PAIR_CODE){ $("code").value=PAIR_CODE; if(PAIR_TOTP)$("totp").value=PAIR_TOTP; doPair(); }
   }).catch(function(e){ setStatus("Speicher-Fehler: "+(e.message||e),"bad"); startPairing(); });
 })();
 </script>

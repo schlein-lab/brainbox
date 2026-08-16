@@ -961,7 +961,7 @@ class IdentityRoutes:
         if not code:
             try:
                 code = reg.mint_pairing(cx, principal, ["task_type:cell.exec", "msg:write"], parent_principal=principal,
-                                        label="App (app.brainarbeit.com)", ttl_s=1800)
+                                        label="App (%s)" % ((self.cfg.get("pair_host") or "app.brainarbeit.com")), ttl_s=1800)
             except Exception as e:
                 return self.send_html(json.dumps({"ok": False, "error": "Konnte keinen Code erzeugen: %s" % e}), 500, jct)
         try:
@@ -969,9 +969,16 @@ class IdentityRoutes:
             code2fa = reg._totp.code_at(reg._unwrap_secret(cx, row["secret_enc"]))
         except Exception:
             code2fa = ""
-        url = "https://app.brainarbeit.com/#c=" + urllib.parse.quote(code, safe="") + "&t=" + code2fa
+        _host = (self.cfg.get("pair_host") or "app.brainarbeit.com").strip() or "app.brainarbeit.com"
+        try:
+            from relaylib.keys import ApplianceKeys
+            _bk = ApplianceKeys()
+            _frag = "&id=" + _bk.id_pub.hex() + "&sx=" + _bk.sx_pub.hex()
+        except Exception:
+            _frag = ""
+        url = "https://" + _host + "/#c=" + urllib.parse.quote(code, safe="") + "&t=" + code2fa + _frag
         return self.send_html(json.dumps({"ok": True, "code": code, "url": url, "qr": self._pair_qr(url),
-                                          "refresh_in": 25, "app": "app.brainarbeit.com"}), 200, jct)
+                                          "refresh_in": 25, "app": _host}), 200, jct)
 
     def _pair_mint(self, body):
 
