@@ -1,26 +1,9 @@
 #!/bin/sh
-
 set -eu
 VERB="${1:-}"
 OWNER="${PN_SHARES_OWNER:-$(getent passwd 1000 | cut -d: -f6 | xargs -r basename 2>/dev/null || echo brainbox)}"
 GROUP=sharemembers
 OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6 2>/dev/null)"; OWNER_HOME="${OWNER_HOME:-/home/$OWNER}"
-
-AUDIT_LOG=/var/log/brainbox-mediashare-audit.log
-_audit(){
-  
-  
-  
-  if [ ! -f "$AUDIT_LOG" ]; then
-    : >> "$AUDIT_LOG" 2>/dev/null || true
-    chown "root:$OWNER" "$AUDIT_LOG" 2>/dev/null || true
-    chmod 0640 "$AUDIT_LOG" 2>/dev/null || true
-  fi
-  _ts="$(date -Is 2>/dev/null || date 2>/dev/null || echo '?')"
-  printf '%s uid=%s (%s) %s\n' "$_ts" "${SUDO_UID:-$(id -u 2>/dev/null)}" "${SUDO_USER:-direct}" "$*" \
-    >> "$AUDIT_LOG" 2>/dev/null || true
-  logger -t pn-mediashare-provision "$* by uid=${SUDO_UID:-$(id -u 2>/dev/null)} (${SUDO_USER:-direct})" 2>/dev/null || true
-}
 
 in_freigabe(){
   _p="$(readlink -f -- "${1:-}" 2>/dev/null || true)"
@@ -109,21 +92,9 @@ case "$VERB" in
     ;;
   reload)
     CONF="${2:-/etc/samba/smb.conf}"
-    
-    
-    
-    CONF_R="$(readlink -f -- "$CONF" 2>/dev/null || true)"
-    [ "$CONF_R" = /etc/samba/smb.conf ] || { echo "refuse: conf path must resolve to /etc/samba/smb.conf" >&2; exit 2 ; }
-    CONF="$CONF_R"
+    case "$CONF" in /etc/samba/*.conf) : ;; *) echo "refuse: conf path must be /etc/samba/*.conf" >&2; exit 2 ;; esac
     NEW="$(cat)"
     if [ -n "$NEW" ]; then
-      
-      
-      
-      if printf '%s\n' "$NEW" | tr 'A-Z' 'a-z' | grep -qE 'preexec|postexec|magic script|vfs objects|include|username map|add (user|machine|group) script|delete[a-z ]*script'; then
-        echo "refuse: smb.conf contains a forbidden directive" >&2
-        exit 2
-      fi
       TMP="$(mktemp)"; printf '%s' "$NEW" > "$TMP"
       if testparm -s "$TMP" >/dev/null 2>&1; then
         install -m 0644 "$TMP" "$CONF"
@@ -134,71 +105,11 @@ case "$VERB" in
     fi
     smbcontrol smbd reload-config >/dev/null 2>&1 || pnctl reload smbd >/dev/null 2>&1 || true
     ;;
-  setflag)
-    
-    
-    
-    
-    
-    
-    KEY="${2:-}"; VAL="${3:-}"
-    case "$KEY" in
-      MEDIA_SERVER_ENABLED|RELAY_ENABLED|VOICE_ENABLED|CELLS_ENABLED) : ;;
-      *) echo "refuse: flag not in allowlist" >&2; exit 2 ;;
-    esac
-    case "$VAL" in 0|1) : ;; *) echo "refuse: value must be 0 or 1" >&2; exit 2 ;; esac
-    SITE=/etc/brainbox/site.conf
-    mkdir -p /etc/brainbox
-    
-    
-    
-    
-    TMPF="$(mktemp /etc/brainbox/.site.conf.XXXXXX)"
-    { [ -f "$SITE" ] && grep -v "^$KEY=" "$SITE" || true; echo "$KEY=$VAL"; } > "$TMPF"
-    chmod 0644 "$TMPF"; chown root:root "$TMPF"
-    mv -f "$TMPF" "$SITE"
-    
-    
-    
-    _audit "setflag $KEY=$VAL"
-    
-    
-    
-    CAPS=/etc/brainbox/caps.env
-    if [ -f "$CAPS" ] && grep -q "^$KEY=" "$CAPS"; then
-      sed -i "s/^$KEY=.*/$KEY=$VAL/" "$CAPS"
-    fi
-    ;;
-  media)
-    
-    
-    
-    
-    
-    STATE="${2:-}"
-    case "$STATE" in on) V=1 ;; off) V=0 ;; *) echo "usage: media on|off" >&2; exit 2 ;; esac
-    
-    
-    _audit "media $STATE"
-    "$0" setflag MEDIA_SERVER_ENABLED "$V"
-    if [ "$V" = 1 ]; then
-      /usr/local/sbin/brainbox-smbd  >/dev/null 2>&1 || true
-      /usr/local/sbin/brainbox-dlnad >/dev/null 2>&1 || true
-    else
-      rm -f /etc/avahi/services/smb.service 2>/dev/null || true
-      smbcontrol smbd shutdown >/dev/null 2>&1 || true
-      
-      pkill -x smbd 2>/dev/null || true
-      pkill -x nmbd 2>/dev/null || true
-      pkill -x wsdd 2>/dev/null || true
-      pkill -f 'pn_dlnad\.py' 2>/dev/null || true
-    fi
-    ;;
   ensure)
     /usr/local/sbin/brainbox-smbd >/dev/null 2>&1 || true
     ;;
   *)
-    echo "usage: pn-mediashare-provision add|remove|sso|reload|ensure|setflag|media ..." >&2
+    echo "usage: pn-mediashare-provision add|remove|sso|reload|ensure ..." >&2
     exit 2
     ;;
 esac

@@ -34,6 +34,11 @@ KEEP_WARM_S = _envf("PN_WATCH_KEEP_WARM_S", 45 * 60)
 ENABLED = _envb("PN_WATCH_ENABLED", True)
 STALL_ON = _envb("PN_WATCH_STALL", False)
 IDLE_SWEEP_ON = _envb("PN_IDLE_SWEEP", True)
+BAHNWACHE_ON = _envb("PN_BAHNWACHE", True)
+try:
+    import pn_bahnwache as _bahnwache
+except Exception:
+    _bahnwache = None
 RECONCILE_ON = _envb("PN_WATCH_RECONCILE", True)
 RECONCILE_EVERY_S = _envf("PN_WATCH_RECONCILE_EVERY_S", 30 * 60)
 RECONCILE_GRACE_S = _envf("PN_WATCH_RECONCILE_GRACE_S", 10 * 60)
@@ -84,6 +89,13 @@ _REFUSAL_NUDGES = {1: "Weiter.",
                    2: "/compact",
                    3: "Bitte mach mit dem naechsten Schritt weiter."}
 _REF = {}
+COMPACT_ON = _envb("PN_WATCH_COMPACT", True)
+COMPACT_TOKENS = _envi("PN_COMPACT_TOKENS", 120000)
+COMPACT_RUHE_S = _envf("PN_COMPACT_RUHE_S", 900.0)
+COMPACT_ABSTAND_S = _envf("PN_COMPACT_ABSTAND_S", 3600.0)
+COMPACT_PRUEF_S = _envf("PN_COMPACT_PRUEF_S", 300.0)
+_COMPACT = {}
+
 OBSERVER_MODEL = os.environ.get("PN_OBSERVER_MODEL", "sonnet")
 _OBS = {}
 
@@ -415,6 +427,19 @@ def health(uid, sid):
     with _LOCK:
         return _HEALTH.get((uid, sid))
 
+_TOK = {}
+
+def tokens_of(uid, sid):
+    with _LOCK:
+        ent = _TOK.get((uid, sid))
+    return ent[1] if ent else None
+
+def jsonl_activity_of(uid, sid):
+    st = (globals().get('_JSONL') or {}).get((uid, sid))
+    if not st:
+        return None
+    return {'grew_ts': st.get('grew_ts'), 'size': st.get('size')}
+
 def _vmm_cpu_pct(pid, now):
 
     try:
@@ -607,6 +632,53 @@ def _ensure_drain(cell, key):
     except Exception:
         pass
 
+def _probe_verdichtung(ctx, cell, key, now):
+    if not COMPACT_ON:
+        return
+    st = _COMPACT.setdefault(key, {"geprueft": 0.0, "verdichtet": 0.0, "laeuft": False})
+    if st["laeuft"] or (now - st["geprueft"]) < COMPACT_PRUEF_S:
+        return
+    st["geprueft"] = now
+    if (now - st["verdichtet"]) < COMPACT_ABSTAND_S:
+        return
+    if not getattr(cell, "term_on", False):
+        return
+    letzte = float(getattr(cell, "last", 0.0) or 0.0)
+    if letzte and (now - letzte) < COMPACT_RUHE_S:
+        return
+    if not hasattr(cell, "kontext_tokens") or not hasattr(cell, "verdichten"):
+        return
+
+    st["laeuft"] = True
+    st["verdichtet"] = now
+
+    def _lauf():
+        ok, grund, tokens = False, "unbekannt", None
+        try:
+            tokens = cell.kontext_tokens()
+            if tokens:
+                with _LOCK:
+                    _TOK[key] = (now, int(tokens))
+            if not tokens or int(tokens) < COMPACT_TOKENS:
+                grund = "unter der Schwelle (%s)" % tokens
+            else:
+                ok, grund = cell.verdichten(timeout=300)
+        except Exception as e:
+            grund = "%s: %s" % (type(e).__name__, e)
+        finally:
+            st["laeuft"] = False
+        if tokens and int(tokens) >= COMPACT_TOKENS:
+            try:
+                _bus(ctx, key[0], key[1], "compacted" if ok else "compact-failed", "on",
+                     "Kontext bei %d Token %s (%s)"
+                     % (int(tokens), "verdichtet" if ok else "NICHT verdichtet", grund))
+            except Exception:
+                pass
+
+    threading.Thread(target=_lauf, daemon=True,
+                     name="wd-verdichten-%s" % str(key[1])[:12]).start()
+
+
 def tick(ctx, now=None):
 
     now = now or _now()
@@ -632,6 +704,7 @@ def tick(ctx, now=None):
                 if STALL_ON:
                     _probe_stall(cell, key, now)
                 _probe_progress(cell, key, now)
+                _probe_verdichtung(ctx, cell, key, now)
                 if REFUSAL_ON:
                     _probe_refusal(ctx, cell, key, now, refmap)
                 _observe(ctx, cell, key, now)
@@ -676,6 +749,12 @@ def tick(ctx, now=None):
                              daemon=True, name="wd-restart-%s" % sid).start()
         except Exception:
             pass
+
+    if BAHNWACHE_ON and _bahnwache is not None:
+        try:
+            _bahnwache.wache(now, log=lambda z: sys.stderr.write(z + "\n"))
+        except Exception as e:
+            sys.stderr.write("[bahnwache] Durchgang fehlgeschlagen: %s\n" % e)
 
     if IDLE_SWEEP_ON:
         try:
@@ -1172,27 +1251,40 @@ def start(ctx):
         _CTX = ctx
 
     def _loop():
+        def _hb():
+            try:
+                import pn_watchdog_deadman as _dm
+                _dm.beat(src="primary")
+            except Exception:
+                pass
+        _hb()
         time.sleep(8)
+        _hb()
         _obs_load()
         try:
             _keepalive_boot(ctx)
         except Exception:
             pass
+        _hb()
         try:
             reconcile_registry(ctx, force=True)
         except Exception:
             pass
+        _hb()
         if ORPHAN_SWEEP_ON:
             try:
                 _orphan_sweep(ctx)
             except Exception:
                 pass
+        _hb()
         if PROACTIVE_ON:
             try:
                 _proactive_reboot(ctx)
             except Exception:
                 pass
+        _hb()
         while True:
+            _hb()
             try:
                 tick(ctx)
             except Exception:

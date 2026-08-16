@@ -108,37 +108,6 @@
     <div id="termList"><div class="row"><div class="grow meta">lädt…</div></div></div>
   </section>
 
-  
-  <section class="card hidden" id="mediaCard">
-    <h2>📡 Medienserver — die Box im Heimnetz sichtbar machen</h2>
-    <p class="lead">Eingeschaltet erscheint die Box bei allen Geräten im Heimnetz als Netzlaufwerk
-      (Windows-Explorer, macOS Finder, Datei-Manager) und als Medienquelle für Fernseher (DLNA).
-      Geteilt wird der Ordner „public“ — nur für angemeldete Freigabe-Mitglieder, nie anonym;
-      Session-Freigaben bleiben zusätzlich einzeln passwortgeschützt. Ausgeschaltet ist die Box im
-      Netz <b>nicht</b> als Medienserver sichtbar und die Datei-Ports sind zu.</p>
-    <div class="row">
-      <span class="pill off" id="mediaPill">aus</span>
-      <div class="grow"><div class="name">Medienserver (SMB + DLNA)</div>
-        <div class="meta" id="mediaMeta">lädt…</div></div>
-      <div class="rowform"><button class="ghost" id="mediaBtn" disabled>…</button></div>
-    </div>
-    <p class="note">Wirkt sofort, in beide Richtungen. Beim Ausschalten bleiben alle Freigaben und
-      Passwörter erhalten — nach dem Einschalten ist alles wieder da. Dieselbe Entscheidung wie im
-      Einrichtungs-Assistenten, nur jederzeit umkehrbar.</p>
-  </section>
-
-  
-  <section class="card hidden" id="featCard">
-    <h2>⚙️ Funktionen — Entscheidungen aus der Einrichtung ändern</h2>
-    <p class="lead">Dieselben Schalter wie im Einrichtungs-Assistenten: keine Entscheidung von damals
-      ist endgültig. Der Medienserver (oben) wirkt sofort; die Schalter hier übernimmt die Box beim
-      nächsten Neustart.</p>
-    <div id="featList"><div class="row"><div class="grow meta">lädt…</div></div></div>
-    <p class="note">NAS-Einbindung und Hochverfügbarkeit brauchen Zugangsdaten und laufen deshalb
-      weiter über den Assistenten: an der Konsole <b>sudo brainbox-setup --tty --force</b>.</p>
-  </section>
-
-  
   <section class="card hidden" id="rightsCard">
     <h2>🛡 Nutzerrechte — was darf welcher Nutzer</h2>
     <p class="lead">Du setzt pro Nutzer eine Obergrenze (Floor). Sie kann Rechte nur <b>einschränken</b>,
@@ -236,53 +205,7 @@
     });
   }
 
-  
-  
-  
-  var FEAT_LABELS = {
-    RELAY_ENABLED: ["Fernzugriff (Relay)", "Box auch von unterwegs erreichbar machen"],
-    VOICE_ENABLED: ["Sprachassistent", "Sprachdienste der Box (sofern auf diesem Gerät eingerichtet)"],
-    CELLS_ENABLED: ["Arbeitszellen (microVMs)", "isolierte Arbeitsumgebungen für Sessions (sofern die Box sie unterstützt)"]
-  };
-  function loadFeatures(){
-    J("/api/admin/features").then(function(d){
-      if(!d || d._forbidden || !d.ok){ return; }        
-      $("mediaCard").classList.remove("hidden");
-      $("featCard").classList.remove("hidden");
-      var on = !!(d.flags && d.flags.MEDIA_SERVER_ENABLED), m = d.media || {};
-      var pill=$("mediaPill"); pill.textContent = on ? "an" : "aus"; pill.className = "pill "+(on?"on":"off");
-      $("mediaMeta").textContent = on
-        ? ((m.smb ? "Dateiserver läuft" : "Dateiserver startet nicht — /var/log/brainbox-smbd.log prüfen")
-           + " · " + (m.dlna ? "DLNA läuft" : "DLNA aus")
-           + " · " + (m.advert ? "im Netz angekündigt" : "Ankündigung folgt gleich"))
-        : ((m.smb || m.dlna) ? "wird beendet…" : "nicht sichtbar, Datei-Ports zu");
-      var b=$("mediaBtn"); b.disabled=false; b.textContent = on ? "Ausschalten" : "Einschalten";
-      b.onclick=function(){ b.disabled=true;
-        POST("/api/admin/features",{key:"MEDIA_SERVER_ENABLED",enabled:!on}).then(function(res){
-          toast(res&&res.ok ? (on?"Medienserver ausgeschaltet":"Medienserver eingeschaltet")
-                            : ((res&&res.error)||"Fehler"));
-          loadFeatures(); }); };
-      var box=$("featList"); box.innerHTML="";
-      Object.keys(FEAT_LABELS).forEach(function(k){
-        var fon = !!(d.flags && d.flags[k]);
-        var r=document.createElement("div"); r.className="row";
-        r.innerHTML='<span class="pill '+(fon?"on":"off")+'">'+(fon?"an":"aus")+'</span>'+
-          '<div class="grow"><div class="name">'+esc(FEAT_LABELS[k][0])+'</div>'+
-          '<div class="meta">'+esc(FEAT_LABELS[k][1])+' · wirkt ab dem nächsten Neustart</div></div>';
-        var form=document.createElement("div"); form.className="rowform";
-        var b2=document.createElement("button"); b2.className="ghost";
-        b2.textContent = fon ? "Ausschalten" : "Einschalten";
-        b2.onclick=function(){ b2.disabled=true;
-          POST("/api/admin/features",{key:k,enabled:!fon}).then(function(res){
-            toast(res&&res.ok ? "Gespeichert — wirkt ab dem nächsten Neustart"
-                              : ((res&&res.error)||"Fehler"));
-            loadFeatures(); }); };
-        form.appendChild(b2); r.appendChild(form); box.appendChild(r);
-      });
-    });
-  }
-
-  loadVoice(); loadTerms(); loadRights(); loadFeatures();
+  loadVoice(); loadTerms(); loadRights();
 })();
 </script>
 </body>

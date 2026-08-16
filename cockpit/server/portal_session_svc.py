@@ -790,6 +790,12 @@ def _cell_desktop_status(uid, sid):
         if c is not None and c.alive() and (c.policy or {}).get("desktop"):
             br = getattr(c, "desk_bridge", None)
             bridge_up = br is not None and br.poll() is None
+            if not bridge_up:
+                try:
+                    import pn_cell_desk_bridge as _brg
+                    bridge_up = bool(_brg.lebende_bruecke(c.cell))
+                except Exception:
+                    pass
 
             registered = False
             if bridge_up:
@@ -824,18 +830,33 @@ def _cell_desktop(uid, sid, on):
         j = _DESK_JOBS.get((uid, sid))
         if j and j.get("phase") in _DESK_BUSY:
             return {"ok": False, "reason": "Ein Desktop-Wechsel laeuft fuer diese Session bereits."}
+        _vorher = dict(j) if j else None
+        _DESK_JOBS[(uid, sid)] = {"phase": "start", "detail": "Desktop wird geprueft …",
+                                  "ts": time.time(), "error": None,
+                                  "on": (j or {}).get("on")}
+
+    def _frei():
+        with _DESK_LOCK:
+            if _vorher is None:
+                _DESK_JOBS.pop((uid, sid), None)
+            else:
+                _DESK_JOBS[(uid, sid)] = _vorher
 
     st = _cell_desktop_status(uid, sid)
     if on and st.get("active"):
+        _frei()
         return {"ok": True, "already": True, "cell": st.get("cell")}
     if not on and not st.get("active"):
+        _frei()
         return {"ok": True, "already": True}
     if on:
         if not os.path.exists(_cs.OFFICE_BASE):
+            _frei()
             return {"ok": False, "reason": "Das Office-Image fehlt auf dieser Box (kernel/%s)."
                     % os.path.basename(_cs.OFFICE_BASE)}
         pol0 = _cockpit_policy_enf(uid, sid) or {}
         if pol0.get("runtime") == "biomni":
+            _frei()
             return {"ok": False, "reason": "Desktop und Biomni-Laufzeit schliessen sich aus "
                                            "(beide belegen das vdc-Volume)."}
         try:
@@ -845,6 +866,7 @@ def _cell_desktop(uid, sid, on):
             want = max(int(pol0.get("mem_mb") or 0), _cs.OFFICE_MEM_MB)
             pl = _adm.plan(want, "office", exclude_id=admit_id)
             if not pl.get("grant"):
+                _frei()
                 return {"ok": False, "reason": pl.get("reason") or "RAM-Budget erschoepft."}
         except Exception:
             pass

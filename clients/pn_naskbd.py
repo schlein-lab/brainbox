@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""pn_naskbd — zentrale evdev-Tastaturbrücke für Brainbox-Sessions/Seats.
-
-Liest ein evdev-Keyboard (roh, reine stdlib — kein python-evdev, kein Compiler nötig), übersetzt
-Linux-Keycodes mit DEUTSCHEM Layout und schickt sie an das, was GERADE auf einen Bildschirm gecastet
-wird (follow-cast) — die Tastatur ist an keine einzelne VM gebunden:
-
-  * TERMINAL-Cast  -> Bytes über die read/write-getrennte Input-Lane  /ws/term?input=1&sid=<sid>
-  * SEAT/GUI-Cast  -> RFB-KeyEvents (X-Keysyms) über  /ws/vnc[?cell=<cid>]  (rfbd injiziert korrekt)
-
-  pn_naskbd.py [--device /dev/input/by-id/...-event-kbd] [--portal https://192.0.2.5:8077]
-               [--sid <fix-term>] [--pin-file /etc/pn-naskbd/pin]
-
-input_event = 24 B (<qqHHi): sec, usec, type, code, value  (x86-64 little-endian).
-"""
 import argparse, base64, glob, json, os, socket, ssl, struct, sys, threading, time
 import urllib.parse, urllib.request, http.cookiejar
 

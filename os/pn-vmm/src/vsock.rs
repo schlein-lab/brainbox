@@ -152,6 +152,60 @@ impl Hdr {
     }
 }
 
+
+const AUSGANG_TIEFE: usize = 64;
+
+
+pub struct Ausgang {
+    tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    name: &'static str,
+}
+
+impl Ausgang {
+    fn neu(mut s: UnixStream, name: &'static str) -> Ausgang {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(AUSGANG_TIEFE);
+        let gestartet = std::thread::Builder::new()
+            .name(format!("pn-vmm-{name}"))
+            .spawn(move || {
+                
+                while let Ok(b) = rx.recv() {
+                    if s.write_all(&b).is_err() {
+                        break;
+                    }
+                    let _ = s.flush();
+                }
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            })
+            .is_ok();
+        Ausgang { tx: if gestartet { Some(tx) } else { None }, name }
+    }
+
+    
+    fn schreibe(&mut self, daten: &[u8]) -> bool {
+        if daten.is_empty() {
+            return true;
+        }
+        let Some(tx) = self.tx.as_ref() else {
+            return false;
+        };
+        match tx.try_send(daten.to_vec()) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                eprintln!("[pn-vmm] Bahn {}: {} Nachrichten unabgeholt — der Verbraucher \
+liest nicht mehr. DIESER Port verliert seine Verbindung; die Zelle laeuft weiter.",
+                          self.name, AUSGANG_TIEFE);
+                self.tx = None;
+                false
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                eprintln!("[pn-vmm] Bahn {}: Gegenstelle weg — Port geschlossen.", self.name);
+                self.tx = None;
+                false
+            }
+        }
+    }
+}
+
 pub struct VsockMmio {
     mmio_base: u64,
     irq: EventFd,
@@ -168,19 +222,19 @@ pub struct VsockMmio {
     our_fwd_cnt: u32,
     peer_credit: HashMap<u32, (u32, u32)>,
     tx_cnt: HashMap<u32, u32>,
-    seat: Option<UnixStream>,
+    seat: Option<Ausgang>,
     conn: Option<(u64, u32, u32)>,
-    llm: Option<UnixStream>,
+    llm: Option<Ausgang>,
     conn_llm: Option<(u64, u32, u32)>,
-    rfb: Option<UnixStream>,
+    rfb: Option<Ausgang>,
     conn_rfb: Option<(u64, u32, u32)>,
-    net: Option<UnixStream>,
+    net: Option<Ausgang>,
     conn_net: Option<(u64, u32, u32)>,
-    term: Option<UnixStream>,
+    term: Option<Ausgang>,
     conn_term: Option<(u64, u32, u32)>,
-    act: Option<UnixStream>,
+    act: Option<Ausgang>,
     conn_act: Option<(u64, u32, u32)>,
-    gui: Option<UnixStream>,
+    gui: Option<Ausgang>,
     conn_gui: Option<(u64, u32, u32)>,
 }
 
@@ -220,11 +274,11 @@ impl VsockMmio {
     }
 
     pub fn set_seat(&mut self, s: UnixStream) {
-        self.seat = Some(s);
+        self.seat = Some(Ausgang::neu(s, "seat"));
     }
 
     pub fn set_llm(&mut self, s: UnixStream) {
-        self.llm = Some(s);
+        self.llm = Some(Ausgang::neu(s, "llm"));
     }
 
     pub fn deliver_rx(&mut self, gm: &GuestMemoryMmap, data: &[u8]) {
@@ -242,7 +296,7 @@ impl VsockMmio {
     }
 
     pub fn set_rfb(&mut self, s: UnixStream) {
-        self.rfb = Some(s);
+        self.rfb = Some(Ausgang::neu(s, "rfb"));
     }
 
     pub fn deliver_rx_rfb(&mut self, gm: &GuestMemoryMmap, data: &[u8]) {
@@ -253,7 +307,7 @@ impl VsockMmio {
     }
 
     pub fn set_net(&mut self, s: UnixStream) {
-        self.net = Some(s);
+        self.net = Some(Ausgang::neu(s, "net"));
     }
 
     pub fn deliver_rx_net(&mut self, gm: &GuestMemoryMmap, data: &[u8]) {
@@ -264,7 +318,7 @@ impl VsockMmio {
     }
 
     pub fn set_term(&mut self, s: UnixStream) {
-        self.term = Some(s);
+        self.term = Some(Ausgang::neu(s, "term"));
     }
 
     pub fn deliver_rx_term(&mut self, gm: &GuestMemoryMmap, data: &[u8]) {
@@ -275,7 +329,7 @@ impl VsockMmio {
     }
 
     pub fn set_act(&mut self, s: UnixStream) {
-        self.act = Some(s);
+        self.act = Some(Ausgang::neu(s, "act"));
     }
 
     pub fn deliver_rx_act(&mut self, gm: &GuestMemoryMmap, data: &[u8]) {
@@ -286,7 +340,7 @@ impl VsockMmio {
     }
 
     pub fn set_gui(&mut self, s: UnixStream) {
-        self.gui = Some(s);
+        self.gui = Some(Ausgang::neu(s, "gui"));
     }
 
     pub fn deliver_rx_gui(&mut self, gm: &GuestMemoryMmap, data: &[u8]) {
@@ -459,54 +513,102 @@ impl VsockMmio {
                 let is_gui = matches!(self.conn_gui, Some((c, p, _)) if c == h.src_cid && p == h.src_port);
                 if is_llm {
 
-                    if let Some(llm) = self.llm.as_mut() {
-                        let _ = llm.write_all(payload);
-                        let _ = llm.flush();
+                    
+                    let weg = match self.llm.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.llm = None;
+                        self.conn_llm = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else if is_rfb {
 
-                    if let Some(rfb) = self.rfb.as_mut() {
-                        let _ = rfb.write_all(payload);
-                        let _ = rfb.flush();
+                    
+                    let weg = match self.rfb.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.rfb = None;
+                        self.conn_rfb = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else if is_net {
 
-                    if let Some(net) = self.net.as_mut() {
-                        let _ = net.write_all(payload);
-                        let _ = net.flush();
+                    
+                    let weg = match self.net.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.net = None;
+                        self.conn_net = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else if is_term {
 
-                    if let Some(term) = self.term.as_mut() {
-                        let _ = term.write_all(payload);
-                        let _ = term.flush();
+                    
+                    let weg = match self.term.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.term = None;
+                        self.conn_term = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else if is_act {
 
-                    if let Some(act) = self.act.as_mut() {
-                        let _ = act.write_all(payload);
-                        let _ = act.flush();
+                    
+                    let weg = match self.act.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.act = None;
+                        self.conn_act = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else if is_gui {
 
-                    if let Some(gui) = self.gui.as_mut() {
-                        let _ = gui.write_all(payload);
-                        let _ = gui.flush();
+                    
+                    let weg = match self.gui.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.gui = None;
+                        self.conn_gui = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else if self.seat.is_some() {
 
-                    if let Some(seat) = self.seat.as_mut() {
-                        let _ = seat.write_all(payload);
-                        let _ = seat.flush();
+                    
+                    let weg = match self.seat.as_mut() {
+                        Some(a) => !a.schreibe(payload),
+                        None => false,
+                    };
+                    if weg {
+                        self.seat = None;
+                        self.conn = None;
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_RST, &[]);
+                    } else {
+                        self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                     }
-
-                    self.push_pkt(h.src_cid, h.src_port, h.dst_port, OP_CREDIT_UPDATE, &[]);
                 } else {
 
                     let echo: Vec<u8> = payload.iter().map(|c| c.to_ascii_uppercase()).collect();

@@ -1,7 +1,5 @@
 
-
 earlyboot|oneshot|/usr/local/sbin/brainbox-earlyboot
-
 banner|sacred|/usr/local/sbin/brainbox-banner
 firstboot|oneshot|/usr/local/sbin/brainbox-firstboot.sh
 caps-detect|oneshot|/usr/local/sbin/brainbox-caps-detect
@@ -22,6 +20,6 @@ pn-llmd|sacred user=1000 envfile=/etc/brainbox/secrets.env env=PN_LLM_POOL=1 env
 brainbox-setup|sacred|/usr/local/sbin/brainbox-setup serve
 brainbox-portal|sacred user=1000 envfile=/etc/brainbox/secrets.env|/usr/bin/python3 /home/brainbox/.local/bin/brainbox-portal serve
 cron||/usr/sbin/cron -f
-wyoming-stt|batch user=1000|/home/brainbox/wyoming-venv/bin/python -m wyoming_faster_whisper --uri tcp://127.0.0.1:10300 --model small --language de --data-dir /home/brainbox/wyoming-data --download-dir /home/brainbox/wyoming-data
-wyoming-tts|batch user=1000|/home/brainbox/wyoming-venv/bin/python -m wyoming_piper --uri tcp://127.0.0.1:10200 --voice de_DE-thorsten-medium --data-dir /home/brainbox/wyoming-data --download-dir /home/brainbox/wyoming-data
+wyoming-stt|batch user=1000|/home/brainbox/wyoming-venv/bin/python -m wyoming_faster_whisper --uri tcp://0.0.0.0:10300 --model small --language de --data-dir /home/brainbox/wyoming-data --download-dir /home/brainbox/wyoming-data
+wyoming-tts|batch user=1000|/home/brainbox/wyoming-venv/bin/python -m wyoming_piper --uri tcp://0.0.0.0:10200 --voice de_DE-thorsten-medium --data-dir /home/brainbox/wyoming-data --download-dir /home/brainbox/wyoming-data
 pn-selftest|oneshot user=1000|/usr/bin/python3 /home/brainbox/.local/bin/pn-selftest --boot

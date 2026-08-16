@@ -229,6 +229,9 @@ class VoiceRoutes:
         except Exception:
             req = {}
         verb = str(req.get("verb") or "").strip()
+        _kan = getattr(portal_agent, "kanonisch", None) if portal_agent else None
+        if _kan:
+            verb = _kan(verb)
         args = req.get("args") or {}
         if not isinstance(args, dict):
             args = {}
@@ -252,6 +255,8 @@ class VoiceRoutes:
             return self._cer_json(self._agent_orchestrate(verb, args, uid))
         if verb in ("store_status", "store_onboard"):
             return self._cer_json(self._agent_store(verb, args, uid))
+        if verb in ("kits_status", "kits_add", "kits_remove"):
+            return self._agent_kits(verb, args, uid)
         if verb in ("ask_owner", "ask_owner_result"):
             return self._cer_json(self._agent_ask_owner(verb, args, uid))
 
@@ -516,6 +521,72 @@ class VoiceRoutes:
         res = _mf.broadcast(self._principal(), body.get("sids"), body.get("text"),
                             title=body.get("title"))
         return self._vext_json(res, 200 if res.get("ok") else 400)
+
+    def _agent_kits(self, verb, args, uid):
+        sid = re.sub(r"[^A-Za-z0-9_-]", "", (self.headers.get("X-Pn-Session-Sid", "") or ""))[:40]
+        if not sid:
+            return self._cer_json({"ok": False, "error": "no_session",
+                                   "spoken": "Nur eine Session kann ihre eigene Ausstattung "
+                                             "aendern."})
+        try:
+            from portal_session_svc import _sessprov_get as _pg
+            prov = _pg(uid, sid) or {}
+        except Exception as e:
+            return self._cer_json({"ok": False, "error": str(e),
+                                   "spoken": "Deine Ausstattung ist gerade nicht lesbar."})
+        dran = [str(k) for k in (prov.get("kits") or [])]
+
+        regal, karten = [], {}
+        try:
+            import pn_software_shelf as _shelf
+            for _kid in sorted((_shelf.catalog() or {}).get("kits") or {}):
+                if _shelf.kit_img(_kid):
+                    regal.append(_kid)
+            for _kid in regal:
+                _rec = (_shelf.card_get(_kid) or {}).get("manual") or {}
+                karten[_kid] = [p.get("name") for p in (_rec.get("programs") or [])][:24]
+        except Exception:
+            pass
+
+        try:
+            from portal_routes_session import KIT_DECKEL as _deckel
+        except Exception:
+            _deckel = 14
+
+        if verb == "kits_status":
+            return self._cer_json({"ok": True, "result": {
+                "dran": dran, "regal": regal, "programme": karten,
+                "deckel": _deckel, "frei": max(0, _deckel - len(dran)),
+                "hinweis": "kits_add/kits_remove starten deine Zelle neu. Fuer EIN Programm "
+                           "reicht apt-get — das braucht keinen Neustart."},
+                "spoken": "Du hast %d von %d Kisten." % (len(dran), _deckel)})
+
+        kit = str(args.get("kit") or args.get("name") or "").strip()
+        if not kit:
+            return self._cer_json({"ok": False, "error": "kit fehlt",
+                                   "spoken": "Welche Kiste denn?"})
+        if verb == "kits_add":
+            if kit in dran:
+                return self._cer_json({"ok": True, "result": {"dran": dran, "nichts_zu_tun": True},
+                                       "spoken": "Die haengt schon dran."})
+            if regal and kit not in regal:
+                return self._cer_json({"ok": False, "error": "unbekannte Kiste %r" % kit,
+                                       "result": {"regal": regal},
+                                       "spoken": "Die Kiste kenne ich nicht."})
+            if len(dran) >= _deckel:
+                return self._cer_json({"ok": False, "error": "kein Platz",
+                                       "result": {"dran": dran, "deckel": _deckel},
+                                       "spoken": "Alle Plaetze belegt — haeng erst eine ab."})
+            neu = dran + [kit]
+        else:
+            if kit not in dran:
+                return self._cer_json({"ok": True, "result": {"dran": dran, "nichts_zu_tun": True},
+                                       "spoken": "Die haengt gar nicht dran."})
+            neu = [k for k in dran if k != kit]
+
+        import json as _json
+        return self._api_session_provision(
+            _json.dumps({"sid": sid, "kits": neu, "restart": True}).encode(), uid_override=uid)
 
     def _agent_store(self, verb, args, uid):
 

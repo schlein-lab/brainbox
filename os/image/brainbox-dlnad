@@ -11,18 +11,6 @@ SVCUSER=$(stat -c %U "$SHARES" 2>/dev/null || echo brainbox)
 SVC_HOME=$(getent passwd "$SVCUSER" 2>/dev/null | cut -d: -f6)
 [ -n "$SVC_HOME" ] || SVC_HOME=$(eval echo "~$SVCUSER")
 
-CONF=/etc/brainbox/site.conf
-
-MEDIA_ON="$([ -r "$CONF" ] && sed -n 's/^MEDIA_SERVER_ENABLED=//p' "$CONF" | tail -1 | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ' || true)"
-if [ "$MEDIA_ON" != "1" ]; then
-  echo "[brainbox-dlnad] media server disabled via site.conf (MEDIA_SERVER_ENABLED=0)"; exit 0
-fi
-
-_bbx_profile="$(sed -n 's/^NET_PROFILE=//p' "$CONF" 2>/dev/null | tail -1 | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
-if [ "${_bbx_profile:-home}" = "managed" ]; then
-  echo "[brainbox-dlnad] Netzprofil 'managed' — DLNA bleibt aus (kein SSDP/HTTP-8200)."; exit 0
-fi
-
 DLNAD=""
 for c in "${PN_DLNAD:-}" "$SVC_HOME/brainarbeit/cockpit/server/pn_dlnad.py" /usr/local/lib/brainbox/pn_dlnad.py; do
   [ -n "$c" ] && [ -f "$c" ] && { DLNAD="$c"; break; }

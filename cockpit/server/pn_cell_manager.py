@@ -469,28 +469,15 @@ class CellManager:
             try:
                 _pfad = c._incell_active_jsonl()
                 beschaeftigt = bool(_pfad and c._incell_turn_busy(_pfad))
-                
                 c._busy_probe_blind_seit = 0.0
                 if beschaeftigt:
                     c.last = now
                     continue
             except Exception as e:
-                
-                
-                
-                
-                
-                
-                
                 seit = getattr(c, "_busy_probe_blind_seit", 0.0) or now
                 c._busy_probe_blind_seit = seit
                 if (now - seit) < BUSY_PROBE_GRACE_S:
                     continue
-                
-                
-                
-                
-                
                 if _vmm_brennt(c):
                     try:
                         c._log("Leerlauf: Sonde stumm seit %d s, aber der vmm "
@@ -623,14 +610,15 @@ def _portaltest():
 CPU_LEBENSZEICHEN_TICKS = int(os.environ.get("PN_CPU_LEBENSZEICHEN_TICKS", "30"))
 CPU_LEBENSZEICHEN_LUECKE_S = float(os.environ.get("PN_CPU_LEBENSZEICHEN_LUECKE_S", "0.6"))
 
+
 def _vmm_ticks(pid):
     try:
         with open("/proc/%d/stat" % int(pid), encoding="utf-8") as fh:
             teile = fh.read().rsplit(") ", 1)[-1].split()
-        
         return int(teile[11]) + int(teile[12])
     except Exception:
         return None
+
 
 def _vmm_brennt(cell):
     proc = getattr(cell, "proc", None)

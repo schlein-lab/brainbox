@@ -163,11 +163,11 @@ function attrs(n){var A=["title","placeholder","aria-label","alt"],i,v,r;
 for(i=0;i<A.length;i++){if(n.hasAttribute&&n.hasAttribute(A[i])){v=n.getAttribute(A[i]);r=tr(v);if(r!==null&&r!==v)n.setAttribute(A[i],r);}}
 if(n.nodeName==="INPUT"&&(n.type==="button"||n.type==="submit")&&n.value){r=tr(n.value);if(r!==null&&r!==n.value)n.value=r;}}
 function walk(n){if(n.nodeType===3){var r=tr(n.nodeValue);if(r!==null&&r!==n.nodeValue)n.nodeValue=r;return;}
-if(n.nodeType!==1||skip(n))return;attrs(n);for(var c=n.firstChild;c;c=c.nextSibling)walk(c);}
+if(n.nodeType!==1)return;attrs(n);if(skip(n))return;for(var c=n.firstChild;c;c=c.nextSibling)walk(c);}
 function start(){try{walk(document.body);}catch(e){}
 try{new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var mu=ms[i];
 if(mu.type==="characterData"){var t=mu.target;if(t.nodeType===3){var r=tr(t.nodeValue);if(r!==null&&r!==t.nodeValue)t.nodeValue=r;}}
-else if(mu.type==="attributes"){if(mu.target.nodeType===1&&!skip(mu.target))attrs(mu.target);}
+else if(mu.type==="attributes"){if(mu.target.nodeType===1)attrs(mu.target);}
 else{for(var j=0;j<mu.addedNodes.length;j++)walk(mu.addedNodes[j]);}}}).observe(document.body,
 {childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["title","placeholder","aria-label","alt","value"]});}catch(e){}}
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start);else start();

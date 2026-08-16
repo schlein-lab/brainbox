@@ -11,6 +11,7 @@ def archiviere(*_a, **_kw):
 
 def main():
     sys.stderr.write(
+        "Archivieren heisst nicht loeschen.\n"
         "portal_room_archive ist stillgelegt (01.08.2026): es loeschte Zell-Deltas und nannte das\n"
         "Archivieren. Zustaendig ist jetzt portal_archive — es verschiebt, loescht nie und deckt\n"
         "Portal, Medienserver und Telegram zugleich ab:\n"

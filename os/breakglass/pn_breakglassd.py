@@ -29,13 +29,9 @@ CHAT_TAIL_BYTES = 600_000
 STATIC_OK = {"xterm.js": "text/javascript", "xterm.css": "text/css",
              "addon-fit.js": "text/javascript"}
 
-CFG = {}          
-_throttle = {}    
-_global_fails = []  
+CFG = {}
+_throttle = {}
 _thr_lock = threading.Lock()
-
-GLOBAL_FAIL_WINDOW = 300   
-GLOBAL_FAIL_MAX = 20       
 
 def log(msg):
     line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
@@ -169,20 +165,6 @@ def throttle_ok(ip):
 def throttle_fail(ip):
     with _thr_lock:
         _throttle.setdefault(ip, []).append(time.time())
-
-def global_throttle_ok():
-    now = time.time()
-    with _thr_lock:
-        lst = [t for t in _global_fails if now - t < GLOBAL_FAIL_WINDOW]
-        _global_fails[:] = lst
-        if len(lst) < GLOBAL_FAIL_MAX:
-            return True, 0
-        retry = int(GLOBAL_FAIL_WINDOW - (now - min(lst))) + 1
-        return False, max(1, retry)
-
-def global_fail():
-    with _thr_lock:
-        _global_fails.append(time.time())
 
 def ws_accept_key(key):
     return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
@@ -1884,13 +1866,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not throttle_ok(ip):
             log("login THROTTLED ip=%s" % ip)
             return self._page(429, "zu viele Versuche — 5 Minuten warten", "text/plain")
- 
- 
-        g_ok, g_retry = global_throttle_ok()
-        if not g_ok:
-            log("login GLOBAL-THROTTLED ip=%s retry=%ds" % (ip, g_retry))
-            return self._page(429, "zu viele Fehlversuche insgesamt — bitte %d s warten" % g_retry,
-                              "text/plain", [("Retry-After", str(g_retry))])
         ln = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(min(ln, 4096)).decode("utf-8", "replace")
         tok = urllib.parse.parse_qs(body).get("token", [""])[0].strip()
@@ -1916,7 +1891,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 COOKIE, cookie_value(_cookie_secret()), "; Secure" if CFG["tls"] else "")
             return self._page(303, "", extra=[("Set-Cookie", ck), ("Location", "/")])
         throttle_fail(ip)
-        global_fail()
         log("login FAIL ip=%s" % ip)
         return self._page(401, LOGIN_HTML % {"title": CFG["title"], "token_file": CFG["token_file"],
                                              "err": "<div class=err>Zugang falsch.</div>"})

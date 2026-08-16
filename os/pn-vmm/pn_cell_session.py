@@ -793,6 +793,32 @@ class CellSession:
                 pass
             self.desk_bridge = None
         try:
+            import pn_cell_desk_bridge as _brg
+            pid = _brg.lebende_bruecke(self.cell)
+        except Exception:
+            pid = None
+        if pid:
+            try:
+                with open('/proc/%d/cmdline' % pid, 'rb') as f:
+                    cmd = f.read()
+            except OSError:
+                cmd = b''
+            if b'pn_cell_desk_bridge' in cmd and self.cell.encode() in cmd:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(30):
+                        if not os.path.exists('/proc/%d' % pid):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                    self._log('gui: verwaiste Bruecke %d beendet' % pid)
+                except OSError:
+                    pass
+            else:
+                self._log('gui: pid %d haelt das Bruecken-Schloss von %s, ist aber '
+                          'keine passende Bruecke — nicht angefasst' % (pid, self.cell))
+        try:
             os.unlink(self.gui_sock)
         except OSError:
             pass
@@ -1016,16 +1042,16 @@ class CellSession:
             if AGENTS_RT_IMG not in self.extra_blk:
                 self.extra_blk.append(AGENTS_RT_IMG)
         self._kit_mounts = []
+        _kit_imgs = []
         try:
             import pn_software_shelf as _shelf
             for _kid in (self.policy or {}).get('kits') or []:
                 _img = _shelf.kit_img(_kid)
                 if _img and os.path.exists(_img) and (_img not in self.extra_blk):
-                    _dev = 'vd' + chr(ord('c') + len(self.extra_blk))
                     self.extra_blk.append(_img)
-                    self._kit_mounts.append((_kid, _dev))
+                    _kit_imgs.append((_kid, _img))
         except Exception:
-            self._kit_mounts = []
+            _kit_imgs = []
         desktop = bool((self.policy or {}).get('desktop'))
         if desktop and (not os.path.exists(OFFICE_BASE)):
             self._boot_denied = 'Das Office-Image fehlt auf dieser Box (kernel/%s) — der Desktop kann nicht aktiviert werden.' % os.path.basename(OFFICE_BASE)
@@ -1037,6 +1063,14 @@ class CellSession:
             _prep_work(self.work, (self.policy or {}).get('work_gb'))
             rw_extra.append(self.work)
         blks = [OFFICE_BASE if desktop else BASE, self.delta] + rw_extra + list(self.extra_blk)
+        self._kit_mounts = []
+        for _kid, _img in _kit_imgs:
+            _i = blks.index(_img)
+            if _i > 25:
+                self._log('kit %s: Platte %d hat keinen einfachen Buchstaben mehr -- ausgelassen'
+                          % (_kid, _i))
+                continue
+            self._kit_mounts.append((_kid, 'vd' + chr(ord('a') + _i)))
         env['PN_VMM_BLK'] = ','.join(blks)
         env['PN_VMM_BLK_RO'] = ','.join(['0'] + [str(i) for i in range(2 + len(rw_extra), len(blks))])
         if desktop:
@@ -1599,7 +1633,18 @@ class CellSession:
     def _setup_kits(self):
         for kid, dev in getattr(self, '_kit_mounts', None) or []:
             mp = '/opt/kits/' + kid
-            self._run('busybox mkdir -p %s && busybox mount -o ro /dev/%s %s 2>/dev/null; if [ -d %s/lib ]; then busybox mkdir -p /usr/lib /lib; busybox cp -a %s/lib/. /usr/lib/ 2>/dev/null; busybox cp -a %s/lib/. /lib/ 2>/dev/null; fi; echo KIT_MNT %s=$(busybox ls %s/bin 2>/dev/null | busybox wc -w); echo __KM__' % (mp, dev, mp, mp, mp, mp, kid, mp), '__KM__', 25)
+            ok, out = self._run('busybox mkdir -p %s && busybox mount -o ro /dev/%s %s 2>&1; if [ -d %s/lib ]; then busybox mkdir -p /usr/lib /lib; busybox cp -a %s/lib/. /usr/lib/ 2>/dev/null; busybox cp -a %s/lib/. /lib/ 2>/dev/null; fi; echo KIT_MNT %s=$(busybox ls %s/bin %s/env/bin 2>/dev/null | busybox wc -w); echo __KM__' % (mp, dev, mp, mp, mp, mp, kid, mp, mp), '__KM__', 25)
+            n = -1
+            for _ln in (out or '').replace('\r', '\n').splitlines():
+                if _ln.startswith('KIT_MNT %s=' % kid):
+                    try:
+                        n = int(_ln.split('=', 1)[1].strip() or '0')
+                    except ValueError:
+                        n = -1
+            if n <= 0:
+                self._log('kit %s auf /dev/%s: KEIN Programm unter %s/bin -- Kiste leer oder '
+                          'nicht gemountet (%s)' % (kid, dev, mp,
+                                                    ' '.join((out or '').split())[:160]))
         self._stage_kit_cards()
 
     def _stage_kit_cards(self):

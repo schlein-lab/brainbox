@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import json, os, signal, socket, struct, sys, threading, time
+import fcntl, json, os, select, signal, socket, struct, sys, threading, time
 
 DATA = os.environ.get("PHANTOM_PORTAL_DATA",
                       os.path.expanduser("~/.local/share/brainbox-portal"))
@@ -12,9 +12,58 @@ geom = {"w": 0, "h": 0}
 fb_lock = threading.Lock()
 cell_wlock = threading.Lock()
 _forward_sock = [None]
+_lock_fd = [None]
 
 def log(m):
     print("[desk-bridge] %s" % m, flush=True)
+
+def _lock_pfad(ref, daten=None):
+    return os.path.join(daten or DATA, "vmcells", "%s.lock" % ref)
+
+def einzelinstanz(ref):
+    p = _lock_pfad(ref)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+    frist = time.time() + 5.0
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= frist:
+                halter = "?"
+                try:
+                    halter = open(p).read().strip() or "?"
+                except OSError:
+                    pass
+                os.close(fd)
+                return None, halter
+            time.sleep(0.2)
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    os.fsync(fd)
+    _lock_fd[0] = fd
+    return fd, None
+
+def lebende_bruecke(ref, daten=None):
+    p = _lock_pfad(ref, daten)
+    try:
+        fd = os.open(p, os.O_RDWR)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                pid = int(open(p).read().strip() or "0")
+            except (OSError, ValueError):
+                return None
+            return pid or None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
 
 def recvn(s, n):
     b = b""
@@ -60,25 +109,56 @@ def _blit_copyrect(x, y, w, h, sx, sy):
         s = ((sy + r) * W + sx) * 4
         fb[d:d + rowb] = fb[s:s + rowb]
 
+def _nebennachricht(cell, mt):
+    if mt == 1:
+        recvn(cell, 3)
+        ncol = struct.unpack(">H", recvn(cell, 2))[0]
+        recvn(cell, ncol * 6)
+    elif mt == 2:
+        pass
+    elif mt == 3:
+        recvn(cell, 3)
+        ln = struct.unpack(">I", recvn(cell, 4))[0]
+        recvn(cell, ln)
+    else:
+        return False
+    return True
+
+def _leerlauf_horchen(cell):
+    r, _, _ = select.select([cell], [], [], 0.2)
+    if not r:
+        return
+    b = cell.recv(1)
+    if not b:
+        raise EOFError("Zelle hat die Bahn geschlossen")
+    if not _nebennachricht(cell, b[0]):
+        raise EOFError("unbekannter Nachrichtentyp %d im Leerlauf" % b[0])
+
 def grabber(cell):
     W, H = geom["w"], geom["h"]
 
     def req(inc):
         with cell_wlock:
             cell.sendall(struct.pack(">BBHHHH", 3, inc, 0, 0, W, H))
+    offen = [False]
     try:
         while not state["stop"]:
-            if state["viewers"] <= 0:
+            if state["viewers"] <= 0 and not offen[0]:
                 state["need_full"] = True
-                time.sleep(0.2); continue
-            inc = 0 if state["need_full"] else 1
-            state["need_full"] = False
-            req(inc)
-            mt, _pad, nrect = struct.unpack(">BBH", recvn(cell, 4))
-            if mt != 0:
-                if mt == 1:
-                    recvn(cell, 3); ncol = struct.unpack(">H", recvn(cell, 4)[2:4])[0]; recvn(cell, ncol * 6)
+                _leerlauf_horchen(cell)
                 continue
+            if not offen[0]:
+                inc = 0 if state["need_full"] else 1
+                state["need_full"] = False
+                req(inc)
+                offen[0] = True
+            mt = recvn(cell, 1)[0]
+            if mt != 0:
+                if not _nebennachricht(cell, mt):
+                    raise EOFError("unbekannter Nachrichtentyp %d" % mt)
+                continue
+            recvn(cell, 1)
+            nrect = struct.unpack(">H", recvn(cell, 2))[0]
             for _ in range(nrect):
                 x, y, w, h, enc = struct.unpack(">HHHHi", recvn(cell, 12))
                 if enc == 0:
@@ -93,6 +173,7 @@ def grabber(cell):
                     log("grabber: unbekanntes Encoding %d" % enc)
                     state["need_full"] = True
                     raise EOFError("enc %d" % enc)
+            offen[0] = False
             with fb_lock:
                 latest["seq"] += 1
             time.sleep(1.0 / 12)
@@ -105,7 +186,8 @@ def forward_to_cell(data):
         with cell_wlock:
             _forward_sock[0].sendall(data)
     except Exception as e:
-        log("forward fail: %r" % (e,))
+        log("forward fail: %r — Bruecke endet." % (e,))
+        state["stop"] = True
 
 def viewer_conn(c):
     W, H = geom["w"], geom["h"]
@@ -160,29 +242,42 @@ def viewer_conn(c):
         except OSError:
             pass
 
-def register(ref, sock_path, name):
+def _reg_aendern(aender):
     os.makedirs(os.path.dirname(REG), exist_ok=True)
+    lf = os.open(REG + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        d = json.load(open(REG))
-    except (OSError, ValueError):
-        d = {}
-    d[ref] = {"sock": sock_path, "name": name, "w": geom["w"], "h": geom["h"],
-              "pid": os.getpid(), "kind": "desk"}
-    tmp = REG + ".tmp.%d" % os.getpid()
-    json.dump(d, open(tmp, "w"), indent=2)
-    os.replace(tmp, REG)
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            d = json.load(open(REG))
+        except (OSError, ValueError):
+            d = {}
+        for k in list(d):
+            pid = d[k].get("pid") or 0
+            try:
+                with open("/proc/%d/cmdline" % pid, "rb") as f:
+                    lebt = b"pn_cell_desk_bridge" in f.read()
+            except (OSError, ValueError):
+                lebt = False
+            if not lebt:
+                d.pop(k)
+        aender(d)
+        tmp = REG + ".tmp.%d" % os.getpid()
+        json.dump(d, open(tmp, "w"), indent=2)
+        os.replace(tmp, REG)
+    finally:
+        os.close(lf)
+
+def register(ref, sock_path, name):
+    def _rein(d):
+        d[ref] = {"sock": sock_path, "name": name, "w": geom["w"], "h": geom["h"],
+                  "pid": os.getpid(), "kind": "desk"}
+    _reg_aendern(_rein)
     log("registriert: %s -> %s" % (ref, sock_path))
 
 def unregister(ref):
     try:
-        d = json.load(open(REG))
-        if ref not in d:
-            return
-        d.pop(ref, None)
-        tmp = REG + ".tmp.%d" % os.getpid()
-        json.dump(d, open(tmp, "w"), indent=2)
-        os.replace(tmp, REG)
-    except (OSError, ValueError):
+        _reg_aendern(lambda d: d.pop(ref, None))
+    except OSError:
         pass
 
 def main():
@@ -192,6 +287,12 @@ def main():
     ap.add_argument("--ref", required=True, help="Zellen-Referenz (vmcells.json Key, /ws/vnc?cell=)")
     ap.add_argument("--name", default="Desktop", help="Anzeigename im Cell-Picker")
     a = ap.parse_args()
+
+    fd, halter = einzelinstanz(a.ref)
+    if fd is None:
+        log("Bruecke fuer %s laeuft schon (pid %s) — kein zweiter Start, nichts gestohlen."
+            % (a.ref, halter))
+        return 0
 
     view_p = os.path.join(DATA, "vmcells", "%s.sock" % a.ref)
     for p in (a.lane, view_p):

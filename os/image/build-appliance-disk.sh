@@ -51,8 +51,7 @@ parted -s "$OUT_RAW" set 1 boot on
 LOOP="$(losetup --show -fP "$OUT_RAW")"
 PART="${LOOP}p1"; [ -e "$PART" ] || PART="${LOOP}1"
 [ -e "$PART" ] || { echo "partition device not found for $LOOP"; ls -l "${LOOP}"*; exit 1; }
-
-mkfs.ext4 -q -F -O '^orphan_file,^metadata_csum_seed' -L BBXROOT "$PART"
+mkfs.ext4 -q -F -L BBXROOT "$PART"
 mount "$PART" "$MNT"
 ROOT_UUID="$(blkid -s UUID -o value "$PART")"
 echo "  root partition=$PART uuid=$ROOT_UUID"
@@ -109,12 +108,25 @@ if [ "$MEDIA_SERVER" = "1" ]; then
     chr sh -c "command -v $b >/dev/null" \
       || { echo "FATAL: media-server binary '$b' missing after apt (see /tmp/bbx-apt.log); set MEDIA_SERVER=0 to opt out"; exit 1; }
   done
- 
- 
- 
- 
- 
-  say "   samba verified (LAN media server present, OFF until the owner enables it in wizard/settings)"
+  mkdir -p "$MNT/etc/avahi/services"
+  cat > "$MNT/etc/avahi/services/smb.service" <<'AVAHI'
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Brainbox media server: makes the box appear as a file server in macOS Finder + Linux Nautilus/GVfs -->
+<service-group>
+  <name replace-wildcards="yes">Brainbox Medienserver auf %h</name>
+  <service>
+    <type>_smb._tcp</type>
+    <port>445</port>
+  </service>
+  <service>
+    <type>_device-info._tcp</type>
+    <port>0</port>
+    <txt-record>model=RackMount</txt-record>
+  </service>
+</service-group>
+AVAHI
+  say "   samba verified + _smb._tcp advertised (LAN media server: smbd/nmbd present)"
 else
   say "   MEDIA_SERVER=0 — building WITHOUT the LAN file server (brainbox-smbd will no-op)"
 fi
@@ -213,7 +225,6 @@ chmod 600 "$MNT/etc/netplan/50-brainbox.yaml"
 
 install -d -m 0755 "$MNT/usr/share/udhcpc"
 cat > "$MNT/usr/share/udhcpc/default.script" <<'EOF'
-#!/bin/sh
 [ -n "$1" ] || exit 1
 case "$1" in
   deconfig) ip addr flush dev "$interface" 2>/dev/null ;;
@@ -250,8 +261,6 @@ install -m 0755 "$REPO_SRC/cockpit/server/pn-shutdown" "$MNT/usr/local/sbin/pn-s
 install -m 0755 "$REPO_SRC/os/image/brainbox-firewall" "$MNT/usr/local/sbin/brainbox-firewall"
 install -d -m 0750 "$MNT/etc/sudoers.d"
 cat > "$MNT/etc/sudoers.d/brainbox-shutdown" <<EOF
-# The portal (running as $SERVICE_USER) may power off / reboot the box ONLY via the root-owned
-# helper at this fixed path (approval-ceremony gated in the portal; helper is root-installed).
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/pn-shutdown
 EOF
 chmod 0440 "$MNT/etc/sudoers.d/brainbox-shutdown"
@@ -447,8 +456,7 @@ chr pip3 install --break-system-packages --no-input --quiet \
 
 say "6b-cast. celltv-venv (pychromecast + pyte + pillow) for Spiegeln/seatcast"
 chr python3 -m venv "$SVC_HOME/.local/share/celltv-venv" >>/tmp/bbx-pip.log 2>&1   && chr "$SVC_HOME/.local/share/celltv-venv/bin/pip" install --no-input --quiet        pychromecast pyte pillow >>/tmp/bbx-pip.log 2>&1   || echo "  WARN: celltv-venv build failed (see /tmp/bbx-pip.log) — Spiegeln will answer with an honest German error instead of casting"
-
-chr chown -R "$SERVICE_USER:$SERVICE_USER" "$SVC_HOME/.local/share" 2>/dev/null || true
+chr chown -R "$SERVICE_USER:$SERVICE_USER" "$SVC_HOME/.local/share/celltv-venv" 2>/dev/null || true
 
 say "7. /etc/brainbox (service.env, site.conf, caps.env, is-appliance) + firstboot + wizard"
 install -d -m 0755 "$MNT/etc/brainbox" "$MNT/var/lib/brainbox"
@@ -465,10 +473,6 @@ SERVICE_HOME=$SVC_HOME
 SERVICE_UID=$SERVICE_UID
 HA_ENABLED=0
 CELLS_ENABLED=0
-# 'managed' = guter Gast: kein mDNS/SSDP-Multicast, kein aktiver LAN-Scan, kein Medienserver.
-# Der Assistent bietet 'Heimnetz' an und schaltet dann frei. Bewusst diese Richtung: eine Box, die
-# erst laut ist und leise gestellt werden MUSS, hat in einem Firmennetz bereits gelaermt (NetBIOS-
-# Broadcasts, SSDP, /24-Sweep = IDS-Alarm), bevor der Besitzer die Einstellung ueberhaupt findet.
 NET_PROFILE=managed
 TEAMS_ENABLED=0
 RELAY_ENABLED=0
@@ -480,12 +484,6 @@ EOF
 echo "CELLS_ENABLED=0" > "$MNT/etc/brainbox/caps.env"
 
 cat > "$MNT/etc/brainbox/pnd.env" <<'EOF'
-# pnd tuning — read at service exec time (pn-init envfile=). All optional: unset keys let pnd
-# auto-tune to this box's hardware. See engine/tools/pnd for the full catalogue.
-#PN_BATCH_HIGH=
-#PN_MEM_FLOOR=
-#PN_MAX_CONCURRENT=
-#PN_INTERACTIVE_RESERVE=
 EOF
 
 [ -f "$REPO_SRC/os/image/brainbox-caps-detect" ] || {
@@ -536,8 +534,6 @@ elif [ "${ALLOW_PLACEHOLDER_WIZARD:-0}" != 1 ]; then
   exit 1
 else
   cat > "$MNT/usr/local/sbin/brainbox-setup" <<'PYEOF'
-#!/usr/bin/python3
-# placeholder setup wizard — proves boot+network+web; replaced by the real brainbox-setup.
 import http.server, socketserver, os
 PORT = 80 if os.geteuid()==0 else 8099
 class H(http.server.BaseHTTPRequestHandler):
@@ -554,16 +550,7 @@ fi
 
 say "8. /etc/pn-init.conf (boot chain, user=$SERVICE_UID home=$SVC_HOME)"
 cat > "$MNT/etc/pn-init.conf" <<EOF
-# Brainbox appliance boot chain — pn-init is PID1. Format: name|flags|argv
-# (Adapted from os/image/pn-init.conf.pi; VM/x86 console=ttyS0, cells auto-detected per boot.)
-# earlyboot FIRST: hostname + kvm/tun/uinput modules + device-node permissions. Nothing else
-# autoloads modules or applies udev rules under pn-init, and caps-detect below probes /dev/kvm.
 earlyboot|oneshot|/usr/local/sbin/brainbox-earlyboot
-
-# knappe Minute (Dateisystem vergroessern, Schluessel erzeugen, CA anlegen), und in dieser
-# Minute stand bisher NICHTS auf dem Bildschirm, was ein Mensch lesen konnte. Der Banner
-# zeigt dort jetzt den laufenden Schritt aus /run/brainbox/boot-status samt Laufzeit und
-# einem Zeiger, der sich dreht -- ein stehender Zeiger heisst Haenger, ein laufender Arbeit.
 banner|sacred|/usr/local/sbin/brainbox-banner
 firstboot|oneshot|/usr/local/sbin/brainbox-firstboot.sh
 caps-detect|oneshot|/usr/local/sbin/brainbox-caps-detect
@@ -595,20 +582,11 @@ say "9. install GRUB (BIOS) to the disk MBR + write grub.cfg"
 KVER="$(ls "$MNT/boot" | sed -n 's/^vmlinuz-//p' | sort -V | tail -1)"
 [ -n "$KVER" ] || { echo "no kernel in image /boot"; ls -l "$MNT/boot"; exit 1; }
 echo "  kernel: $KVER"
-
-grub-install --target=i386-pc --directory=/usr/lib/grub/i386-pc \
-  --boot-directory="$MNT/boot" --no-floppy \
+grub-install --target=i386-pc --boot-directory="$MNT/boot" \
   --modules="part_msdos ext2 biosdisk" "$LOOP" >/tmp/bbx-grub.log 2>&1 \
   || { echo "grub-install FAILED"; tail -30 /tmp/bbx-grub.log; exit 1; }
-
-cmp -s "$MNT/boot/grub/i386-pc/ext2.mod" /usr/lib/grub/i386-pc/ext2.mod \
-  || { echo "FATAL: /boot/grub i386-pc modules differ from grub-install source (GRUB version skew) — image would grub-rescue"; exit 1; }
-
 CMD_COMMON="root=UUID=$ROOT_UUID ro console=tty0 console=ttyS0,115200 fsck.repair=yes loglevel=4"
 cat > "$MNT/boot/grub/grub.cfg" <<EOF
-# Normal boot goes straight into entry 0 with NO visible menu — nothing for a
-# user to click around in. The recovery/rescue entries below stay in the file as
-# safety nets, reachable by holding SHIFT (BIOS) / pressing ESC during boot.
 set default=0
 set timeout_style=hidden
 set timeout=0
@@ -617,8 +595,6 @@ terminal_input console serial
 terminal_output console serial
 
 menuentry "Brainbox (pn-init)" {
-
-    # Reines ASCII -- die GRUB-Schrift kennt weder Umlaute noch Gedankenstriche.
     echo ''
     echo '  Brainbox startet ...  /  starting ...'
     echo '  Der erste Start dauert ein bis drei Minuten.'

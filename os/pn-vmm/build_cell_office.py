@@ -7,7 +7,7 @@ SESS = "kernel/_ownersession"; OFFICE = "kernel/_office"
 
 IMG = os.environ.get("PN_OFFICE_IMG", "kernel/base-office.img"); SIZE = "1280M"
 
-MULTI = "/usr/lib/x86_64-linux-gnu"
+MULTI = "/usr/lib/%s-linux-gnu" % os.uname().machine
 BINS = ["/usr/bin/Xvfb", "/usr/bin/x11vnc", "/usr/bin/xkbcomp", "/usr/bin/setxkbmap",
         "/usr/bin/openbox", "/usr/bin/xterm", "/usr/bin/flatpak", "/usr/bin/bwrap",
         "/usr/bin/xdg-dbus-proxy", "/usr/bin/gpg", "/usr/bin/gpgconf", "/usr/bin/glxinfo",
@@ -30,10 +30,10 @@ TREES = [
     ("/usr/share/themes/Clearlooks", "usr/share/themes/Clearlooks"),
     ("/usr/share/themes/Onyx", "usr/share/themes/Onyx"),
     ("/etc/X11/app-defaults", "etc/X11/app-defaults"),
-    (f"{MULTI}/gdk-pixbuf-2.0", "usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0"),
-    (f"{MULTI}/imlib2", "usr/lib/x86_64-linux-gnu/imlib2"),
-    (f"{MULTI}/gio/modules", "usr/lib/x86_64-linux-gnu/gio/modules"),
-    (f"{MULTI}/dri", "usr/lib/x86_64-linux-gnu/dri"),
+    (f"{MULTI}/gdk-pixbuf-2.0", MULTI.lstrip("/") + "/gdk-pixbuf-2.0"),
+    (f"{MULTI}/imlib2", MULTI.lstrip("/") + "/imlib2"),
+    (f"{MULTI}/gio/modules", MULTI.lstrip("/") + "/gio/modules"),
+    (f"{MULTI}/dri", MULTI.lstrip("/") + "/dri"),
     ("/usr/share/glvnd", "usr/share/glvnd"),
     ("/usr/share/flatpak", "usr/share/flatpak"),
     ("/usr/lib/jgmenu", "usr/lib/jgmenu"),

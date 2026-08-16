@@ -1,3 +1,4 @@
+
 import os, sys, json, secrets, subprocess, threading, time
 import re, html, hashlib
 import urllib.parse, urllib.request
@@ -732,89 +733,6 @@ class AdminRoutes:
                                     "ram": _ra.snapshot()})
         except Exception as e:
             return self._sess_json({"ok": False, "error": str(e)}, 500)
-
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
-    _FEATURE_FLAGS = ("MEDIA_SERVER_ENABLED", "RELAY_ENABLED", "VOICE_ENABLED",
-                      "CELLS_ENABLED")
-
-    def _feature_flag_values(self):
-        vals = {}
-        try:
-            with open("/etc/brainbox/site.conf", encoding="utf-8", errors="replace") as f:
-                for ln in f:
-                    ln = ln.strip()
-                    if "=" in ln and not ln.startswith("#"):
-                        k, _, v = ln.partition("=")
-                        if k in self._FEATURE_FLAGS:
-                            vals[k] = v.split("#")[0].strip().strip("\"'")
-        except OSError:
-            pass
-        return vals
-
-    @staticmethod
-    def _local_port_open(port):
-        import socket as _s
-        try:
-            with _s.create_connection(("127.0.0.1", int(port)), timeout=0.4):
-                return True
-        except OSError:
-            return False
-
-    def _api_admin_features(self):
-        if not self._is_admin():
-            return self._sess_json({"ok": False, "error": "nur Owner/Admin"}, 403)
-        vals = self._feature_flag_values()
-        return self._sess_json({
-            "ok": True,
-            "flags": {k: (vals.get(k) == "1") for k in self._FEATURE_FLAGS},
-            "media": {"smb": self._local_port_open(445),
-                      "dlna": self._local_port_open(8200),
-                      "advert": os.path.exists("/etc/avahi/services/smb.service")},
-        })
-
-    def _api_admin_features_set(self, raw):
-        if not self._is_admin():
-            return self._sess_json({"ok": False, "error": "nur Owner/Admin"}, 403)
-        try:
-            body = json.loads(raw or b"{}")
-        except Exception:
-            return self._sess_json({"ok": False, "error": "bad json"}, 400)
-        key = str(body.get("key") or "")
-        if key not in self._FEATURE_FLAGS:
-            return self._sess_json({"ok": False, "error": "unbekannter Schalter"}, 400)
-        want = 1 if body.get("enabled") else 0
-        helper = "/usr/local/sbin/pn-mediashare-provision"
-        if key == "MEDIA_SERVER_ENABLED":
-            argv = [helper, "media", "on" if want else "off"]
-        else:
-            argv = [helper, "setflag", key, str(want)]
-        if os.geteuid() != 0:
-            argv = ["sudo", "-n"] + argv
-        try:
-            r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                               text=True, timeout=60)
-        except Exception as e:
-            return self._sess_json({"ok": False, "error": "Helfer nicht erreichbar: %s" % e}, 500)
-        if r.returncode != 0:
-            return self._sess_json({"ok": False, "error":
-                                    (r.stderr or r.stdout or "Helfer meldet Fehler").strip()[:300]}, 500)
-        try:
-            _prov_log("features.set", self._principal(), key, {"enabled": want})
-        except Exception:
-            pass
-        return self._api_admin_features()
 
     def _settings_page(self):
         p = os.path.join(os.path.dirname(os.path.realpath(__file__)), "settings.html")

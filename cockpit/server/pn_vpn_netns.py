@@ -818,7 +818,7 @@ class Inst:
         r["refs"] = 0; r["detached"] = True
         return r
 
-SSH_KEY_PASS_SECRET = "hpc_key_pass"
+SSH_KEY_PASS_SECRET = _site_get("HPC_KEY_SECRET", "hpc_key_pass")
 SSH_ASKPASS = "/tmp/.pnvpn-hkey-ap.sh"
 
 def find_live_netns(uid, vpn):
@@ -833,6 +833,17 @@ def find_live_netns(uid, vpn):
 
     live.sort(key=lambda n: (0 if n.endswith("-acct") else (1 if n.endswith("-default") else 2), n))
     return live[0]
+
+def _passphrase_vorhanden():
+    try:
+        pr = subprocess.run(["runuser", "-u", _OWNER, "--",
+                             os.path.join(_OWNER_HOME, ".local/bin/phantom"),
+                             "secret", "get", SSH_KEY_PASS_SECRET],
+                            capture_output=True, text=True, timeout=20)
+        return bool((pr.stdout or "").strip())
+    except Exception:
+        return True
+
 
 def hssh(uid, vpn, target, cmd_b64, session=None, timeout=90):
 
@@ -862,6 +873,12 @@ def hssh(uid, vpn, target, cmd_b64, session=None, timeout=90):
     out = (pr.stdout or "").strip()
     if pr.returncode != 0 and not out:
         out = (pr.stderr or "").strip()[-1500:]
+    if pr.returncode != 0 and "publickey" in out.lower() and not _passphrase_vorhanden():
+        out = ("Der Tunnel steht und der Rechner ist erreichbar - es fehlt die SSH-Passphrase.\n"
+               "Im Tresor gibt es nichts unter dem Namen %r. Ohne sie kann ssh den Schluessel "
+               "nicht oeffnen und meldet nur 'Permission denied (publickey)'.\n"
+               "Richtigen Namen als HPC_KEY_SECRET in /etc/brainbox/site.conf eintragen.\n\n%s"
+               % (SSH_KEY_PASS_SECRET, out))
     return {"rc": pr.returncode, "out": out[-8000:], "ns": ns, "target": target or HPC_SSH_TARGET, "connected": True}
 
 def main():

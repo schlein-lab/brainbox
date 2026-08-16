@@ -32,9 +32,31 @@ def _call(path, payload=None):
 
 def main(argv):
     if not argv:
-        sys.stderr.write("usage: portalctl state | portalctl <verb> '<json-args>'\n")
+        sys.stderr.write(
+            "usage: portalctl state | portalctl <verb> '<json-args>'\n"
+            "       portalctl kits                 was ist dran, was liegt im Regal\n"
+            "       portalctl kit-add <name>       Kiste anhaengen (Zelle startet neu)\n"
+            "       portalctl kit-remove <name>    Kiste abhaengen (Zelle startet neu)\n")
         return 2
     verb = argv[0]
+
+    _kurz = {"kits": "kits_status", "kisten": "kits_status",
+             "kit-add": "kits_add", "kit-remove": "kits_remove"}
+    if verb in _kurz:
+        args = {}
+        if verb != "kits" and verb != "kisten":
+            if len(argv) < 2 or not argv[1].strip():
+                sys.stderr.write("usage: portalctl %s <name>\n" % verb)
+                return 2
+            args = {"kit": argv[1].strip()}
+        try:
+            out = _call("/api/agent/exec", {"verb": _kurz[verb], "args": args})
+        except Exception as e:
+            sys.stderr.write("error: %s\n" % e)
+            return 1
+        sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
+        return 0 if out.get("ok") else 1
+
     if verb in ("state", "--state", "-s"):
         try:
             st = _call("/api/agent/state")

@@ -81,13 +81,12 @@ class CellLaufzeitenMixin:
         except OSError as e:
             self._log("codex: auth-Quelle nicht lesbar (%s)" % e)
             return
-        self._run("printf %%s '%s' | base64 -d > /root/.codex/auth.json && "
-                  "busybox chmod 600 /root/.codex/auth.json && echo __PS__" % ab64, "__PS__", 12)
+        self._stage_atomar("/root/.codex/auth.json", ab64, "__PS__", 12,
+                           "busybox chmod 600 /root/.codex/auth.json")
         self._log("codex: auth.json injiziert aus %s (RAM-tmpfs, chmod 600)" % src)
 
         cfgb = base64.b64encode(b'[projects."/root"]\ntrust_level = "trusted"\n').decode()
-        self._run("printf %%s '%s' | base64 -d > /root/.codex/config.toml && echo __PS__"
-                  % cfgb, "__PS__", 10)
+        self._stage_atomar("/root/.codex/config.toml", cfgb, "__PS__", 10)
 
     def _codex_runnable(self):
 
@@ -127,12 +126,23 @@ class CellLaufzeitenMixin:
         for kid, dev in (getattr(self, "_kit_mounts", None) or []):
             mp = "/opt/kits/" + kid
 
-            self._run("busybox mkdir -p %s && busybox mount -o ro /dev/%s %s 2>/dev/null; "
+            ok, out = self._run("busybox mkdir -p %s && busybox mount -o ro /dev/%s %s 2>&1; "
                       "if [ -d %s/lib ]; then busybox mkdir -p /usr/lib /lib; "
                       "busybox cp -a %s/lib/. /usr/lib/ 2>/dev/null; "
                       "busybox cp -a %s/lib/. /lib/ 2>/dev/null; fi; "
-                      "echo KIT_MNT %s=$(busybox ls %s/bin 2>/dev/null | busybox wc -w); echo __KM__"
-                      % (mp, dev, mp, mp, mp, mp, kid, mp), "__KM__", 25)
+                      "echo KIT_MNT %s=$(busybox ls %s/bin %s/env/bin 2>/dev/null | busybox wc -w); echo __KM__"
+                      % (mp, dev, mp, mp, mp, mp, kid, mp, mp), "__KM__", 25)
+            n = -1
+            for _ln in (out or "").replace("\r", "\n").splitlines():
+                if _ln.startswith("KIT_MNT %s=" % kid):
+                    try:
+                        n = int(_ln.split("=", 1)[1].strip() or "0")
+                    except ValueError:
+                        n = -1
+            if n <= 0:
+                self._log("kit %s auf /dev/%s: nichts unter %s/bin oder %s/env/bin — Kiste leer "
+                          "oder nicht gemountet (%s)"
+                          % (kid, dev, mp, mp, " ".join((out or "").split())[:160]))
         self._stage_kit_cards()
 
     def _stage_kit_cards(self):
@@ -172,10 +182,11 @@ class CellLaufzeitenMixin:
                 body = "\n".join(C)
                 b64 = base64.b64encode(body.encode()).decode()
                 fn = "KITS/%s.md" % kid.replace("/", "_")
-                self._run("busybox mkdir -p /root/KITS 2>/dev/null; printf %%s '%s' | base64 -d > /root/%s; "
-                          "busybox grep -q '@%s' /root/CLAUDE.md 2>/dev/null || "
-                          "printf '\\n@%s\\n' >> /root/CLAUDE.md; echo __KC__"
-                          % (b64, fn, fn, fn), "__KC__", 12)
+                self._run("busybox mkdir -p /root/KITS 2>/dev/null; echo __KC__",
+                          "__KC__", 8)
+                self._stage_atomar("/root/%s" % fn, b64, "__KC__", 12,
+                                   "busybox grep -q '@%s' /root/CLAUDE.md 2>/dev/null || "
+                                   "printf '\\n@%s\\n' >> /root/CLAUDE.md" % (fn, fn))
                 self._log("kit-cards: %s (%d Programme) in die Zelle gestaged" % (kid, n))
             except Exception as e:
                 self._log("kit-cards %s: %s" % (kid, e))
@@ -208,8 +219,8 @@ class CellLaufzeitenMixin:
                     b64 = base64.b64encode(f.read()).decode()
             except OSError:
                 continue
-            self._run("printf %%s '%s' | base64 -d > /root/.gemini/%s && "
-                      "busybox chmod 600 /root/.gemini/%s && echo __PS__" % (b64, fn, fn), "__PS__", 12)
+            self._stage_atomar("/root/.gemini/%s" % fn, b64, "__PS__", 12,
+                               "busybox chmod 600 /root/.gemini/%s" % fn)
             injected.append(fn)
         if injected:
             self._log("gemini: Credentials injiziert (%s) — RAM-tmpfs" % ", ".join(injected))
@@ -287,8 +298,8 @@ class CellLaufzeitenMixin:
         try:
             with open(BIOMNI_ENTRY_SRC, "rb") as f:
                 eb64 = base64.b64encode(f.read()).decode()
-            self._run("busybox mkdir -p /opt/pn && printf %%s '%s' | base64 -d > /opt/pn/biomni_entry.py && echo __PS__"
-                      % eb64, "__PS__", 20)
+            self._run("busybox mkdir -p /opt/pn && echo __PS__", "__PS__", 8)
+            self._stage_atomar("/opt/pn/biomni_entry.py", eb64, "__PS__", 20)
         except OSError:
             pass
 
@@ -300,12 +311,13 @@ class CellLaufzeitenMixin:
             b64 = base64.b64encode(prompt.encode()).decode()
             n = self.turns + 1
             mark = "__BIO%d__" % n
+            self._stage_atomar("/tmp/bio%d.prompt" % n, b64, "__BS%d__" % n, 15)
             script = (
-                "cd /root && P=$(printf %%s '%s' | base64 -d); "
+                "cd /root && P=$(busybox cat /tmp/bio%d.prompt); "
                 "PYTHONPATH=/work/biomni-site LD_LIBRARY_PATH=/work/biomni-libs:/lib:/lib64 "
                 "/bin/python3 /opt/pn/biomni_entry.py \"$P\" >/tmp/bio%d.out 2>/tmp/bio%d.err; RC=$?; "
                 "echo '%sSTART'; busybox cat /tmp/bio%d.out 2>/dev/null; echo; echo \"%sEND$RC\""
-                % (b64, n, n, mark, n, mark))
+                % (n, n, n, mark, n, mark))
             ok, out = self._run(script, mark + "END", timeout)
             if ok:
                 self.turns = n

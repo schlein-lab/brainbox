@@ -24,6 +24,7 @@ from pn_cell_basis import (
 from pn_cell_gastquellen import CLAUDE_LAUNCH_TMPL, REMOTE_CLAUDE_LAUNCH_TMPL
 
 REPL_FRISCH_S = float(os.environ.get("PN_CELL_REPL_FRESH_S", "120"))
+ABGABE_GEDULD_S = float(os.environ.get("PN_CELL_ABGABE_GEDULD_S", "240"))
 
 class CellTranscriptMixin:
 
@@ -88,6 +89,10 @@ class CellTranscriptMixin:
             return False
 
     def start_terminal(self, cmd=None, cols=120, rows=40, system=None):
+
+        ende = time.time() + 120
+        while not getattr(self, "einrichtung_fertig", True) and time.time() < ende:
+            time.sleep(0.5)
 
         with self._lock:
             if not self.alive() or self.term_conn is None:
@@ -162,9 +167,10 @@ class CellTranscriptMixin:
                 if system:
 
                     _sysb = base64.b64encode(system.encode()).decode()
-                    self._run("busybox mkdir -p /opt/pn; printf %%s '%s' | base64 -d > /opt/pn/voice-sys.md "
-                              "&& echo __PS__" % _sysb, "__PS__", 12)
-                    ex += "--append-system-prompt-file /opt/pn/voice-sys.md "
+                    self._run("busybox mkdir -p /opt/pn; echo __PS__", "__PS__", 8)
+                    _bok, _ = self._stage_atomar("/opt/pn/voice-sys.md", _sysb, "__PS__", 12)
+                    if _bok or self._brief_liegt_in_der_zelle():
+                        ex += "--append-system-prompt-file /opt/pn/voice-sys.md "
                 elif self._brief_liegt_in_der_zelle():
                     ex += "--append-system-prompt-file /opt/pn/voice-sys.md "
 
@@ -186,9 +192,12 @@ class CellTranscriptMixin:
 
             self._run("busybox mkdir -p /opt/pn /dev/pts; "
                       "busybox mount -t devpts -o mode=0620,ptmxmode=0666 devpts /dev/pts 2>/dev/null; "
-                      "[ -e /dev/pts/ptmx ] && busybox ln -sf /dev/pts/ptmx /dev/ptmx; "
-                      "printf %%s '%s' | base64 -d > /opt/pn/pn_term_incell.py && echo __PS__"
-                      % tb64, "__PS__", 20)
+                      "[ -e /dev/pts/ptmx ] && busybox ln -sf /dev/pts/ptmx /dev/ptmx; echo __PS__",
+                      "__PS__", 20)
+            _tok, _ = self._stage_atomar("/opt/pn/pn_term_incell.py", tb64, "__PS__", 20)
+            if not _tok:
+                self._term_denied = "Der In-Cell-Terminal-Runner kam nicht heil in der Zelle an."
+                return False
             if is_claude:
                 self._seed_claude_onboarding()
             safe = cmd.replace("'", "'\\''")
@@ -404,12 +413,14 @@ class CellTranscriptMixin:
             return False
         b64 = base64.b64encode(str(text).encode("utf-8")).decode()
         t = self.agent_tmux(n)
+        _mok, _ = self._stage_atomar("/tmp/w%d.msg" % n, b64, "__SU__", 25)
+        if not _mok:
+            return False
         ok, out = self._run(
-            "printf %%s '%(b)s' | base64 -d > /tmp/w%(n)d.msg && "
             "tmux load-buffer -b w%(n)d /tmp/w%(n)d.msg && "
             "tmux paste-buffer -b w%(n)d -t %(t)s && "
             "tmux send-keys -t %(t)s Enter && echo OK; echo __SU__"
-            % {"b": b64, "n": n, "t": t}, "__SU__", 25)
+            % {"n": n, "t": t}, "__SU__", 25)
         if ok and "OK" in out.split("__SU__")[0]:
             self.last = time.time()
             return True
@@ -915,10 +926,40 @@ class CellTranscriptMixin:
             sys.stderr.write("[pn-session] %s: Kaltstart — Abgabe der ersten Zeile wiederholt (%d)\n"
                              % (self.session, i + 1))
 
-        sys.stderr.write("[pn-session] %s: Kaltstart — die erste Zeile wurde nach %.0fs NICHT "
-                         "angenommen (Gespraechs-Log unveraendert)\n"
-                         % (self.session, sum(runden)))
+        path, off0, ok = self._abgabe_geduld(path, off0)
+        if ok:
+            return path, off0
+        sys.stderr.write("[pn-session] %s: Kaltstart — die erste Zeile wurde nach %.0fs (inkl. "
+                         "Geduld) NICHT angenommen (Gespraechs-Log unveraendert)\n"
+                         % (self.session, sum(runden) + ABGABE_GEDULD_S))
         return path, off0
+
+    def _abgabe_geduld(self, path, off0, decke=None):
+
+        decke = ABGABE_GEDULD_S if decke is None else decke
+        t0 = time.time()
+        naechste_meldung = 30.0
+        while time.time() - t0 < decke:
+            time.sleep(2.0)
+            if path is None:
+                path = self._incell_active_jsonl()
+                if path:
+                    return path, 0, True
+                continue
+            try:
+                if self._incell_jsonl_size(path) > off0:
+                    return path, off0, True
+            except Exception:
+                return path, off0, False
+            if not self._repl_prozess_da():
+                return path, off0, False
+            verstrichen = time.time() - t0
+            if verstrichen >= naechste_meldung:
+                sys.stderr.write("[pn-session] %s: Agent-Prozess lebt, Log noch still — "
+                                 "Geduld statt Fehlalarm (%.0fs)\n"
+                                 % (self.session, verstrichen))
+                naechste_meldung += 30.0
+        return path, off0, False
 
     def voice_watch(self, path, off0, emitted, on_sentence=None, should_continue=None,
                     budget=600, idle=2.5):

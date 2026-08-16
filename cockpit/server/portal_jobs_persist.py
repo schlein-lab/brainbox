@@ -184,6 +184,37 @@ def delivery_status(principal, sid):
         rec = _DELIVERY.get((principal, sid))
         return dict(rec) if rec else None
 
+def _gast_klemmt(principal, sid):
+    import os as _os
+    try:
+        reg = _sesscell_reg() if _sesscell_reg else None
+        rec = reg.get(principal, sid) if reg else None
+        zelle = (rec or {}).get("cell")
+        if not zelle:
+            return ""
+        run_dir = _os.environ.get("PN_CELL_RUN_DIR", "/tmp/pn-cells")
+        pfad = _os.path.join(run_dir, zelle, "vmm.out")
+        st = _os.stat(pfad)
+        if time.time() - st.st_mtime > 180:
+            return ""
+        with open(pfad, "rb") as f:
+            f.seek(max(0, st.st_size - 8192))
+            schwanz = f.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+    for muster, satz in (
+            ("BUG: workqueue lockup",
+             "Die Gast-Konsole meldet gerade eine verklemmte Workqueue -- "
+             "die Nachricht steckt vermutlich in der Bahn fest und ist nicht angekommen."),
+            ("rcu_preempt detected stalls",
+             "Die Gast-Konsole meldet gerade einen RCU-Stall -- der Gast haengt, "
+             "die Nachricht ist vermutlich nicht angekommen."),
+            ("Out of memory",
+             "Die Gast-Konsole meldet gerade Speichermangel im Gast.")):
+        if muster in schwanz:
+            return " " + satz
+    return ""
+
 def _delivery_blocked(principal, sid):
 
     rec = delivery_status(principal, sid)
@@ -335,9 +366,19 @@ def _deliver_to_session(principal, sid, tmux, text):
                         pass
                 else:
                     _delivery_set(principal, sid, "no_reply")
+                    _klemmt = ""
+                    try:
+                        _klemmt = _gast_klemmt(principal, sid)
+                    except Exception:
+                        _klemmt = ""
+                    _text = (("(Die Session ist wach, hat aber nicht rechtzeitig "
+                              "geantwortet.%s)" % _klemmt) if _klemmt else
+                             "(Die Session ist wach und arbeitet noch — bei einem langen "
+                             "Zug ist das normal. Ihre Antwort erscheint hier, sobald sie "
+                             "fertig ist.)")
                     _pc.bus_append(_chan_ctx(), principal, sid, "message", role="system",
-                                   text="(Die Session ist wach, hat aber nicht rechtzeitig geantwortet.)",
-                                   notify="normal")
+                                   text=_text,
+                                   notify=("alert" if _klemmt else "normal"))
                 try:
                     _autotitle_session(principal, sid, text, reply)
                 except Exception:

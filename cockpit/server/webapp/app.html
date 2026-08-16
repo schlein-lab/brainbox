@@ -16,23 +16,19 @@
 <link rel="manifest" href="/app/manifest.webmanifest">
 <link rel="stylesheet" href="/static/xterm.css">
 <link rel="stylesheet" href="/app/app.css">
-<!-- The server injects window.PP_WSTOKEN + window.PP_USER + window.PP_ROLE just before the closing head tag.
-     This fallback runs AFTER that injection (|| keeps injected values). -->
+
 <script>
   window.PP_WSTOKEN = window.PP_WSTOKEN || "";
   window.PP_USER    = window.PP_USER    || "";
   window.PP_ROLE    = window.PP_ROLE    || "";
   window.PP_VOICE   = (typeof window.PP_VOICE === "boolean") ? window.PP_VOICE : true;
 </script>
-<!-- xterm loaded the SAME way the current UI does (from /static/). defer preserves order. -->
+
 <script defer src="/static/xterm.js"></script>
 <script defer src="/static/addon-fit.js"></script>
-<!-- zero-knowledge vault crypto — MUST load before app.js (defer preserves order) so `VaultCrypto` is defined. -->
+
 <script defer src="/app/vaultcrypto.js"></script>
-<!-- app.js ist in Module geteilt (app-01-kern.js … app-11-messenger-notify-boot.js). Der Lader
-     holt die Teile in fester Reihenfolge und führt sie als EIN Skript aus — die Konkatenation
-     ist byte-gleich zur alten app.js (ganze Datei = EINE IIFE, darum keine einzelnen Tags).
-     Die alte /app/app.js bleibt als Fallback liegen (und für noch offene alte SPA-Instanzen). -->
+
 <script defer src="/app/app-lader.js"></script>
 </head>
 <body>
@@ -59,56 +55,40 @@
       <span class="ico">🏠</span><span class="nav-label">Start</span></a>
     <a class="nav-item" data-lens="sessions" href="#sessions">
       <span class="ico">🗂</span><span class="nav-label">Sessions</span><span class="nav-badge" id="sessBadge">0</span></a>
-    <!-- Messenger als EIGENER Reiter — nur auf dem Handy (<=640px), Owner 2026-08-01.
-         Vorher hing er als dritte Spalte (#startSide) unter dem Start-Reiter: dort scrollte er
-         mit dem Cockpit mit, und eintreffende Nachrichten poppten quer ueber die anderen Reiter.
-         Ab 641px bleibt alles wie gehabt (App-Rail ab 1101px, sonst Start-Spalte) — das
-         nav-item ist dort per CSS ausgeblendet und die Lens per Router unerreichbar. -->
+    
     <a class="nav-item nav-mobile" data-lens="msgr" href="#msgr">
       <span class="ico">💬</span><span class="nav-label">Messenger</span><span class="nav-badge" id="msgrNavBadge">0</span></a>
-    <!-- Screen-Reiter stillgelegt (Owner-Entscheidung 2026-07-21): geht in "Sessions" auf — jede
-         Session bekommt bei Bedarf ihre eigene on-demand-GUI. Inhalte auf den Fernseher laufen über
-         den Medienserver (DLNA/SMB, Pull-Modell). Das nav-item ist entfernt; Router.go fängt
-         "screen" ab und landet ehrlich in "Sessions". Der Lens-Code bleibt vorerst als Fundament
-         für die Office-microVM liegen (Link-Chips/Cast referenzieren ihn noch). -->
+    
 
     <a class="nav-item" data-lens="work" href="#work">
       <span class="ico">📋</span><span class="nav-label">Work</span><span class="nav-badge" id="workBadge">0</span></a>
     <a class="nav-item" data-lens="software" href="#software">
       <span class="ico">📦</span><span class="nav-label">Software</span></a>
-    <!-- Postfach (Owner 2026-07-22): NICHT in der Nav (schlank halten!) — erreichbar über
-         den eigenen Namen oben rechts (User-Menü → Nachrichten, mit Zahl-Badge am Namen).
-         Deep-Link #mail funktioniert weiter. -->
+    
     <span id="mailBadge" hidden></span>
-    <!-- Geräte-Reiter aufgelöst 2026-07-21 (Owner: Nav = Start·Sessions·Work·Einstellungen).
-         Die Geräte-Übersicht lebt als Karte im ⚙️-Reiter (Box-Bereich). -->
+    
     <a class="nav-item" data-lens="settings" href="#settings">
       <span class="ico">⚙️</span><span class="nav-label">Einstellungen</span></a>
     <a class="nav-item" data-lens="admin" id="navAdmin" href="#admin" hidden>
       <span class="ico">🛡</span><span class="nav-label">Admin</span><span class="nav-badge" id="admBadge" title="Konten warten auf Freischaltung">0</span></a>
     <a class="nav-item" data-lens="stats" id="navStats" href="#stats" hidden>
       <span class="ico">📊</span><span class="nav-label">Statistik</span></a>
-    <!-- Console + VPN sind jetzt SESSION-zentrisch: der Chat/Terminal lebt pro Session in „Sessions",
-         VPN wird pro Session dort vergeben. Beide Lenses bleiben im DOM (Start-Buttons/Deep-Link),
-         nur aus der Hauptnavigation entfernt (2026-07-12 Redesign). -->
+    
   </nav>
 
   <main class="main" id="main">
 
-    <!-- ============================ START ============================ -->
+    
     <section class="lens active" id="lens-start">
       <div class="lens-pad">
        <div class="start-cols">
         <div class="start-main">
           <div class="card" id="biGreeting" hidden></div>
 
-          <!-- Cockpit (Vision 3, 2026-07-24): der Startreiter IST die uebergeordnete
-               Bedieneinheit. Panels ziehbar/skalierbar/ausblendbar (Cockpit-Modul in app.js). -->
+          
           <div id="cockpitHost" class="cockpit"></div>
 
-          <!-- Alt-Karten bleiben (versteckt) im DOM, damit loadOverview-Referenzen
-               (#ovStats/#continueList) nie ins Leere greifen. Der Cockpit-Fleet/Queue-
-               Panel loesen ihren Inhalt ab. -->
+          
           <div class="grid-cards" id="startLegacyCards" hidden>
           <div class="card">
             <h3>Weitermachen</h3>
@@ -120,22 +100,21 @@
             <div class="list" id="continueList"><div class="empty">…</div></div>
           </div>
           </div>
-        </div><!-- /start-main -->
+        </div>
         <aside class="start-side" id="startSide">
           <div class="msgr" id="msgrHost"></div>
         </aside>
-       </div><!-- /start-cols -->
+       </div>
       </div>
     </section>
 
-    <!-- ========================= MESSENGER (Handy) ========================= -->
-    <!-- Eigener Reiter fuer den Quick-Reply-Messenger. Fuellt die ganze Lens (Liste ODER
-         Thread, wie im Start-Fallback) — LENSES.msgr in app.js montiert hier hinein. -->
+    
+    
     <section class="lens msgr-lens" id="lens-msgr">
       <div class="msgr" id="msgrTabHost"></div>
     </section>
 
-    <!-- ============================ SCREEN ============================ -->
+    
     <section class="lens screen-lens" id="lens-screen">
       <div class="scbar">
         <select class="btn sm" id="scTarget" title="Welchen Bildschirm dieser Reiter zeigt"><option value="">🖥 Box-Browser (geteilt)</option></select>
@@ -192,12 +171,11 @@
       </div>
     </section>
 
-    <!-- ============================ CONSOLE ============================ -->
+    
     <section class="lens console-lens" id="lens-console">
       <div class="console-bar">
         <div class="segmented" id="consoleSeg" role="tablist" aria-label="Sitzung">
-          <!-- Host-Shell RETIRED: the ▟ Shell segment opened /ws/term?target=shell = a login shell
-               on the HOST. Removed with the lane; the Console is the session cell only. -->
+          
           <button data-target="cockpit" class="on">💬 Chat</button>
         </div>
         <div class="sess-ctrl" id="sessCtrl">
@@ -212,11 +190,10 @@
         <span class="pill" id="consoleState">verbinde…</span>
       </div>
       <div class="term-wrap" id="termWrap"><div id="term"></div></div>
-      <!-- sendline row removed 2026-07-21: it POSTed to the RETIRED /api/term/send (410) and silently
-           did nothing — the xterm itself is the input (types directly over /ws/term). -->
+      
     </section>
 
-    <!-- ============================ WORK ============================ -->
+    
     <section class="lens" id="lens-software">
       <style>
         .sw-wrap{max-width:1100px;margin:0 auto;padding:6px 4px 40px}
@@ -260,7 +237,7 @@
             <div id="needsYouBody"></div>
           </div>
           <div class="headroom" id="headroom">…</div>
-          <!-- Owner 2026-07-22: Sicht-Filter — Job-Kategorien ausblendbar (z. B. Gerätesuche) -->
+          
           <div class="wfilter" id="workFilter"></div>
           <div class="q-note">Aufträge entstehen in den <b>Sessions</b> — dieser Reiter dient nur der Verwaltung der Warteschlange (Prioritäten, Eingriff, Status).</div>
           <style>
@@ -291,10 +268,7 @@
           .dj-task.run .dj-task-state{color:#60a5fa}
           </style>
           <div class="dj-section" id="fleetPanel" hidden></div>
-          <!-- Handy (Owner 2026-08-02): drei Spuren nebeneinander sind auf 390px unlesbar, und
-               untereinander werden sie ein endloser Scroll. Deshalb ein Umschalter — er zeigt ALLE
-               drei Zahlen und blendet genau EINE Spur ein. Ab 641px ist er per CSS weg und die
-               Spuren stehen wie gehabt nebeneinander (data-lane wird dort ignoriert). -->
+          
           <div class="q-switch" id="qSwitch" role="tablist" aria-label="Spur der Warteschlange">
             <button type="button" class="q-sw on" data-lane="wait" role="tab" aria-selected="true">Wartet <span class="n" id="qswqn">0</span></button>
             <button type="button" class="q-sw" data-lane="run" role="tab" aria-selected="false">Läuft <span class="n" id="qswrn">0</span></button>
@@ -313,7 +287,7 @@
       </div>
     </section>
 
-    <!-- ============================ ADMIN ============================ -->
+    
     <section class="lens" id="lens-sessions">
       <iframe id="sessFrame" title="Laufende Sessions" loading="lazy"
               style="width:100%;height:82vh;border:0;display:block"></iframe>
@@ -356,7 +330,7 @@
             <div class="adm-vms" id="admVms"><div class="empty">…</div></div>
           </div>
 
-          </div><!-- /overview panel -->
+          </div>
 
           <div class="adm-panel" data-apanel="llm" hidden>
 
@@ -383,7 +357,7 @@
             <div class="adm-advisor" id="admAdvisor"><div class="empty">…</div></div>
           </div>
 
-          </div><!-- /llm panel -->
+          </div>
 
           <div class="adm-panel" data-apanel="access" hidden>
 
@@ -422,7 +396,7 @@
             <div class="adm-keys" id="admKeys"><div class="empty">…</div></div>
           </div>
 
-          </div><!-- /access panel -->
+          </div>
 
           <div class="adm-panel" data-apanel="users" hidden>
 
@@ -433,8 +407,7 @@
             <div class="adm-fs-table" id="admFsTable"><div class="empty">…</div></div>
           </div>
 
-          <!-- echte Nutzerverwaltung (Owner 2026-07-22): Konten anlegen/sperren/Rolle/PW/löschen +
-               Nachricht an einen oder alle (optional als E-Mail, Opt-out-fähig). JS: Admin.renderAccounts -->
+          
           <div class="card admin-accounts" id="admAccounts">
             <h3>👥 Konten <span class="card-hint">anlegen · Rolle · sperren · Passwort · Nachricht</span>
               <span style="margin-left:auto;display:inline-flex;gap:6px">
@@ -454,7 +427,7 @@
           </div>
           <div class="admin-users" id="admUsers"><div class="empty">…</div></div>
 
-          </div><!-- /users panel -->
+          </div>
 
         </div>
       </div>
@@ -489,10 +462,8 @@
       </div>
     </section>
 
-    <!-- ======================= EINSTELLUNGEN ======================= -->
-    <!-- ==================== 📨 NACHRICHTEN (3-Pane-Postfach) ====================
-         Roundcube-Elastic-Geometrie (Research 2026-07-22): Ordner | Liste | Lesebereich.
-         Threads flach (thread_id), Klick = lesen + gelesen-markieren, Markdown-Subset. -->
+    
+    
     <section class="lens" id="lens-mail">
       <div class="mail3" id="mail3">
         <div class="mail-folders">
@@ -511,8 +482,7 @@
       <div class="lens-pad">
         <div class="stg-wrap">
 
-          <!-- Owner 2026-07-22: kein Endlos-Scroll-Spaghetti mehr — die Einstellungen sind in
-               Sub-Reiter aufgeteilt (gleiches Muster wie die Admin-IA). Deep-Link: #settings:ki -->
+          
           <div class="stg-tabs" role="tablist" aria-label="Einstellungs-Bereiche">
             <button class="stg-tab on" data-stab="konto"    role="tab">👤 Konto</button>
             <button class="stg-tab" data-stab="ansicht"     role="tab">🎨 Ansicht &amp; Meldungen</button>
@@ -521,7 +491,7 @@
             <button class="stg-tab" data-stab="box" id="stgTabBox" role="tab" hidden>🖧 Box <span class="card-hint">Admin</span></button>
           </div>
 
-          <!-- ============ 👤 Konto ============ -->
+          
           <div class="stg-panel" data-spanel="konto">
           <div class="card">
             <h3>Konto &amp; Tresor <span class="card-hint">Zugangsdaten · Abmelden</span></h3>
@@ -531,8 +501,7 @@
             </div>
             <div class="vault-panel" id="vaultPanel" hidden></div>
             <div class="set-status" id="stWhoami"></div>
-            <!-- Profil-Selbstverwaltung (Owner 2026-07-22): jeder Nutzer pflegt Name + E-Mail selbst;
-                 die E-Mail ist der Kanal für Box-Nachrichten (Opt-out) und Passwort-Reset. -->
+            
             <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
               <input id="meName" placeholder="Anzeigename" autocomplete="off" style="min-width:150px">
               <input id="meEmail" type="email" placeholder="meine@email.de" autocomplete="off" style="flex:1;min-width:200px">
@@ -540,8 +509,7 @@
             </div>
             <label style="display:block;margin-top:8px"><input type="checkbox" id="meMailCopy"> 📨 Box-Nachrichten zusätzlich per E-Mail erhalten</label>
             <div class="set-status" id="meStatus"></div>
-            <!-- Passwort ändern (Owner 09.08.2026): Selbstbedienung — altes verifizieren, neues gegen
-                 die zentralen Regeln (portal_pwpolicy) über /api/user/password. -->
+            
             <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
               <div class="card-hint" style="margin-bottom:6px">🔑 Passwort ändern</div>
               <div class="row" style="flex-wrap:wrap;gap:8px">
@@ -554,8 +522,7 @@
               <div class="set-status" id="pwStatus"></div>
             </div>
           </div>
-          <!-- Feine Freigaben je Aktions-Art (Eigner 08.08.2026): Schnellwahl-Preset + je Art eine
-               Stufe (Keine / Bestaetigung / 2FA). Loeschen/aussen bleiben immer >= 2FA. -->
+          
           <div class="card" id="stApprovalCard">
             <h3>✅ Freigaben <span class="card-hint">was darf die Box allein — und was fragt vorher nach?</span></h3>
             <div class="set-status">Schnellwahl setzt den Grundton; darunter stellst du jede Art einzeln feiner. „Löschen" und „nach außen" bleiben immer mindestens 2FA.</div>
@@ -563,8 +530,8 @@
             <div id="stFreigabenMatrix"></div>
           </div>
 
-          <!-- Passkey / Biometrie (opt-in, additiv — Passwort+TOTP bleiben immer der Rückweg). -->
-          <!-- Gerät koppeln (app.brainarbeit.com) über den Relay — Selbstbedienung per QR (Default), Tippen als Rückfall. -->
+          
+          
           <div class="card" id="stAppPairCard">
             <h3>📱 Gerät koppeln <span class="card-hint">Handy mit der App app.brainarbeit.com verbinden — per QR, ohne Tippen</span></h3>
             <div class="set-status">Scanne diesen QR mit der Handy-Kamera — die App koppelt sich automatisch mit deiner Box. Der Code hält sich selbst aktuell. Keine Kamera? Der Code steht darunter zum Abtippen.</div>
@@ -578,7 +545,7 @@
           </div>
           </div>
 
-          <!-- ============ 🎨 Ansicht & Meldungen ============ -->
+          
           <div class="stg-panel" data-spanel="ansicht" hidden>
           <div class="card">
             <h3>🎨 Ansicht <span class="card-hint">wie das Portal für dich aussieht — pro Gerät gespeichert</span></h3>
@@ -607,13 +574,11 @@
           </div>
           </div>
 
-          <!-- ============ 🧠 KI & Anbieter ============ -->
+          
           <div class="stg-panel" data-spanel="ki" hidden>
           <div class="card">
             <h3>🤖 Mein LLM-Konto <span class="card-hint">eigenes Claude-Konto verbinden (statt des zentralen)</span></h3>
-            <!-- BYO-LLM: JEDER angemeldete Nutzer darf sein eigenes Claude-Konto verbinden/erneuern —
-                 gleiche Anmelde-Maschinerie wie das zentrale Box-Gehirn und der Einrichtungs-Assistent,
-                 aber strikt auf das EIGENE Konto begrenzt (Server erzwingt das Konto, nie der Client). -->
+            
             <div id="stMyLlm" class="stbrain">
               <div class="stbrain-head">
                 <div><div class="stbrain-status" id="myLlmStatus">Status wird geprüft …</div></div>
@@ -639,15 +604,14 @@
               </div>
             </div>
           </div>
-          <!-- Weitere KI-Anbieter (Codex/Gemini/Ollama) — die Karte füllt Settings.renderProviders,
-               sobald das Backend Provider meldet; bis dahin ehrlich als „in Arbeit" gekennzeichnet. -->
+          
           <div class="card" id="stProvidersCard" hidden>
             <h3>🧩 KI-Anbieter <span class="card-hint">welches Gehirn die Box nutzt — pro Nutzer umschaltbar</span></h3>
             <div id="stProviders"><div class="empty">…</div></div>
           </div>
           </div>
 
-          <!-- ============ 🔑 Zugänge & Schlüssel ============ -->
+          
           <div class="stg-panel" data-spanel="zugaenge" hidden>
           <div class="card">
             <h3>🔑 Schlüssel &amp; Geheimnisse <span class="card-hint">für deine Sitzungen · SSH-Keys · Tokens</span></h3>
@@ -715,7 +679,7 @@
           </div>
           </div>
 
-          <!-- ============ 🖧 box-weit (nur Admin/Owner sichtbar) ============ -->
+          
           <div class="stg-panel" data-spanel="box" hidden>
           <div class="stg-scope" id="stgBoxHead" hidden><h2>🖧 Diese Brainbox <span class="card-hint">Admin</span></h2>
             <div class="card-hint">gelten für die ganze Box und alle Nutzer</div></div>
@@ -729,6 +693,41 @@
               <button class="btn sm" onclick="location.href='/trust'" title="Diese Box als vertrauenswürdig einrichten — Zertifikat installieren">🔒 Zertifikat / Box vertrauen</button>
             </div>
             <div class="set-status">Zentrales Gehirn &amp; alle KI-Konten: Admin → LLM-Pool. Eigenes Modell mitbringen: Einstellungen → KI &amp; Anbieter. Nutzerverwaltung: Admin.</div>
+          </div>
+
+          <div class="card" id="stUpdateCard" hidden>
+            <h3>⬆️ Updates <span class="card-hint">App aktuell halten — signiert, ohne neues ISO</span></h3>
+            <div class="set-status" id="stUpdNow">Version wird geprüft …</div>
+            <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
+              <button class="btn sm" id="stUpdCheck">🔍 Nach Updates suchen</button>
+              <button class="btn sm primary" id="stUpdApply" hidden>⬇️ Installieren</button>
+              <button class="btn sm ghost" id="stUpdRollback" hidden>↩ Zurückrollen</button>
+              <span class="card-hint" id="stUpdMsg"></span>
+            </div>
+            <pre id="stUpdLog" hidden style="max-height:140px;overflow:auto;white-space:pre-wrap;margin-top:8px;background:#0b0e12;color:#b7f5c2;padding:10px;border-radius:10px;font:11px/1.4 ui-monospace,monospace"></pre>
+          </div>
+
+          <div class="card" id="stVoiceCard" hidden>
+            <h3>🎙 Sprache &amp; Vorlesen <span class="card-hint">Whisper (Erkennung) + Piper (Vorlesen) — lokal auf der Box, optional</span></h3>
+            <div class="set-status" id="stVoiceState">…</div>
+            <div class="card-hint" id="stVoiceHw"></div>
+            <div class="row" style="flex-wrap:wrap;gap:12px;margin-top:8px">
+              <label style="flex:1;min-width:170px">Sprache<select id="stVoiceLang" style="width:100%;margin-top:4px"></select></label>
+              <label style="flex:1;min-width:170px">Modellgröße<select id="stVoiceModel" style="width:100%;margin-top:4px"></select></label>
+            </div>
+            <div class="card-hint" id="stVoiceModelHint"></div>
+            <div class="row" style="gap:8px;margin-top:10px">
+              <button class="btn sm primary" id="stVoiceInstall">Installieren</button>
+              <span class="card-hint" id="stVoiceMsg"></span>
+            </div>
+            <pre id="stVoiceLog" hidden style="max-height:160px;overflow:auto;white-space:pre-wrap;margin-top:8px;background:#0b0e12;color:#b7f5c2;padding:10px;border-radius:10px;font:11px/1.4 ui-monospace,monospace"></pre>
+          </div>
+
+          <div class="card" id="stSetupCard" hidden>
+            <h3>🧭 Verbindungen &amp; Einrichtung <span class="card-hint">Smarthome, Netzlaufwerk, Telegram, Fernzugang — jederzeit ändern</span></h3>
+            <div class="set-status">Alles, was der Einrichtungs-Assistent bei der Erstinbetriebnahme fragt, lässt sich hier jederzeit ändern — nichts ist endgültig.</div>
+            <div class="row" style="gap:8px;margin:8px 0"><button class="btn sm ghost" id="stSetupOpen">↗ In eigenem Tab öffnen</button></div>
+            <iframe id="stSetupFrame" title="Einrichtung" loading="lazy" style="width:100%;height:620px;border:0;border-radius:12px;display:block;background:var(--bg-elevated,#0b0e12)"></iframe>
           </div>
 
           <div class="card" id="stShellCard" hidden>
@@ -793,8 +792,7 @@
 
           <div class="card" id="stFrgCard" hidden>
             <h3>📡 Fernzugriff (Relay) <span class="card-hint">Zustand · Scharfschalten mit 2FA · Handy für 2FA koppeln</span></h3>
-            <!-- Owner 09.08.2026: der alte /freigaben-iframe war nicht ausgeliefert (leer) und mobil
-                 unsichtbar. Ersetzt durch die funktionierende, mobil-sichtbare Relay-Kachel (ckFillRelay). -->
+            
             <div id="stRelayHost" class="set-status">Lade …</div>
           </div>
           </div>
@@ -805,17 +803,13 @@
 
   </main>
 
-  <!-- ==================== APP-RAIL (Owner 2026-07-22) ====================
-       Die rechte Leiste ist FESTER Desktop-Bestandteil in ALLEN Reitern:
-       oben ein Widget-Host (wächst mit künftigen Widgets), unten IMMER der
-       Messenger (Default: Übersicht aller Sessions). Unter 1100px übernimmt
-       der Start-Reiter den Messenger (Mobil-Fallback, #startSide). -->
+  
   <aside class="apprail" id="appRail" aria-label="Seitenleiste">
     <div class="rail-widgets" id="railWidgets"></div>
     <div class="rail-msgr" id="railMsgr"></div>
   </aside>
 
-  <!-- ==================== CONVERSATION LAYER (persistent) ==================== -->
+  
   <div class="convo" id="convo">
     <div class="link-chips" id="linkChips" hidden></div>
     <div class="transcript" id="transcript"></div>
@@ -823,7 +817,7 @@
 
 </div>
 
-<!-- ==================== overlays ==================== -->
+
 <div class="palette" id="palette">
   <div class="palette-box">
     <input id="paletteInput" placeholder="Befehl … (z. B. Screen öffnen, Abmelden)" autocomplete="off">
@@ -839,8 +833,7 @@
 
 <div class="drop-veil" id="dropVeil">📎 Dateien hier ablegen — landen im NAS-Anhang</div>
 <div class="toast-host" id="toastHost"></div>
-<!-- Unread-Overlay (Notify-Modul): fixe Ecke unten rechts, liegt ueber ALLEN Lenses inkl.
-     Sessions-iframe. Inhalt/Verhalten: app.js Notify. -->
+
 
 </body>
 </html>

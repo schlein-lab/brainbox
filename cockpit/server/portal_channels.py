@@ -497,7 +497,13 @@ def session_say(ctx, principal, body):
         reg = ctx.get("sesscell_reg") and ctx["sesscell_reg"]()
         cell_rec = reg.get(principal, sid) if reg else None
         if cell_rec and cell_rec.get("state") == "evicted":
-            return {"ok": False, "error": "session evicted; re-provision first"}, 409
+            try:
+                reg.provision(principal, sid)
+                if ctx.get("prov_log"):
+                    ctx["prov_log"]("session.reprovision", principal,
+                                    "auto beim Schreiben", {"sid": sid})
+            except Exception as e:
+                return {"ok": False, "error": "Wiederbeleben fehlgeschlagen: %s" % e}, 500
     except Exception:
         pass
 

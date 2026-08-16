@@ -823,6 +823,8 @@ class CellFernMixin:
             lane_socks["net"] = self.net_sock; lanes.append("net")
         if self.portal_broker is not None:
             lane_socks["portal"] = self.portal_sock; lanes.append("portal")
+        if desktop:
+            lane_socks["gui"] = self.gui_sock; lanes.append("gui")
         for lane in lanes:
             term.register(self.cell, lane, lane_socks[lane], nid, token)
 
@@ -873,12 +875,13 @@ class CellFernMixin:
                 pn_cell_remote.get_terminator().unregister_cell(self.cell)
                 return None
             for role in ("vmm", "kernel", "initrd", "base"):
-                ent = man.get(role) if isinstance(man.get(role), dict) else None
+                _mk = "office" if (role == "base" and desktop) else role
+                ent = man.get(_mk) if isinstance(man.get(_mk), dict) else None
                 iid = (ent or {}).get("id")
                 sha = (ent or {}).get("sha256")
                 if not iid or not sha:
                     self._boot_denied = ("Arch-Image-Manifest node-images-%s.json unvollstaendig: Rolle "
-                                         "„%s“ fehlt (id/sha256)." % (node_machine, role))
+                                         "„%s“ fehlt (id/sha256)." % (node_machine, _mk))
                     pn_cell_remote.get_terminator().unregister_cell(self.cell)
                     return None
 
@@ -915,6 +918,7 @@ class CellFernMixin:
             "mem_mb": int(want_mem),
             "vcpus": int((self.policy or {}).get("vcpus") or (OFFICE_VCPUS if desktop else 1)),
             "images": images,
+            "kits": (list((self.policy or {}).get("kits") or []) if cross_arch else []),
             "delta_mb": int(delta_mb),
             "work_mb": int(work_mb),
             "adopt_token": self.adopt_token,

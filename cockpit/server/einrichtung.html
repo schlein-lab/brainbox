@@ -95,6 +95,11 @@
 "use strict";
 const $ = (s, w) => (w || document).querySelector(s);
 const $$ = (s, w) => Array.from((w || document).querySelectorAll(s));
+if (/[?&]embed=1/.test(location.search)) {
+  const h = document.querySelector("header.top"); if (h) h.remove();
+  const l = document.querySelector(".lead"); if (l) l.remove();
+  const w = document.querySelector(".wrap"); if (w) w.style.padding = "6px 4px 40px";
+}
 const hole = async (pfad, leib) => {
   const a = await fetch(pfad, leib ? {method:"POST", headers:{"Content-Type":"application/json"},
                                      body:JSON.stringify(leib)} : {});
@@ -270,10 +275,13 @@ function karte(b){
 
 (async () => {
   const box = $("#sprachKarte"); if (!box) return;
+  if (/[?&]embed=1/.test(location.search)) { box.remove(); return; }
+  box.hidden = false;
+  const lage0 = $("#spLage"); if (lage0) lage0.textContent = "lädt Katalog …";
   let kat;
   try { const r = await hole("/api/einrichtung/voice-katalog"); kat = r && r.ok && r.katalog; } catch (e) { kat = null; }
-  if (!kat) return;
-  box.hidden = false;
+  if (!kat) { if (lage0) lage0.textContent = "Katalog nicht erreichbar — Box online bringen und Seite neu laden."; return; }
+  if (lage0) lage0.textContent = "";
   const hw = kat.hardware || {};
   $("#spHardware").textContent = "Erkannt: " + (hw.ram_avail_mb || 0) + " MB frei / " + (hw.ram_total_mb || 0) + " MB, " +
     (hw.cores || "?") + " Kerne" + (hw.gpu ? (", GPU: " + (hw.gpu_name || "ja")) : ", keine GPU") + ". Empfehlung: " + kat.recommended + ".";

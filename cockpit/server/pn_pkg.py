@@ -1,29 +1,4 @@
 #!/bin/python3
-"""pn-pkg — die Paketschicht der Brainarbeit-Zelle.
-
-WARUM ES DAS GIBT (Owner 2026-07-31): das Zell-Rootfs ist ein handgebauter BusyBox+CPython-Baum
-ohne Distribution — kein apt, kein pip, kein sudo, nicht einmal /etc/os-release. Ein Agent, der
-arbeiten soll, muss aber Werkzeug nachziehen koennen. Statt die Zelle gegen eine Distribution zu
-tauschen (Neubau der ganzen Image-Kette samt Exec-Gate-Risiko) implementiert diese Schicht das
-Fehlende selbst — passend zur Architektur:
-
-  * `/` ist ein overlayfs mit BESCHREIBBAREM, PERSISTENTEM upper-Layer: was hier installiert wird,
-    ueberlebt Zell-Neustarts.
-  * Die glibc der Zelle stammt aus Ubuntu 24.04 (noble) — echte noble-.debs sind ABI-kompatibel.
-  * Aller Netz-Egress laeuft ueber den policy-gesteuerten Broker (http_proxy). Kein Sonderweg:
-    ohne Netz-Recht bekommt der Nutzer hier eine EHRLICHE Meldung statt eines Timeouts.
-
-Kann:
-  pn-pkg update                 Paketindex holen (noble main/universe + updates)
-  pn-pkg install PAKET...       .deb samt Abhaengigkeiten aufloesen, laden, entpacken
-  pn-pkg remove PAKET...        Dateien eines Pakets wieder entfernen
-  pn-pkg list | search MUSTER | show PAKET
-  pn-pkg bootstrap-pip          pip in die CPython der Zelle einziehen (ohne ensurepip)
-
-`apt`, `apt-get`, `pip`, `pip3` und `sudo` sind duenne Shims darauf (siehe --install-shims).
-Bewusst KEIN dpkg-Ersatz: keine maintainer-Skripte, keine Trigger. Es packt Dateien aus und fuehrt
-Buch (/var/lib/pn-pkg/installed.json) — genug fuer Werkzeuge, ehrlich benannt fuer alles andere.
-"""
 
 import contextlib
 import gzip
@@ -338,6 +313,9 @@ def _extract_deb(blob, root=None, dry=False):
                 rel = m.name.lstrip("./")
                 if not rel or rel.startswith(".."):
                     continue
+                if "usr/share/python3/runtime.d/" in rel:
+                    _log("  ~ %s uebersprungen (dpkg-Hook ohne dpkg-Registrierung)" % rel)
+                    continue
                 dest = os.path.join(root, rel)
                 if dry:
                     written.append("/" + rel)
@@ -544,10 +522,15 @@ def cmd_bootstrap_pip(_args):
         _log(_net_hint("PyPI nicht erreichbar"))
         return 2
     os.makedirs(CACHE, exist_ok=True)
-    whl = os.path.join(CACHE, "pip.whl")
+    cache = os.path.join(CACHE, "pip")
+    os.makedirs(cache, exist_ok=True)
     last = ""
     for url in cands:
-        _log("… lade %s" % url.rsplit("/", 1)[-1])
+        name = url.rsplit("/", 1)[-1].split("?")[0]
+        _log("… lade %s" % name)
+        if not (name.endswith(".whl") and name.count("-") >= 4):
+            last = "unerwarteter Wheel-Name %r" % name[:60]
+            continue
         try:
             data = _fetch(url, timeout=300)
         except Exception as e:
@@ -557,10 +540,13 @@ def cmd_bootstrap_pip(_args):
             head = data[:160].decode("utf-8", "replace").replace("\n", " ")
             last = "keine ZIP-Datei erhalten (Anfang: %s)" % head
             continue
+        whl = os.path.join(CACHE, name)
         with open(whl, "wb") as f:
             f.write(data)
+        env = dict(os.environ)
+        env.setdefault("PIP_CACHE_DIR", cache)
         rc = subprocess.call([sys.executable, whl + "/pip", "install", "--no-index",
-                              "--break-system-packages", whl])
+                              "--break-system-packages", whl], env=env)
         if rc == 0:
             _log("pip ist da: python3 -m pip install <paket>")
             return 0
@@ -604,7 +590,27 @@ mkdir -p "$PIP_CACHE_DIR" 2>/dev/null
 # ausdruecklich erlauben, statt den Nutzer in venv-Ratschlaege zu schicken.
 cmd="$1"
 case "$cmd" in
-  install|uninstall) shift; exec /bin/python3 -m pip "$cmd" --break-system-packages "$@" ;;
+  install)
+    shift
+    # --no-warn-script-location: wir verlinken gleich selbst, die Warnung waere dann falsch.
+    # --root-user-action=ignore: in der Zelle laeuft alles als root, und der Rat "nimm ein
+    # venv" fuehrt hier nirgendwo hin (siehe PEP-668-Anmerkung oben).
+    # ⚠️ NUR bei install: `pip uninstall` kennt --no-warn-script-location nicht und bricht
+    # damit in die Nutzungsmeldung ab (gemessen 12.08.2026).
+    /bin/python3 -m pip install --break-system-packages --no-warn-script-location --root-user-action=ignore "$@"
+    rc=$?
+    # Der Zell-PATH ist nur /bin:/sbin, pip legt Konsolen-Skripte nach /usr/local/bin.
+    # Ohne Verlinkung ist ein frisch installiertes Programm unter seinem NAMEN nicht
+    # aufrufbar -- gemessen 12.08.2026: `cowsay` -> "sh: cowsay: not found".
+    [ $rc -eq 0 ] && /opt/pn/pn-pkg relink
+    exit $rc ;;
+  uninstall)
+    shift
+    /bin/python3 -m pip uninstall --break-system-packages --root-user-action=ignore "$@"
+    rc=$?
+    # Nach dem Entfernen zeigt der Verweis in /bin ins Nichts -- relink raeumt ihn weg.
+    [ $rc -eq 0 ] && /opt/pn/pn-pkg relink
+    exit $rc ;;
   *) exec /bin/python3 -m pip "$@" ;;
 esac
 """,
@@ -672,8 +678,26 @@ def cmd_relink(_args):
             continue
         for name in os.listdir(p):
             found.append("/" + d + "/" + name)
-    before = set(os.listdir(os.path.join(ROOT, "bin"))) if os.path.isdir(
-        os.path.join(ROOT, "bin")) else set()
+    binp = os.path.join(ROOT, "bin")
+    before = set(os.listdir(binp)) if os.path.isdir(binp) else set()
+
+    tot = []
+    for name in (sorted(before)):
+        link = os.path.join(binp, name)
+        if not os.path.islink(link):
+            continue
+        ziel = os.readlink(link)
+        if not ziel.startswith(("/usr/bin/", "/usr/local/bin/", "/usr/sbin/")):
+            continue
+        if os.path.exists(os.path.join(ROOT, ziel.lstrip("/"))):
+            continue
+        with contextlib.suppress(OSError):
+            os.remove(link)
+            tot.append(name)
+    if tot:
+        _log("tote Verweise entfernt: %s" % " ".join(tot[:20]))
+        before -= set(tot)
+
     _link_into_path(found)
     after = set(os.listdir(os.path.join(ROOT, "bin"))) if os.path.isdir(
         os.path.join(ROOT, "bin")) else set()

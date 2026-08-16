@@ -1,5 +1,7 @@
 
 
+import os
+
 READ = "read"
 LOW = "low"
 IRREVERSIBLE = "irreversible"
@@ -180,6 +182,38 @@ TOOLS = [
                        "Der HOST startet dafuer eine sichtbare Board-Session, in der ein Agent die "
                        "Programme erkundet und die Bedien-Kartei schreibt - du installierst nichts "
                        "selbst. Laeuft die Einarbeitung bereits, wird ehrlich abgelehnt.",
+        "input_schema": {"type": "object", "properties": {
+            "kit": {"type": "string"}}, "required": ["kit"]},
+        "ceremony_class": LOW,
+    },
+    {
+        "name": "kits_status",
+        "description": "Deine eigene Ausstattung: welche Werkzeug-Kisten an DIESER Zelle "
+                       "haengen, was sonst im Regal liegt, und wie viele Plaetze noch frei "
+                       "sind. Kisten sind grosse, fertige, schreibgeschuetzte Programm-"
+                       "sammlungen (Browser, Buero, Bioinformatik, phantom ...) und kosten "
+                       "dir keinen Platz auf deiner Platte.",
+        "input_schema": {"type": "object", "properties": {}},
+        "ceremony_class": READ,
+    },
+    {
+        "name": "kits_add",
+        "description": "Haenge dir selbst eine Werkzeug-Kiste an ('kit', Name aus "
+                       "kits_status). ⚠️ Deine Zelle faehrt dafuer NEU HOCH und kommt danach "
+                       "von selbst zurueck: Kisten haengen als Blockgeraet an der microVM und "
+                       "lassen sich nicht im Betrieb nachreichen. Deine Arbeit bleibt (Delta "
+                       "und Arbeitsplatte ueberleben), aber ein laufender Desktop muss danach "
+                       "neu hoch. Brauchst du nur EIN Programm, nimm apt-get — dafuer musst "
+                       "du nicht neu starten.",
+        "input_schema": {"type": "object", "properties": {
+            "kit": {"type": "string"}}, "required": ["kit"]},
+        "ceremony_class": LOW,
+    },
+    {
+        "name": "kits_remove",
+        "description": "Haenge eine Werkzeug-Kiste wieder ab ('kit'). Auch das startet deine "
+                       "Zelle neu. Was du per apt-get installiert hast, bleibt davon "
+                       "unberuehrt — das liegt auf deiner eigenen Platte, nicht in der Kiste.",
         "input_schema": {"type": "object", "properties": {
             "kit": {"type": "string"}}, "required": ["kit"]},
         "ceremony_class": LOW,
@@ -393,6 +427,36 @@ TOOLS = [
 ]
 
 TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
+
+
+def _site_get(key, default=""):
+    v = os.environ.get(key)
+    if v:
+        return v
+    for p in ("/etc/brainbox/site.conf", "/run/brainbox/site.env"):
+        try:
+            with open(p) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(key + "="):
+                        v = line.split("=", 1)[1].strip()
+                        if v:
+                            return v
+        except Exception:
+            pass
+    return default
+
+
+ALT_VERBEN = {}
+_alt = _site_get("HPC_VPN_ID", "hpc")
+if _alt and _alt != "hpc":
+    ALT_VERBEN = dict(("%s_%s" % (_alt, s), "hpc_%s" % s)
+                      for s in ("submit", "status", "fetch", "ctl", "slurmwatch")
+                      if ("hpc_%s" % s) in TOOL_BY_NAME)
+
+
+def kanonisch(verb):
+    return ALT_VERBEN.get(verb, verb)
 
 RETIRED_TOOLS = ("terminal_run", "terminal_read")
 

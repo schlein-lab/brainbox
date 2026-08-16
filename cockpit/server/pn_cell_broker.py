@@ -206,6 +206,15 @@ class CellBrokerNetzMixin:
             sfx = "-" + str(self.session)
 
             try:
+                from pn_cell_lifecycle import braucht_ssh_bahn as _will_bahn
+                will_bahn = bool(_will_bahn(pol, False))
+            except Exception as _e:
+                self._log("VPN: braucht_ssh_bahn nicht auswertbar (%s) -> Konto-Tunnel "
+                          "wird NICHT uebernommen" % _e)
+                will_bahn = False
+            uebergangen = ""
+
+            try:
                 import zlib as _zl
                 _ouid = 1000 + (_zl.crc32(str(self.principal or "owner").encode()) % 200)
 
@@ -224,12 +233,19 @@ class CellBrokerNetzMixin:
                 if not vpn_ns and acct_sfxs:
                     for n in names:
                         if n.startswith("pnv-") and any(n.endswith(a) for a in acct_sfxs):
-                            vpn_ns = n
+                            if will_bahn:
+                                vpn_ns = n
+                            else:
+                                uebergangen = n
                             break
                 if vpn_ns:
                     break
             if vpn_ns:
                 self._log("session-VPN entdeckt: Netz-Broker zieht in netns %s (fail-closed an cscotun*)" % vpn_ns)
+            elif uebergangen:
+                self._log("Konto-Tunnel %s NICHT uebernommen: diese Zelle will die SSH-Bahn "
+                          "nicht (kein hpc_submit, kein SSH-Geheimnis, kein vpn_netns) "
+                          "-> normales Netz" % uebergangen)
         self.vpn_netns_active = vpn_ns
         if not vpn_ns:
             return base
@@ -245,10 +261,16 @@ class CellBrokerNetzMixin:
 
             self._log("VPN-Dauerjob: netns %s fehlt -> Netz-Broker startet OHNE Tunnel (fail-closed, kein Egress)" % vpn_ns)
 
+        durchreichen = ["PN_POLICY_FILE=%s" % self.policy_file,
+                        "PN_REQUIRE_TUN=%s" % require_tun,
+                        "PN_NET_BROKER_LOG=%s" % nenv.get("PN_NET_BROKER_LOG",
+                                                          "/tmp/pn-net-broker.log")]
+        for k in ("PN_SESSION_CELL", "PN_PRINCIPAL"):
+            v = str(nenv.get(k) or "").strip()
+            if v:
+                durchreichen.append("%s=%s" % (k, v))
         return ["sudo", "-A", "ip", "netns", "exec", vpn_ns,
-                "sudo", "-u", boxuser,
-                "env", "PN_POLICY_FILE=%s" % self.policy_file, "PN_REQUIRE_TUN=%s" % require_tun,
-                "PN_NET_BROKER_LOG=%s" % nenv.get("PN_NET_BROKER_LOG", "/tmp/pn-net-broker.log")] + base
+                "sudo", "-u", boxuser, "env"] + durchreichen + base
 
     def netz_tor_offen(self):
 
@@ -306,16 +328,19 @@ class CellBrokerNetzMixin:
             with open(SONOS_SRC, "rb") as _sf:
                 _snb64 = base64.b64encode(_sf.read()).decode()
             _rooms = _sonos_rooms_b64()
-            _roomcmd = ("busybox mkdir -p /etc/pn && printf %%s '%s' | base64 -d > /etc/pn/sonos_rooms.json && "
-                        % _rooms) if _rooms else ""
-            self._run("busybox mkdir -p /usr/bin && busybox ln -sf /bin/busybox /usr/bin/env; "
-                      "printf %%s '%s' | base64 -d > /opt/pn/sonos && chmod +x /opt/pn/sonos && " % _snb64
-                      + _roomcmd +
-                      "busybox ln -sf /opt/pn/sonos /bin/sonos && echo __PS__", "__PS__", 15)
+            self._run("busybox mkdir -p /usr/bin /etc/pn /opt/pn && "
+                      "busybox ln -sf /bin/busybox /usr/bin/env; echo __PS__",
+                      "__PS__", 10)
+            if _rooms:
+                self._stage_atomar("/etc/pn/sonos_rooms.json", _rooms, "__PS__", 10)
+            self._stage_atomar("/opt/pn/sonos", _snb64, "__PS__", 15,
+                               "chmod +x /opt/pn/sonos && "
+                               "busybox ln -sf /opt/pn/sonos /bin/sonos")
         except OSError:
             pass
         _sb = base64.b64encode(_DNS_STUB_SRC.encode()).decode()
-        self._run("printf %%s '%s' | base64 -d > /opt/pn/pn_dns_stub.py && "
-                  "(/bin/python3 /opt/pn/pn_dns_stub.py >/tmp/dnsstub.out 2>&1 &) ; "
-                  "printf 'nameserver 127.0.0.1\\noptions timeout:2 attempts:1\\n' > /etc/resolv.conf 2>/dev/null; "
-                  "busybox sleep 1; echo __PS__" % _sb, "__PS__", 12)
+        self._stage_atomar(
+            "/opt/pn/pn_dns_stub.py", _sb, "__PS__", 12,
+            "(/bin/python3 /opt/pn/pn_dns_stub.py >/tmp/dnsstub.out 2>&1 &) ; "
+            "printf 'nameserver 127.0.0.1\\noptions timeout:2 attempts:1\\n' "
+            "> /etc/resolv.conf 2>/dev/null; busybox sleep 1")

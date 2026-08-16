@@ -30,19 +30,6 @@ def _default_root():
 
 SHARES_ROOT = _default_root()
 SMB_CONF = os.environ.get("PN_SMB_CONF", "/etc/samba/smb.conf")
-SITE_CONF = "/etc/brainbox/site.conf"
-
-def media_enabled():
-    val = ""
-    try:
-        with open(SITE_CONF, encoding="utf-8", errors="replace") as f:
-            for ln in f:
-                ln = ln.strip()
-                if ln.startswith("MEDIA_SERVER_ENABLED="):
-                    val = ln.split("=", 1)[1].split("#")[0].strip().strip("\"'")
-    except OSError:
-        return False
-    return val == "1"
 PROVISION_HELPER = os.environ.get("PN_MEDIASHARE_HELPER", "pn-mediashare-provision")
 SERVICE_USER = os.environ.get("PN_SHARES_OWNER") or (os.environ.get("USER") or "brainbox")
 WORKGROUP = os.environ.get("PN_SMB_WORKGROUP", "WORKGROUP")
@@ -89,19 +76,7 @@ class ShareManager:
 
         if os.environ.get("PN_MEDIASHARE_NO_DAEMONS"):
             return
- 
- 
- 
- 
- 
-        if not media_enabled():
-            return
-        
-        
-        
-        
-        
-        
+
         threading.Thread(target=self._ensure_daemons, daemon=True).start()
 
         threading.Thread(target=self._ensure_dlnad, daemon=True).start()
@@ -120,8 +95,6 @@ class ShareManager:
     @staticmethod
     def _ensure_dlnad():
         try:
-            if not media_enabled():          
-                return
             import socket as _s
             probe = _s.socket(_s.AF_INET, _s.SOCK_STREAM); probe.settimeout(0.5)
             up = (probe.connect_ex(("127.0.0.1", 8200)) == 0); probe.close()

@@ -81,6 +81,25 @@ def braucht_ssh_bahn(pol, vpn_on=False):
             return True
     return False
 
+
+def kit_geraete(blks, kit_imgs):
+    mounts, uebersprungen = [], []
+    for kid, img in kit_imgs:
+        i = blks.index(img)
+        if i > 25:
+            uebersprungen.append((kid, i))
+            continue
+        mounts.append((kid, "vd" + chr(ord("a") + i)))
+    return mounts, uebersprungen
+
+def _befehl_fuers_log(script):
+    t = " ".join(str(script).split())
+    t = re.sub(r"(?i)((?:token|secret|key|passwor|cred|auth)[a-z0-9_]*\s*=\s*)\S+",
+               r"\1<geschwaerzt>", t)
+    t = re.sub(r"'[A-Za-z0-9+/=_.-]{24,}'", "'<geschwaerzt>'", t)
+    t = re.sub(r'"[A-Za-z0-9+/=_.-]{24,}"', '"<geschwaerzt>"', t)
+    return t[:90]
+
 class CellLifecycleMixin:
 
     def __init__(self, principal, session, cid, portal_url=None, portal_token=None, policy=None):
@@ -293,6 +312,32 @@ class CellLifecycleMixin:
             except Exception:
                 pass
             self.desk_bridge = None
+        try:
+            import pn_cell_desk_bridge as _brg
+            pid = _brg.lebende_bruecke(self.cell)
+        except Exception:
+            pid = None
+        if pid:
+            try:
+                with open("/proc/%d/cmdline" % pid, "rb") as f:
+                    cmd = f.read()
+            except OSError:
+                cmd = b""
+            if b"pn_cell_desk_bridge" in cmd and self.cell.encode() in cmd:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(30):
+                        if not os.path.exists("/proc/%d" % pid):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                    self._log("gui: verwaiste Bruecke %d beendet" % pid)
+                except OSError:
+                    pass
+            else:
+                self._log("gui: pid %d haelt das Bruecken-Schloss von %s, ist aber "
+                          "keine passende Bruecke — nicht angefasst" % (pid, self.cell))
         try: os.unlink(self.gui_sock)
         except OSError: pass
 
@@ -484,16 +529,16 @@ class CellLifecycleMixin:
                 self.extra_blk.append(AGENTS_RT_IMG)
 
         self._kit_mounts = []
+        _kit_imgs = []
         try:
             import pn_software_shelf as _shelf
             for _kid in ((self.policy or {}).get("kits") or []):
                 _img = _shelf.kit_img(_kid)
                 if _img and os.path.exists(_img) and _img not in self.extra_blk:
-                    _dev = "vd" + chr(ord("c") + len(self.extra_blk))
                     self.extra_blk.append(_img)
-                    self._kit_mounts.append((_kid, _dev))
+                    _kit_imgs.append((_kid, _img))
         except Exception:
-            self._kit_mounts = []
+            _kit_imgs = []
 
         desktop = bool((self.policy or {}).get("desktop"))
         if desktop and not os.path.exists(OFFICE_BASE):
@@ -507,17 +552,31 @@ class CellLifecycleMixin:
             _prep_work(self.work, (self.policy or {}).get("work_gb"))
             rw_extra.append(self.work)
         blks = [(OFFICE_BASE if desktop else BASE), self.delta] + rw_extra + list(self.extra_blk)
+        self._kit_mounts, _zuviel = kit_geraete(blks, _kit_imgs)
+        for _kid, _i in _zuviel:
+            self._log("kit %s: Platte %d hat keinen einfachen Buchstaben mehr — ausgelassen"
+                      % (_kid, _i))
         env["PN_VMM_BLK"] = ",".join(blks)
 
         env["PN_VMM_BLK_RO"] = ",".join(["0"] + [str(i) for i in range(2 + len(rw_extra), len(blks))])
         if desktop:
 
             self._gui_close()
+            _bruecke_log = os.path.join(os.path.dirname(self.gui_sock), "deskbridge.log")
+            try:
+                _bl = open(_bruecke_log, "ab", buffering=0)
+            except OSError:
+                _bl = subprocess.DEVNULL
             self.desk_bridge = subprocess.Popen(
                 ["/usr/bin/python3", DESK_BRIDGE, "--lane", self.gui_sock, "--ref", self.cell,
                  "--name", "Desktop %s" % self.session],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, stdout=_bl, stderr=_bl,
                 env=dict(os.environ))
+            if _bl is not subprocess.DEVNULL:
+                try:
+                    _bl.close()
+                except OSError:
+                    pass
             self._bahn_socket_warten(self.gui_sock, "gui")
             env["PN_VMM_VSOCK_GUI"] = self.gui_sock
 
@@ -650,8 +709,14 @@ class CellLifecycleMixin:
             if not d: break
             b += d
         if b"PN_SEAT_READY" not in b:
-            self._boot_denied = ("Die Zelle bootete, aber ihr Seat wurde nicht bereit (%ds Zeitlimit).%s"
-                                 % (READY_WAIT_S, self._vmm_err_tail()))
+            gesagt = b.decode("utf-8", "replace")
+            gesagt = "".join(c if (c.isprintable() or c == "\n") else "." for c in gesagt)
+            gesagt = " | ".join(z.strip() for z in gesagt.splitlines() if z.strip())[-600:]
+            self._boot_denied = ("Die Zelle bootete, aber ihr Seat wurde nicht bereit (%ds Zeitlimit). "
+                                 "Der Seat sagte: %s%s"
+                                 % (READY_WAIT_S,
+                                    ("%r" % gesagt) if gesagt else "GAR NICHTS (%d Bytes)" % len(b),
+                                    self._vmm_err_tail()))
             try: conn.close()
             except OSError: pass
             try: term_srv.close()
@@ -673,18 +738,20 @@ class CellLifecycleMixin:
         self.turns = 0
         self._persist_meta()
         time.sleep(0.8)
+        _einrichtung_t0 = time.time()
+        self.einrichtung_fertig = False
         if self.portal_broker is not None:
-            self._setup_portal()
+            self._schritt("portal", self._setup_portal)
         if self.net_broker is not None:
-            self._setup_net()
-        self._stage_secrets()
-        self._stage_autonomy_contract()
-        self._stage_knowledge()
-        self._stage_runbooks()
-        self._stage_exchange()
-        self._stage_clock()
-        self._stage_ca()
-        self._stage_pkgtools()
+            self._schritt("netz", self._setup_net)
+        self._schritt("geheimnisse", self._stage_secrets)
+        self._schritt("autonomie", self._stage_autonomy_contract)
+        self._schritt("grundwissen", self._stage_knowledge)
+        self._schritt("runbooks", self._stage_runbooks)
+        self._schritt("austausch", self._stage_exchange)
+        self._schritt("uhr", self._stage_clock)
+        self._schritt("ca-buendel", self._stage_ca)
+        self._schritt("paketwerkzeuge", self._stage_pkgtools)
         if (self.policy or {}).get("runtime") == "biomni":
             self._setup_biomni()
         if (self.policy or {}).get("runtime") == "codex":
@@ -692,7 +759,10 @@ class CellLifecycleMixin:
         if (self.policy or {}).get("runtime") in ("gemini", "ollama"):
             self._setup_agents()
         if getattr(self, "_kit_mounts", None):
-            self._setup_kits()
+            self._schritt("kisten (%d)" % len(self._kit_mounts), self._setup_kits)
+        self._log("einrichtung GESAMT              %6.1f s (Gast war nach ~2 s oben)"
+                  % (time.time() - _einrichtung_t0))
+        self.einrichtung_fertig = True
 
         self._pn_register(want_mem)
         return True
@@ -706,28 +776,40 @@ class CellLifecycleMixin:
             return
 
         self._run("busybox mkdir -p /usr/bin && busybox ln -sf /bin/busybox /usr/bin/env; echo __PS__", "__PS__", 10)
-        self._run("printf %%s '%s' | base64 -d > /opt/pn/portalctl && chmod +x /opt/pn/portalctl && "
-                  "busybox ln -sf /opt/pn/portalctl /bin/portalctl && echo __PS__" % pcb64, "__PS__", 20)
+        self._stage_atomar("/opt/pn/portalctl", pcb64, "__PS__", 20,
+                           "chmod +x /opt/pn/portalctl && "
+                           "busybox ln -sf /opt/pn/portalctl /bin/portalctl")
 
         try:
             with open(CELLFS_SRC, "rb") as f:
                 cfb64 = base64.b64encode(f.read()).decode()
-            self._run("printf %%s '%s' | base64 -d > /opt/pn/cellfs && chmod +x /opt/pn/cellfs && "
-                      "busybox ln -sf /opt/pn/cellfs /bin/cellfs && echo __PS__" % cfb64, "__PS__", 20)
+            self._stage_atomar("/opt/pn/cellfs", cfb64, "__PS__", 20,
+                               "chmod +x /opt/pn/cellfs && "
+                               "busybox ln -sf /opt/pn/cellfs /bin/cellfs")
         except OSError:
             pass
 
         try:
             with open(PNJOB_SRC, "rb") as f:
                 pjb64 = base64.b64encode(f.read()).decode()
-            self._run("printf %%s '%s' | base64 -d > /opt/pn/pnjob && chmod +x /opt/pn/pnjob && "
-                      "busybox ln -sf /opt/pn/pnjob /bin/pnjob && echo __PS__" % pjb64, "__PS__", 20)
+            self._stage_atomar("/opt/pn/pnjob", pjb64, "__PS__", 20,
+                               "chmod +x /opt/pn/pnjob && "
+                               "busybox ln -sf /opt/pn/pnjob /bin/pnjob")
         except OSError:
             pass
         self._run("PN_PROXY_TRANSPORT=vsock:2:5900 PN_PROXY_PORT=8089 /bin/python3 /opt/pn/incell_mux_proxy.py "
                   ">/tmp/pproxy.out 2>&1 & busybox sleep 2; echo __PS__", "__PS__", 15)
         self._run("export PORTAL_URL=http://127.0.0.1:8089 PORTAL_TOKEN=placeholder-not-real PORTAL_UID=%s; echo __PS__"
                   % self.principal, "__PS__", 10)
+
+    def _schritt(self, name, fn):
+        t0 = time.time()
+        try:
+            return fn()
+        finally:
+            d = time.time() - t0
+            if d >= 1.0:
+                self._log("einrichtung %-22s %6.1f s" % (name, d))
 
     def _log(self, msg):
 
@@ -784,8 +866,8 @@ class CellLifecycleMixin:
                         ssh_ready = True
                     mode = "644" if kind == "ssh_pub" else "600"
                     dst = "/root/.ssh/config" if kind == "ssh_config" else ("/root/.ssh/" + fname)
-                    self._run("printf %%s '%s' | base64 -d > %s && busybox chmod %s %s && echo __SX__"
-                              % (b64, dst, mode, dst), "__SX__", 10)
+                    self._stage_atomar(dst, b64, "__SX__", 10,
+                                       "busybox chmod %s %s" % (mode, dst))
                     staged.append((name, "Datei `%s` (chmod %s, RAM-tmpfs — überlebt keinen Neustart)" % (dst, mode)))
                 else:
 
@@ -846,10 +928,10 @@ class CellLifecycleMixin:
                 "sichtbar); eine Pflicht ist es nicht.", ""]
             body = "\n".join(lines)
             b64 = base64.b64encode(body.encode()).decode()
-            self._run("printf %%s '%s' | base64 -d > /root/AUTONOMIE.md; "
-                      "busybox grep -q '@AUTONOMIE.md' /root/CLAUDE.md 2>/dev/null || "
-                      "printf '\\n@AUTONOMIE.md\\n' >> /root/CLAUDE.md; echo __AM__" % b64,
-                      "__AM__", 10)
+            self._stage_atomar("/root/AUTONOMIE.md", b64, "__AM__", 10,
+                               "busybox grep -q '@AUTONOMIE.md' /root/CLAUDE.md "
+                               "2>/dev/null || printf '\\n@AUTONOMIE.md\\n' "
+                               ">> /root/CLAUDE.md")
         except Exception as e:
             self._log("autonomy contract failed (%s)" % e)
 
@@ -911,12 +993,15 @@ class CellLifecycleMixin:
             run_llm = ("cd /root/.obs; timeout 240 claude -p --model %s "
                        "\"$(cat /root/.obs/prompt)\" < /root/.obs/in.jsonl "
                        "> /root/.obs/out.txt 2> /root/.obs/err.txt" % str(model))
+        self._run("busybox mkdir -p /root/.obs && echo __OBS__", "__OBS__", 8)
+        sok, _ = self._stage_atomar("/root/.obs/prompt", b64, "__OBS__", 15)
+        if not sok:
+            return False
         ok, _ = self._run(
-            "busybox mkdir -p /root/.obs && printf %%s '%s' | base64 -d > /root/.obs/prompt && "
             "busybox rm -f /root/.obs/state /root/.obs/out.txt /root/.obs/err.txt && "
             "( busybox tail -c %d '%s' > /root/.obs/in.jsonl 2>/dev/null; %s; "
             "echo done > /root/.obs/state ) >/dev/null 2>&1 & echo __OBS__"
-            % (b64, int(tail_bytes), jsonl_path, run_llm),
+            % (int(tail_bytes), jsonl_path, run_llm),
             "__OBS__", 10)
         return bool(ok)
 
@@ -997,16 +1082,92 @@ class CellLifecycleMixin:
         except OSError:
             return False
         try:
-            self._run("printf %%s '%s' | base64 -d > /opt/pn/exchange-sync && chmod +x /opt/pn/exchange-sync && "
-                      "{ mkdir -p /work/austausch 2>/dev/null && ln -snf /work/austausch /root/austausch 2>/dev/null "
-                      "|| mkdir -p /root/austausch; }; "
-                      "kill $(cat /tmp/exchange-sync.pid 2>/dev/null) 2>/dev/null; rm -f /tmp/exchange-sync.pid; "
+            self._arbeitsplatte_einhaengen()
+
+            ok_stage, _ = self._stage_atomar(
+                "/opt/pn/exchange-sync", xb64, "__XS__", 30,
+                "chmod +x /opt/pn/exchange-sync")
+            if not ok_stage:
+                self._log("⛔ AUSTAUSCH-ABGLEICH FEHLT: /opt/pn/exchange-sync "
+                          "kam nicht in die Zelle. ~/austausch ist damit KEINE "
+                          "Tuer zum Wirt — was dort abgelegt wird, bleibt in der "
+                          "Zelle. Erzeugnisse gehoeren in diesem Zustand direkt "
+                          "in den Freigabeordner der Sitzung.")
+                self._run("printf '%%s\\n' 'KEIN ABGLEICH: dieser Ordner wird "
+                          "NICHT mit dem Wirt abgeglichen - was hier liegt, "
+                          "bleibt in der Zelle. Lege Ergebnisse stattdessen "
+                          "direkt unter %s ab, dieser Weg traegt.' "
+                          "> /root/austausch/KEIN-ABGLEICH.txt 2>/dev/null; "
+                          "echo __XS__" % remote, "__XS__", 8)
+                return False
+            self._austausch_auf_die_arbeitsplatte()
+            self._run("kill $(cat /tmp/exchange-sync.pid 2>/dev/null) 2>/dev/null; "
+                      "rm -f /tmp/exchange-sync.pid; "
                       "PN_EXCHANGE_SID='%s' setsid /opt/pn/exchange-sync '%s' /root/austausch "
                       ">>/tmp/exchange-sync.log 2>&1 & echo __XS__"
-                      % (xb64, self.session, remote), "__XS__", 30)
+                      % (self.session, remote), "__XS__", 30)
         except Exception:
             return False
         return True
+
+    def _arbeitsplatte_einhaengen(self):
+        if not (self.policy or {}).get("desktop"):
+            return False
+        try:
+            ok, out = self._run(
+                "busybox grep -q ' /work ' /proc/mounts && echo WORK_SCHON "
+                "|| { busybox mkdir -p /work; busybox mount /dev/vdc /work 2>/tmp/work.err "
+                "&& echo WORK_OK || { echo WORK_NEIN; busybox cat /tmp/work.err 2>/dev/null; }; }; "
+                "echo __WM__", "__WM__", 30)
+            kopf = (out or "").split("__WM__")[0]
+            if "WORK_SCHON" in kopf or "WORK_OK" in kopf:
+                return True
+            self._log("Arbeitsplatte /work nicht einhaengbar (%s) — alles, was dort liegen "
+                      "sollte, faellt in das Delta und damit in die Plattenquote"
+                      % " ".join(kopf.split())[:120])
+            return False
+        except Exception as e:
+            self._log("Arbeitsplatte /work: %s" % e)
+            return False
+
+    def _austausch_auf_die_arbeitsplatte(self):
+        ok, out = self._run(
+            "if ! busybox grep -q ' /work ' /proc/mounts; then echo AUS_KEINWORK; else "
+            "  busybox mkdir -p /work/austausch; "
+            "  if busybox grep -q ' /root/austausch ' /proc/mounts; then echo AUS_SCHON_BIND; "
+            "  elif [ -L /root/austausch ]; then "
+            "    busybox rm -f /root/austausch; busybox mkdir -p /root/austausch; "
+            "    busybox mount -o bind /work/austausch /root/austausch && echo AUS_LINK_ZU_BIND "
+            "      || { busybox ln -snf /work/austausch /root/austausch; echo AUS_SCHON_LINK; }; "
+            "  elif [ -d /root/austausch ]; then "
+            "    n=$(busybox find /root/austausch -mindepth 1 2>/dev/null | busybox wc -l); "
+            "    kopiert=ja; "
+            "    if [ \"$n\" -gt 0 ]; then busybox cp -a /root/austausch/. /work/austausch/ "
+            "      || { echo AUS_KOPIE_FEHL; kopiert=nein; }; fi; "
+            "    if [ \"$kopiert\" = ja ]; then "
+            "      m=$(busybox find /work/austausch -mindepth 1 2>/dev/null | busybox wc -l); "
+            "      if [ \"$m\" -ge \"$n\" ]; then busybox rm -rf /root/austausch; "
+            "        busybox mkdir -p /root/austausch; "
+            "        busybox mount -o bind /work/austausch /root/austausch "
+            "          || busybox ln -snf /work/austausch /root/austausch; echo AUS_UMGEZOGEN=$n; "
+            "      else echo AUS_UNVOLLSTAENDIG=$n/$m; fi; "
+            "    fi; "
+            "  else busybox mkdir -p /root/austausch; "
+            "    busybox mount -o bind /work/austausch /root/austausch "
+            "      || busybox ln -snf /work/austausch /root/austausch; echo AUS_NEU_BIND; fi; "
+            "fi; echo __AU__", "__AU__", 300)
+        kopf = " ".join((out or "").split("__AU__")[0].split())
+        if "AUS_KEINWORK" in kopf:
+            self._log("~/austausch bleibt im Delta (keine Arbeitsplatte) — er zaehlt damit zur "
+                      "Plattenquote dieser Sitzung")
+        elif "AUS_SCHON_BIND" in kopf or "AUS_NEU_BIND" in kopf or "AUS_LINK_ZU_BIND" in kopf:
+            pass
+        elif "AUS_UMGEZOGEN" in kopf:
+            self._log("~/austausch von der Quote auf die Arbeitsplatte umgezogen (%s)" % kopf)
+        elif "AUS_KOPIE_FEHL" in kopf or "AUS_UNVOLLSTAENDIG" in kopf:
+            self._log("~/austausch NICHT umgezogen (%s) — der alte Ordner bleibt unberuehrt "
+                      "stehen, nichts geht verloren" % kopf)
+        return kopf
 
     def _stage_knowledge(self):
 
@@ -1200,10 +1361,14 @@ class CellLifecycleMixin:
                   "  am Ende die wichtigsten Funde in 2-3 Saetzen zusammen.", ""]
             body = "\n".join(C)
             b64 = base64.b64encode(body.encode()).decode()
-            self._run("printf %%s '%s' | base64 -d > /root/KNOWLEDGE.md; "
-                      "busybox grep -q '@KNOWLEDGE.md' /root/CLAUDE.md 2>/dev/null || "
-                      "printf '\\n@KNOWLEDGE.md\\n' >> /root/CLAUDE.md; echo __KM__" % b64,
-                      "__KM__", 10)
+            self._stage_atomar(
+                "/root/KNOWLEDGE-BASIS.md", b64, "__KM__", 10,
+                "busybox grep -q '@KNOWLEDGE-BASIS.md' /root/CLAUDE.md "
+                "2>/dev/null || printf '\\n@KNOWLEDGE-BASIS.md\\n' "
+                ">> /root/CLAUDE.md; "
+                "busybox test -f /root/KNOWLEDGE.md || : > /root/KNOWLEDGE.md; "
+                "busybox grep -q '@KNOWLEDGE.md' /root/CLAUDE.md 2>/dev/null || "
+                "printf '\\n@KNOWLEDGE.md\\n' >> /root/CLAUDE.md")
         except Exception as e:
             self._log("knowledge: staging failed (%s)" % e)
 
@@ -1221,10 +1386,10 @@ class CellLifecycleMixin:
             if not ssh_on:
                 return
             b64 = base64.b64encode(_VPN_SSH_SRC.encode()).decode()
-            self._run("busybox mkdir -p /usr/local/bin && printf %%s '%s' | base64 -d > /usr/local/bin/vpn-ssh && "
-                      "busybox chmod 755 /usr/local/bin/vpn-ssh && "
-                      "busybox ln -sf /usr/local/bin/vpn-ssh /bin/vpn-ssh && echo __RB__" % b64,
-                      "__RB__", 20)
+            self._run("busybox mkdir -p /usr/local/bin; echo __RB__", "__RB__", 10)
+            self._stage_atomar("/usr/local/bin/vpn-ssh", b64, "__RB__", 20,
+                               "busybox chmod 755 /usr/local/bin/vpn-ssh && "
+                               "busybox ln -sf /usr/local/bin/vpn-ssh /bin/vpn-ssh")
             self._stage_bcrypt()
         except Exception as e:
             self._log("runbooks: staging failed (%s)" % e)
@@ -1403,9 +1568,10 @@ class CellLifecycleMixin:
                           "`vpn-ssh --list`, dann `vpn-ssh <alias> '<befehl>'` (Details `vpn-ssh --help`)."]
             body = "\n".join(lines) + "\n"
             b64 = base64.b64encode(body.encode()).decode()
-            self._run("printf %%s '%s' | base64 -d > /root/TRESOR.md; "
-                      "busybox grep -q '@TRESOR.md' /root/CLAUDE.md 2>/dev/null || "
-                      "printf '\\n@TRESOR.md\\n' >> /root/CLAUDE.md; echo __TM__" % b64, "__TM__", 10)
+            self._stage_atomar("/root/TRESOR.md", b64, "__TM__", 10,
+                               "busybox grep -q '@TRESOR.md' /root/CLAUDE.md "
+                               "2>/dev/null || printf '\\n@TRESOR.md\\n' "
+                               ">> /root/CLAUDE.md")
         except Exception as e:
             self._log("secrets: manifest failed (%s)" % e)
 
@@ -1504,7 +1670,10 @@ class CellLifecycleMixin:
                                    "hasCompletedProjectOnboarding": True, "allowedTools": []}},
         }
         sb = base64.b64encode(json.dumps(seed).encode()).decode()
-        merge = ("printf %s '" + sb + "' | base64 -d > /tmp/.seed.json && /bin/python3 -c \""
+        sok, _ = self._stage_atomar("/tmp/.seed.json", sb, "__SEED__", 15)
+        if not sok:
+            return
+        merge = ("/bin/python3 -c \""
                  "import json,os;s=json.load(open('/tmp/.seed.json'));p='/root/.claude.json';"
                  "d=json.load(open(p)) if os.path.exists(p) else {};"
                  "pr=d.get('projects',{});pr.update(s.pop('projects'));d.update(s);d['projects']=pr;"
@@ -1542,12 +1711,14 @@ class CellLifecycleMixin:
             with open(SONOS_SRC, "rb") as _sf:
                 _snb64 = base64.b64encode(_sf.read()).decode()
             _rooms = _sonos_rooms_b64()
-            _roomcmd = ("busybox mkdir -p /etc/pn && printf %%s '%s' | base64 -d > /etc/pn/sonos_rooms.json && "
-                        % _rooms) if _rooms else ""
-            self._run("busybox mkdir -p /usr/bin /opt/pn && busybox ln -sf /bin/busybox /usr/bin/env; "
-                      "printf %%s '%s' | base64 -d > /opt/pn/sonos && chmod +x /opt/pn/sonos && " % _snb64
-                      + _roomcmd +
-                      "busybox ln -sf /opt/pn/sonos /bin/sonos && echo __PS__", "__PS__", 15)
+            self._run("busybox mkdir -p /usr/bin /etc/pn /opt/pn && "
+                      "busybox ln -sf /bin/busybox /usr/bin/env; echo __PS__",
+                      "__PS__", 10)
+            if _rooms:
+                self._stage_atomar("/etc/pn/sonos_rooms.json", _rooms, "__PS__", 10)
+            self._stage_atomar("/opt/pn/sonos", _snb64, "__PS__", 15,
+                               "chmod +x /opt/pn/sonos && "
+                               "busybox ln -sf /opt/pn/sonos /bin/sonos")
             return True
         except Exception:
             return False
@@ -1609,7 +1780,74 @@ class CellLifecycleMixin:
             except OSError:
                 return (False, buf.decode(errors="replace"))
         text = buf.decode(errors="replace")
-        return (m in buf), (text.split(marker)[0] if marker in text else text)
+        ok = m in buf
+        d = time.time() - t0
+        if not ok or d >= 5.0:
+            kurz = _befehl_fuers_log(script)
+            try:
+                self._log("einrichtung: %s nach %.1f s%s — %s"
+                          % (marker,
+                             d,
+                             "" if ok else " OHNE Markierung (Zeitlimit verbrannt)",
+                             kurz))
+            except Exception:
+                pass
+        return ok, (text.split(marker)[0] if marker in text else text)
+
+    def _stage_atomar(self, ziel, b64, marker, frist, nach=""):
+        tmp = "/tmp/.stage-" + re.sub(r"[^A-Za-z0-9_.-]", "_", str(ziel))[-40:]
+        stueck = 8000
+        n_stuecke = (len(b64) + stueck - 1) // stueck
+        for i in range(0, len(b64), stueck):
+            teil = b64[i:i + stueck]
+            op = ">" if i == 0 else ">>"
+            nr = i // stueck + 1
+            ok = False
+            for versuch, frist_h in enumerate((8, 20, 40), start=1):
+                ok, _ = self._run("printf '%%s\\n' '%s' %s %s.b64; echo %s"
+                                  % (teil, op, tmp, marker), marker, frist_h)
+                if ok:
+                    if versuch > 1:
+                        self._log("stage: %s — haeppchen %d/%d kam erst im "
+                                  "%d. versuch an (frist %ds)"
+                                  % (ziel, nr, n_stuecke, versuch, frist_h))
+                    break
+                self._log("stage: %s — haeppchen %d/%d nach %ds ohne antwort, "
+                          "neuer versuch" % (ziel, nr, n_stuecke, frist_h))
+            if not ok:
+                self._log("⛔ stage GESCHEITERT: %s — haeppchen %d/%d kam auch "
+                          "nach 3 versuchen (8/20/40 s) nicht an. Was auf dieser "
+                          "Datei aufbaut, FEHLT jetzt in der Zelle."
+                          % (ziel, nr, n_stuecke))
+                return False, ""
+        ok, gr = self._run("busybox wc -c < %s.b64; echo %s" % (tmp, marker),
+                           marker, 8)
+        try:
+            n_b64 = int((gr or "").strip().split()[0])
+        except Exception:
+            n_b64 = -1
+        if n_b64 != len(b64) + n_stuecke:
+            self._log("stage: %s — b64 unvollstaendig (%d von %d zeichen)"
+                      % (ziel, n_b64, len(b64) + n_stuecke))
+            return False, ""
+        cmd = ("busybox base64 -d < %s.b64 > %s && busybox rm -f %s.b64 && "
+               "busybox mv %s %s" % (tmp, tmp, tmp, tmp, ziel))
+        if nach:
+            cmd += " && " + nach
+        cmd += "; echo " + marker
+        ok, out = self._run(cmd, marker, frist)
+        if ok:
+            ok2, gr = self._run("busybox wc -c < %s 2>/dev/null; echo %s"
+                                % (ziel, marker), marker, 8)
+            try:
+                n = int((gr or "").strip().split()[0])
+            except Exception:
+                n = -1
+            if n <= 0:
+                self._log("stage: %s ist LEER/fehlt nach dem staging (%d B) — "
+                          "payload kam nicht heil an" % (ziel, n))
+                return False, out
+        return ok, out
 
     def _cat(self, path):
 

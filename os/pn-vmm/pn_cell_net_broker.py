@@ -82,7 +82,8 @@ def _llm_ticket(host, port):
     return _rel
 
 def log(m):
-    line = "[%.3f] %s" % (time.time(), m)
+    _wer = PN_SESSION_CELL.split("_")[-1][:12] if PN_SESSION_CELL else "?"
+    line = "[%.3f] [%s] %s" % (time.time(), _wer, m)
     try:
         open(LOG, "a").write(line + "\n")
     except OSError:
@@ -316,6 +317,27 @@ def _socks5(client):
         try: client.close()
         except OSError: pass
 
+def _ablehnung(why, mit_seite):
+    grund = (why or "abgelehnt").replace("\r", " ").replace("\n", " ")[:300]
+    kopf = ("HTTP/1.1 403 Forbidden\r\n"
+            "X-PN-Deny-Reason: %s\r\n"
+            "Connection: close\r\n" % grund)
+    if not mit_seite:
+        return (kopf + "Content-Length: 0\r\n\r\n").encode("latin1", "replace")
+    seite = (
+        "<!doctype html><meta charset=utf-8>"
+        "<title>Vom Netz-Waechter der Zelle abgelehnt</title>"
+        "<h1>Diese Verbindung wurde abgelehnt</h1>"
+        "<p><b>Grund:</b> %s</p>"
+        "<p>Das ist keine Fehlkonfiguration deines Browsers: die Anfrage hat den "
+        "Netz-Waechter der Zelle erreicht, und er hat sie mit dem oben genannten Grund "
+        "abgewiesen. Derselbe Grund steht als Kopfzeile <code>X-PN-Deny-Reason</code>.</p>"
+        % grund
+    ).encode("utf-8")
+    return (kopf + "Content-Type: text/html; charset=utf-8\r\n"
+            "Content-Length: %d\r\n\r\n" % len(seite)).encode("latin1", "replace") + seite
+
+
 def handle(client):
 
     try:
@@ -346,7 +368,7 @@ def handle(client):
             ok, why, pin = _allowed(host, port)
             log("CONNECT %s:%d -> %s (%s)" % (host, port, "ALLOW" if ok else "DENY", why))
             if not ok:
-                client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                client.sendall(_ablehnung(why, mit_seite=False))
                 client.close(); return
             rel = _llm_ticket(host, port)
             try:
@@ -373,7 +395,7 @@ def handle(client):
             ok, why, pin = _allowed(host, port)
             log("HTTP %s %s -> %s (%s)" % (method, tgt, "ALLOW" if ok else "DENY", why))
             if not ok:
-                client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                client.sendall(_ablehnung(why, mit_seite=(method != "HEAD")))
                 client.close(); return
             body = head.replace(line0, ("%s /%s %s" % (method, path, "HTTP/1.1")).encode("latin1"), 1)
             rel = _llm_ticket(host, port)

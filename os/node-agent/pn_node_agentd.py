@@ -49,7 +49,7 @@ def _log(text):
         sys.stderr.flush()
     except (OSError, ValueError):
         pass
-_ALLOWED_LANES = ("seat", "llm", "term", "portal", "net", "act")
+_ALLOWED_LANES = ("seat", "llm", "term", "portal", "net", "act", "gui")
 
 _LANE_ENV = {"portal": "PN_VMM_VSOCK_RFB"}
 _SPLICE_BUF = 65536
@@ -216,6 +216,27 @@ def _pn_vmm_bin():
     w = shutil.which("pn-vmm")
     return w if w else None
 
+def _available_kits():
+    root = os.path.join(os.path.expanduser("~"), ".local", "share", "brainarbeit", "kits")
+    out = []
+    try:
+        for kid in sorted(os.listdir(root)):
+            if kid.startswith("_"):
+                continue
+            if os.path.exists(os.path.join(root, kid, "current", "kit.img")):
+                out.append(kid)
+    except OSError:
+        pass
+    return out
+
+def _local_kit_img(kid):
+    if not kid or not re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", str(kid)):
+        return None
+    p = os.path.join(os.path.expanduser("~"), ".local", "share", "brainarbeit",
+                     "kits", str(kid), "current", "kit.img")
+    return p if os.path.exists(p) else None
+
+
 def _caps():
     kvm = _kvm_usable()
     vmm = _pn_vmm_bin()
@@ -232,6 +253,7 @@ def _caps():
 
         "cell_base_staged": bool(staged),
         "kinds": kinds,
+        "kits": _available_kits(),
         "pn_vmm": vmm,
         "cell_sandbox": True,
         "container": _container_runtime(),
@@ -1461,6 +1483,11 @@ def _cells_start(body):
     for p in extras:
         blks.append(p)
         ro.append(str(len(blks) - 1))
+    for _kid in (body.get("kits") or []):
+        _kp = _local_kit_img(_kid)
+        if _kp and _kp not in blks:
+            blks.append(_kp)
+            ro.append(str(len(blks) - 1))
     cid = _alloc_node_cid()
     env = dict(os.environ)
     env["PN_VMM_BLK"] = ",".join(blks)

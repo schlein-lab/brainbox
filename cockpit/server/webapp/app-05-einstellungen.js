@@ -24,7 +24,10 @@ const Settings = {
 
       const rh = $("#stRelayHost"); if (rh && typeof ckFillRelay === "function") ckFillRelay(rh);
       const d = $("#devFrame");   if (d && !d.getAttribute("src")) d.setAttribute("src", "/devices");
+      const sf = $("#stSetupFrame"); if (sf && !sf.getAttribute("src")) sf.setAttribute("src", "/einrichtung?embed=1");
       this.brainStatus();
+      this.loadUpdate();
+      this.loadVoice();
     }
   },
   switchTab(t) {
@@ -451,9 +454,15 @@ const Settings = {
     { const b = $("#myLlmCancel"); if (b) b.addEventListener("click", () => this.myLlmCancel()); }
     { const b = $("#myLlmLogout"); if (b) b.addEventListener("click", () => this.myLlmLogout()); }
 
-    if (IS_ADMIN) ["#stgBoxHead", "#stgBoxCard", "#stDevCard", "#stFrgCard", "#stShellCard", "#stgTabBox"].forEach(id => { const n = $(id); if (n) n.hidden = false; });
+    if (IS_ADMIN) ["#stgBoxHead", "#stgBoxCard", "#stDevCard", "#stFrgCard", "#stShellCard", "#stUpdateCard", "#stVoiceCard", "#stSetupCard", "#stgTabBox"].forEach(id => { const n = $(id); if (n) n.hidden = false; });
     { const b = $("#shellAdd"); if (b) b.addEventListener("click", () => this.addShellKey()); }
     if (IS_ADMIN) this.loadShellKeys();
+
+    { const b = $("#stUpdCheck"); if (b) b.addEventListener("click", () => this.updateCheck()); }
+    { const b = $("#stUpdApply"); if (b) b.addEventListener("click", () => this.updateApply()); }
+    { const b = $("#stUpdRollback"); if (b) b.addEventListener("click", () => this.updateRollback()); }
+    { const b = $("#stVoiceInstall"); if (b) b.addEventListener("click", () => this.voiceInstall()); }
+    { const b = $("#stSetupOpen"); if (b) b.addEventListener("click", () => window.open("/einrichtung", "_blank", "noopener")); }
 
     { const b = $("#rightsReqSend"); if (b) b.addEventListener("click", async () => {
         const t = ($("#rightsReqText") || {}).value || "";
@@ -784,6 +793,92 @@ const Settings = {
     const flow = $("#myLlmFlow"); if (flow) flow.hidden = true;
     this.myLlmStatus();
   },
+
+  async loadUpdate() {
+    const now = $("#stUpdNow"); if (!now) return;
+    let s; try { s = await jget("/api/update/status"); } catch (e) { s = null; }
+    const cur = (s && s.current) || "";
+    now.textContent = cur ? ("Installierte Version: " + cur) : "Version unbekannt";
+    this._updRender(s && s.progress);
+  },
+  async updateCheck() {
+    const msg = $("#stUpdMsg"), apply = $("#stUpdApply");
+    if (msg) msg.textContent = "sucht …";
+    let r; try { r = await jget("/api/update/check"); } catch (e) { r = null; }
+    if (!r || !r.ok) { if (msg) msg.textContent = "✗ " + ((r && r.error) || "Update-Kanal nicht erreichbar"); if (apply) apply.hidden = true; return; }
+    const now = $("#stUpdNow"); if (now && r.current) now.textContent = "Installierte Version: " + r.current;
+    if (r.available) { if (msg) msg.textContent = "✓ Neue Version: " + (r.version || r.latest) + (r.notes ? (" — " + r.notes) : ""); if (apply) apply.hidden = false; }
+    else { if (msg) msg.textContent = "✓ Bereits aktuell."; if (apply) apply.hidden = true; }
+  },
+  async updateApply() {
+    const msg = $("#stUpdMsg"), apply = $("#stUpdApply");
+    if (apply) apply.disabled = true; if (msg) msg.textContent = "Installiere …";
+    let r; try { r = await jpost("/api/update/apply", {}); } catch (e) { r = null; }
+    if (!r || !r.ok) { if (msg) msg.textContent = "✗ " + ((r && r.error) || "Start fehlgeschlagen"); if (apply) apply.disabled = false; return; }
+    if (this._updTimer) clearInterval(this._updTimer);
+    this._updTimer = setInterval(() => this._updPoll(), 2000); this._updPoll();
+  },
+  async _updPoll() {
+    let s; try { s = await jget("/api/update/status"); } catch (e) { return; }
+    if (this._updRender(s && s.progress) && this._updTimer) { clearInterval(this._updTimer); this._updTimer = null; const a = $("#stUpdApply"); if (a) a.disabled = false; }
+  },
+  _updRender(p) {
+    const log = $("#stUpdLog"), msg = $("#stUpdMsg"), rb = $("#stUpdRollback");
+    if (!p || !p.state || p.state === "idle") return true;
+    if (log) { log.hidden = false; log.textContent = (p.phase || "") + (p.msg ? (" — " + p.msg) : ""); }
+    if (p.state === "done") { if (msg) msg.textContent = "✓ Aktualisiert — Portal startet neu."; if (rb) rb.hidden = false; return true; }
+    if (p.state === "error") { if (msg) msg.textContent = "✗ " + (p.msg || p.phase || "Fehler"); if (rb) rb.hidden = false; return true; }
+    if (msg) msg.textContent = "… " + (p.phase || p.state);
+    return false;
+  },
+  async updateRollback() {
+    const msg = $("#stUpdMsg"); if (msg) msg.textContent = "rolle zurück …";
+    let r; try { r = await jpost("/api/update/rollback", {}); } catch (e) { r = null; }
+    if (msg) msg.textContent = (r && r.ok) ? "✓ Zurückgerollt — Portal startet neu." : ("✗ " + ((r && r.error) || "Fehlgeschlagen"));
+  },
+
+  async loadVoice() {
+    const st = $("#stVoiceState"); if (!st) return;
+    let cat; try { cat = await jget("/api/voice/install/options"); } catch (e) { cat = null; }
+    if (cat && cat.ok) this._voiceCatalog(cat);
+    this._voicePoll();
+  },
+  _voiceCatalog(cat) {
+    const hw = cat.hardware || {}, lsel = $("#stVoiceLang"), msel = $("#stVoiceModel"), hint = $("#stVoiceModelHint");
+    const hwEl = $("#stVoiceHw");
+    if (hwEl) hwEl.textContent = "Box: " + (hw.ram_avail_mb || 0) + " MB frei / " + (hw.ram_total_mb || 0) + " MB · " + (hw.cores || "?") + " Kerne" + (hw.gpu ? (" · GPU " + (hw.gpu_name || "")) : " · keine GPU") + " · Empfehlung: " + cat.recommended;
+    if (lsel && !lsel.dataset.filled) {
+      lsel.textContent = "";
+      (cat.languages || []).forEach(l => lsel.appendChild(el("option", { value: l.code, text: l.name + " (" + l.code + ")" })));
+      const de = (cat.languages || []).find(l => (l.code || "").indexOf("de") === 0); if (de) lsel.value = de.code;
+      lsel.dataset.filled = "1";
+    }
+    if (msel) {
+      msel.textContent = "";
+      (cat.models || []).forEach(m => msel.appendChild(el("option", { value: m.name, text: m.name + " (~" + (Math.round((m.approx_ram_mb || 0) / 100) / 10) + " GB)" + (m.recommended ? " — empfohlen" : "") })));
+      msel.value = cat.recommended;
+    }
+    if (hint) hint.textContent = cat.live ? "" : "Offline-Liste — für die neuesten Modelle die Box online bringen.";
+  },
+  async voiceInstall() {
+    const b = $("#stVoiceInstall"), msg = $("#stVoiceMsg");
+    if (b) b.disabled = true; if (msg) msg.textContent = "Starte …";
+    const model = ($("#stVoiceModel") || {}).value, lang = ($("#stVoiceLang") || {}).value;
+    try { await jpost("/api/voice/install", { model: model, lang: lang }); } catch (e) {}
+    if (this._voiceTimer) clearInterval(this._voiceTimer);
+    this._voiceTimer = setInterval(() => this._voicePoll(), 2500); this._voicePoll();
+  },
+  async _voicePoll() {
+    let s; try { s = await jget("/api/voice/install/status"); } catch (e) { return; }
+    if (!s) return;
+    const st = $("#stVoiceState"), log = $("#stVoiceLog"), b = $("#stVoiceInstall"), msg = $("#stVoiceMsg");
+    if (s.installed && s.state === "done") { if (st) st.textContent = "✓ Installiert."; if (msg) msg.textContent = "Aktiv nach Portal-Neustart."; if (b) { b.disabled = false; b.textContent = "Neu installieren / ändern"; } if (this._voiceTimer) { clearInterval(this._voiceTimer); this._voiceTimer = null; } }
+    else if (s.state === "running") { if (st) st.textContent = "Installiere … (lädt Modell + Stimme, kann Minuten dauern)"; if (b) b.disabled = true; }
+    else if (s.state === "error") { if (st) st.textContent = "✗ Fehler bei der Installation."; if (b) b.disabled = false; if (this._voiceTimer) { clearInterval(this._voiceTimer); this._voiceTimer = null; } }
+    else { if (st) st.textContent = "Nicht installiert."; if (b) b.disabled = false; }
+    if (s.log && log) { log.hidden = false; log.textContent = s.log; log.scrollTop = log.scrollHeight; }
+  },
+
   async loadVpn() {
     this.loadVpnProfiles();
     const box = $("#stVpn"); if (!box) return;

@@ -370,9 +370,10 @@ fn boot_kernel(kernel_path: &str, initrd_path: &str, nvcpus: u8) -> Result<(), S
     let blk_top_gsi = virtio::BLK_GSI0 + blks.len() as u32;
     let vsock_gsi = std::cmp::max(vsock::VSOCK_GSI, blk_top_gsi);
     let rng_gsi = std::cmp::max(virtio::RNG_GSI, vsock_gsi + 1);
-    if rng_gsi > 15 {
+    let gsi_max = u32::from(crate::mptable::IOAPIC_PINS) - 1;
+    if rng_gsi > gsi_max {
         return Err(format!(
-            "{} virtio-blk Platten belegen die IRQ-Leitungen bis {}; fuer vsock ({vsock_gsi}) und virtio-rng ({rng_gsi}) bleibt in der MP-Tabelle (ISA-IRQ 0..15) keine Leitung frei",
+            "{} virtio-blk Platten belegen die IRQ-Leitungen bis {}; fuer vsock ({vsock_gsi}) und virtio-rng ({rng_gsi}) bleibt in der MP-Tabelle (IOAPIC-Pins 0..{gsi_max}) keine Leitung frei",
             blks.len(), blk_top_gsi - 1));
     }
 

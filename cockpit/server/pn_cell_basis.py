@@ -122,8 +122,8 @@ BOOT_TRIES = 3
 TERM_RELAUNCH_MAX = int(os.environ.get("PN_TERM_RELAUNCH_MAX", "3"))
 TERM_RELAUNCH_WINDOW_S = int(os.environ.get("PN_TERM_RELAUNCH_WINDOW_S", "120"))
 TERM_START_WAIT_S = int(os.environ.get("PN_TERM_START_WAIT_S", "12"))
-SEAT_WAIT_S = 40
-READY_WAIT_S = 30
+SEAT_WAIT_S = int(os.environ.get("PN_CELL_SEAT_WAIT_S", "40"))
+READY_WAIT_S = int(os.environ.get("PN_CELL_READY_WAIT_S", "150"))
 
 REMOTE_READOPT_WAIT_S = float(os.environ.get("PN_CELL_REMOTE_READOPT_S", "60"))
 

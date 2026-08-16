@@ -754,6 +754,18 @@ def mux_serve(conn):
                 except OSError:
                     pass
 
+def _mux_bedienen(conn):
+    try:
+        mux_serve(conn)
+    except Exception as e:
+        log("MUX_SERVE_ERR %r" % e)
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+        log("PORTAL_BROKER_UNIX_MUX_CONN_DONE (still listening)")
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--unix-mux"
     if mode == "--tcp":
@@ -770,7 +782,7 @@ def main():
         if os.path.exists(sock):
             os.unlink(sock)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(sock); srv.listen(1); srv.settimeout(None)
+        srv.bind(sock); srv.listen(64); srv.settimeout(None)
         try:
             os.chmod(sock, 0o770)
         except OSError:
@@ -784,16 +796,7 @@ def main():
                 log("ACCEPT_ERR %r" % e)
                 time.sleep(0.2)
                 continue
-            try:
-                mux_serve(conn)
-            except Exception as e:
-                log("MUX_SERVE_ERR %r" % e)
-            finally:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
-                log("PORTAL_BROKER_UNIX_MUX_CONN_DONE (still listening)")
+            threading.Thread(target=_mux_bedienen, args=(conn,), daemon=True).start()
 
 if __name__ == "__main__":
     main()

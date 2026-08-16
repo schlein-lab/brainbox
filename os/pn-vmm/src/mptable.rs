@@ -5,6 +5,8 @@ const MP_CONFIG_BASE: u64 = 0x000f_0010;
 pub const LAPIC_ADDR: u32 = 0xfee0_0000;
 pub const IOAPIC_ADDR: u32 = 0xfec0_0000;
 
+pub const IOAPIC_PINS: u8 = 24;
+
 fn checksum(bytes: &[u8]) -> u8 {
     (0u8).wrapping_sub(bytes.iter().fold(0u8, |a, &b| a.wrapping_add(b)))
 }
@@ -42,7 +44,11 @@ pub fn setup(gm: &GuestMemoryMmap, ncpus: u8) -> Result<(), String> {
 
     let mut n_entries: u16 = ncpus as u16 + 2;
 
-    for irq in 0u8..16 {
+    
+    
+    
+    
+    for irq in 0u8..IOAPIC_PINS {
         let mut e = [0u8; 8];
         e[0] = 3;
         e[1] = 0;

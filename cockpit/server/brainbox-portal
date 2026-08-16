@@ -1116,15 +1116,11 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
         tok = cookie["pp_session"].value if "pp_session" in cookie else ""
         if _session_uid(tok) is not None:
             return True
-        
-        
-        if self._is_ws_handshake():
-            try:
-                qtok = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
-                return bool(qtok and _session_uid(qtok) is not None)
-            except Exception:
-                return False
-        return False
+        try:
+            qtok = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
+            return bool(qtok and _session_uid(qtok) is not None)
+        except Exception:
+            return False
 
     @property
     def cfg(self):
@@ -1159,9 +1155,6 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
         p = path or urllib.parse.urlparse(self.path).path
         return any(p == s or p.startswith(s) for s in self._SENSITIVE_PREFIXES)
 
-    def _is_ws_handshake(self):
-        return "websocket" in (self.headers.get("Upgrade", "") or "").lower()
-
     def authed(self):
         pin = self.cfg.get("pin")
         if not pin:
@@ -1171,18 +1164,14 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
 
         if _session_uid(tok) is not None:
             return True
-        
-        
-        
-        
-        if self._is_ws_handshake():
-            try:
-                qtok = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
-                if qtok and _session_uid(qtok) is not None:
-                    return True
-            except Exception:
-                pass
-        
+
+        try:
+            qtok = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
+            if qtok and _session_uid(qtok) is not None:
+                return True
+        except Exception:
+            pass
+
         htok = self.headers.get("X-PP-Token", "")
         if htok and _session_uid(htok) is not None:
             return True
@@ -1291,20 +1280,14 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
         _u = _session_uid(tok)
         if _u is not None:
             return _u
-        
-        
-        if self._is_ws_handshake():
-            try:
-                qtok = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
-                _u = _session_uid(qtok)
-                if _u is not None:
-                    return _u
-            except Exception:
-                pass
-        
-        
-        
-        
+        try:
+            qtok = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
+            _u = _session_uid(qtok)
+            if _u is not None:
+                return _u
+        except Exception:
+            pass
+
         htok = self.headers.get("X-PP-Token", "")
         _u = _session_uid(htok)
         if _u is not None:
@@ -1383,7 +1366,6 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
         "/api/admin/rights": ("_api_admin_rights_list", False),
         "/api/admin/shell-keys": ("_api_admin_shellkeys", False),
         "/api/admin/ram": ("_api_admin_ram", False),
-        "/api/admin/features": ("_api_admin_features", False),
         "/api/admin/shutdown/status": ("_api_admin_shutdown_status", False),
         "/api/hpc-safeguard": ("_api_hpc_safeguard_get", False),
         "/api/voice/route": ("_api_voice_route_get", False),
@@ -2388,9 +2370,7 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
             return self._admin_json(lambda: portal_admin.set_reserved_cores(_admin_ctx(), body.get("n")))
         if u.path == "/api/admin/ram/stop":
             return self._api_admin_ram_stop(self._body())
-        if u.path == "/api/admin/features":                
-            return self._api_admin_features_set(self._body())
-        if u.path == "/api/admin/shutdown":                
+        if u.path == "/api/admin/shutdown":
             return self._api_admin_shutdown(self._body())
         if u.path == "/api/hpc-safeguard":
             return self._api_hpc_safeguard_post(self._body())
@@ -3794,21 +3774,6 @@ class Handler(pn_hpc_safeguard.HpcSafeguardRoutes, portal_mcp.McpRoutes, portal_
         return LOGIN_HTML.replace("%ERR%", err)
 
     def _ws_upgrade(self, handler):
-        
-        
-        
-        
-        
-        
-        origin = self.headers.get("Origin", "")
-        if origin:
-            try:
-                oh = urllib.parse.urlparse(origin).netloc.lower()
-            except Exception:
-                oh = ""              
-            host = (self.headers.get("Host", "") or "").lower()
-            if not oh or oh != host:
-                return self.send_html("cross-origin websocket refused", 403)
         key = self.headers.get("Sec-WebSocket-Key")
         if not key:
             return self.send_html("bad ws", 400)

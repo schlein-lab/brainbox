@@ -234,6 +234,13 @@ def collect_sans(cfg=None, cfg_dir=None):
     entries = ["DNS:" + d for d in dns] + ["IP:" + i for i in ips]
     return dns, ips, entries
 
+def _nonempty(path):
+    try:
+        return os.path.exists(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
 def _ensure_ca_locked(cfg_dir=None, cfg=None):
 
     P = _paths(cfg_dir)
@@ -242,7 +249,7 @@ def _ensure_ca_locked(cfg_dir=None, cfg=None):
         os.chmod(P["ca_dir"], 0o700)
     except Exception:
         pass
-    if os.path.exists(P["ca_cert"]) and os.path.exists(P["ca_key"]):
+    if _nonempty(P["ca_cert"]) and _nonempty(P["ca_key"]):
         return P["ca_cert"], P["ca_key"]
     host = box_hostname()
     subj = "/O=Brainbox/OU=Appliance/CN=Brainbox Root CA (%s)" % host
@@ -271,7 +278,7 @@ def _ensure_ca_locked(cfg_dir=None, cfg=None):
 def ensure_ca(cfg_dir=None, cfg=None):
 
     P = _paths(cfg_dir)
-    if os.path.exists(P["ca_cert"]) and os.path.exists(P["ca_key"]):
+    if _nonempty(P["ca_cert"]) and _nonempty(P["ca_key"]):
         return P["ca_cert"], P["ca_key"]
     with _certs_lock(cfg_dir):
         return _ensure_ca_locked(cfg_dir, cfg)
@@ -295,7 +302,7 @@ def issue_leaf(cfg=None, cfg_dir=None, force=False):
     stamp = hashlib.sha256(san.encode()).hexdigest()
     def _cached_ok():
 
-        if force or not all(os.path.exists(P[k]) for k in ("leaf_cert", "leaf_key", "stamp")):
+        if force or not all(_nonempty(P[k]) for k in ("leaf_cert", "leaf_key", "stamp")):
             return False
         try:
             if open(P["stamp"]).read().strip() != stamp:
@@ -378,7 +385,7 @@ def ensure_portal_cert(cfg=None, cfg_dir=None):
     cfg = cfg or {}
     P = _paths(cfg_dir)
     if not _have_openssl():
-        if os.path.exists(P["leaf_cert"]) and os.path.exists(P["leaf_key"]):
+        if _nonempty(P["leaf_cert"]) and _nonempty(P["leaf_key"]):
             return P["leaf_cert"], P["leaf_key"]
         return None, None
     try:
@@ -386,7 +393,7 @@ def ensure_portal_cert(cfg=None, cfg_dir=None):
         return cert, key
     except Exception as e:
         sys.stderr.write("pn_certs: %s\n" % e)
-        if os.path.exists(P["leaf_cert"]) and os.path.exists(P["leaf_key"]):
+        if _nonempty(P["leaf_cert"]) and _nonempty(P["leaf_key"]):
             return P["leaf_cert"], P["leaf_key"]
         return None, None
 

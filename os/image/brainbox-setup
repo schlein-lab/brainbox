@@ -35,7 +35,6 @@ SERVICE_ENV = os.path.join(BRAINBOX_DIR, "service.env")
 SETUP_COMPLETE = os.path.join(BRAINBOX_DIR, "setup-complete")
 
 INITIAL_PW_FILE = os.path.join(BRAINBOX_DIR, "initial-console-password")
-ACCESS_FILE = os.path.join(BRAINBOX_DIR, "access.txt")
 
 SETUP_CODE_FILE = os.path.join(BRAINBOX_DIR, "setup-code")
 
@@ -312,10 +311,6 @@ LABELS = {
         "ha_pass": "VRRP-Passwort",
         "telegram": "Telegram-Bot-Token",
         "relay": "Relay aktivieren",
-        "media": "Medienserver im LAN sichtbar machen",
-        "media_hint": "Eingeschaltet erscheint die Box bei allen Geräten im Heimnetz als Netzlaufwerk (Windows-Explorer, macOS Finder, Datei-Manager) und als Medienquelle für Fernseher (DLNA). Geteilt wird der Ordner „public“ — nur für angemeldete Freigabe-Mitglieder, nie anonym; Session-Freigaben bleiben zusätzlich einzeln passwortgeschützt. Aus = die Box ist im Netz nicht als Medienserver sichtbar, alle Datei-Ports bleiben zu (empfohlen für den Anfang).",
-        "media_hint2": "Später jederzeit änderbar: Portal → Einstellungen → Medienserver.",
-        "adv_note": "Alle Schalter auf dieser Seite lassen sich später im Portal unter „Einstellungen“ ändern — keine Entscheidung hier ist endgültig.",
         "printer": "Drucker (CUPS)",
         "printer_unavail": "In diesem Abbild noch nicht enthalten: die Box bringt kein CUPS mit und startet keinen Druckdienst. Ein Haken hätte keine Wirkung — deshalb ist er aus.",
         "nas": "NAS-Einbindung",
@@ -448,8 +443,6 @@ LABELS = {
         "done_title": "Fertig eingerichtet",
         "done_portal": "Portal öffnen",
         "done_pin": "Ihre Admin-PIN (jetzt notieren — wird nicht erneut angezeigt)",
-        "done_console": "Konsolen-/sudo-Passwort (jetzt notieren)",
-        "done_console_hint": "Damit an Konsole/SSH anmelden; sudo -i gibt root. Liegt auch unter /etc/brainbox/access.txt auf der Box.",
         "done_ca": "CA-Fingerabdruck",
         "done_trust": "Zertifikat herunterladen",
         "done_report": "Bericht",
@@ -635,10 +628,6 @@ LABELS = {
         "ha_pass": "VRRP password",
         "telegram": "Telegram bot token",
         "relay": "Enable relay",
-        "media": "Expose media server on the LAN",
-        "media_hint": "When on, the box appears on every device in your home network as a network drive (Windows Explorer, macOS Finder, file managers) and as a media source for TVs (DLNA). It shares the „public“ folder — only to signed-in share members, never anonymously; per-session shares stay individually password-protected on top. Off = the box is not visible as a media server and all file ports stay closed (recommended to start with).",
-        "media_hint2": "You can change this at any time later: portal → Settings → Media server.",
-        "adv_note": "Every switch on this page can be changed later in the portal under Settings — no decision here is final.",
         "printer": "Printer (CUPS)",
         "printer_unavail": "Not in this image yet: it ships no CUPS and starts no print service. Ticking the box would have no effect — so it is off.",
         "nas": "NAS mount",
@@ -756,8 +745,6 @@ LABELS = {
         "done_title": "Setup complete",
         "done_portal": "Open portal",
         "done_pin": "Your admin PIN (write it down now — not shown again)",
-        "done_console": "Console/sudo password (write it down now)",
-        "done_console_hint": "Use it at the console/SSH; sudo -i gives root. Also stored at /etc/brainbox/access.txt on the box.",
         "done_ca": "CA fingerprint",
         "done_trust": "Download certificate",
         "done_report": "Report",
@@ -2104,7 +2091,6 @@ def write_site_conf(cfg):
         ("RELAY_ENABLED", cfg.get("RELAY_ENABLED", 0)),
         ("PRINTER_ENABLED", cfg.get("PRINTER_ENABLED", 0)),
         ("NAS_ENABLED", cfg.get("NAS_ENABLED", 0)),
-        ("MEDIA_SERVER_ENABLED", cfg.get("MEDIA_SERVER_ENABLED", 0)),
         ("NAS_URL", cfg.get("NAS_URL", "")),
     ]
     for k, v in kv:
@@ -2816,7 +2802,6 @@ def _apply_access(cfg):
 
             if detect_tool("chage"):
                 run(["chage", "-d", time.strftime("%Y-%m-%d"), user], timeout=10)
-            _write_access_file(user, pw)
             notes.append("console/sudo password set for %s" % user)
         except Exception as e:
             failed.append("password: %s" % e)
@@ -2917,8 +2902,6 @@ def apply(cfg):
         "ssh": {"user": ident["SERVICE_USER"], "host": ip,
                 "keys": len(cfg.get("ssh_keys") or []),
                 "password_auth": bool(cfg.get("ssh_password_auth"))},
-        "console": {"user": ident["SERVICE_USER"],
-                    "password": cfg.get("console_password") or _read_initial_pw() or ""},
         "owner_name": cfg.get("owner_name", ""),
         "report": report,
         "network_changed": bool(cfg.get("_network_changed")),
@@ -3013,16 +2996,6 @@ def _detect_payload_public(full):
         "labels": full.get("labels", {}),
     }
 
-def _detect_payload_public(full):
-    return {
-        "setup_complete": False,
-        "steps": full.get("steps", []),
-        "display_steps": full.get("display_steps", []),
-        "locales": full.get("locales", []),
-        "current_tz": full.get("current_tz", ""),
-        "labels": full.get("labels", {}),
-    }
-
 def _first_wired_nic(nics):
     for n in nics:
         if not n["wifi"]:
@@ -3061,7 +3034,6 @@ def new_cfg(lang="de"):
         "TELEGRAM_TOKEN": "",
         "email": {"host": "", "user": "", "pass": "", "from": ""},
         "RELAY_ENABLED": 0, "PRINTER_ENABLED": 0, "TEAMS_ENABLED": 0,
-        "MEDIA_SERVER_ENABLED": 0,
         "NAS_ENABLED": 0, "NAS_URL": "", "NAS_USER": "", "NAS_PASS": "",
         "WIFI_PSK": "",
     }
@@ -3290,10 +3262,7 @@ def validate_and_merge(cfg, step, fields):
                 cfg["TELEGRAM_TOKEN"] = tg
 
         cfg["RELAY_ENABLED"] = _to_int01(fields.get("RELAY_ENABLED", 0))
-        cfg["MEDIA_SERVER_ENABLED"] = _to_int01(fields.get("MEDIA_SERVER_ENABLED", 0))
-        
-        
-        
+
         cfg["PRINTER_ENABLED"] = 0
 
         nas = _to_int01(fields.get("NAS_ENABLED", 0))
@@ -3361,7 +3330,6 @@ def _sanitize_payload(cfg):
         "HA_ENABLED": cfg["HA_ENABLED"], "HA_VIP": cfg["HA_VIP"],
         "TELEGRAM_TOKEN": mask(cfg.get("TELEGRAM_TOKEN")),
         "RELAY_ENABLED": cfg["RELAY_ENABLED"],
-        "MEDIA_SERVER_ENABLED": cfg.get("MEDIA_SERVER_ENABLED", 0),
         "PRINTER_ENABLED": cfg["PRINTER_ENABLED"],
         "NAS_ENABLED": cfg["NAS_ENABLED"], "NAS_URL": cfg.get("NAS_URL", ""),
     }
@@ -4194,13 +4162,8 @@ function viewAdvanced(){
     field(t("nas_user"),txt("NAS_USER","",""),null,"e_x4")+
     field(t("nas_pass"),txt("NAS_PASS","","","password"),null,"e_x5")+
     "</details>";
-  var md="<details><summary>"+h(t("media"))+"</summary>"+
-    chk("MEDIA_SERVER_ENABLED",t("media"))+
-    "<div class='hint'>"+h(t("media_hint"))+"</div>"+
-    "<div class='hint'>"+h(t("media_hint2"))+"</div></details>";
   return "<div class='step-title'>"+h(t("s7_title"))+"</div>"+
-    "<div class='hint'>"+h(t("optional"))+"</div>"+tg+em+rl+nas+md+
-    "<div class='hint'>"+h(t("adv_note"))+"</div>"+nav(true);
+    "<div class='hint'>"+h(t("optional"))+"</div>"+tg+em+rl+nas+nav(true);
 }
 
 // --- collect + validate a step, POST to /api/validate ---
@@ -4218,12 +4181,8 @@ function errText(v){
   var out=t(s);
   return n?out.replace("%N%",n):out;
 }
-function showErrs(errs){var first=null;for(var k in errs){var el=$("e_"+k);
-  if(!el)continue;el.textContent=errText(errs[k]);
-  var d=el.closest?el.closest("details"):null;
-  while(d){d.open=true;d=(d.parentNode&&d.parentNode.closest)?d.parentNode.closest("details"):null;}
-  if(!first)first=el;}
-  if(first&&first.scrollIntoView)first.scrollIntoView({block:"center"});}
+function showErrs(errs){for(var k in errs){var el=$("e_"+k);
+  if(el)el.textContent=errText(errs[k]);}}
 
 function collect(name){
   if(name==="language")return{step:"language",fields:{LANG_UI:radioVal("lang")}};
@@ -4247,7 +4206,6 @@ function collect(name){
     HA_ENABLED:chkVal("HA_ENABLED"),HA_VIP:val("HA_VIP"),HA_VRID:val("HA_VRID"),
     VRRP_AUTH_PASS:val("VRRP_AUTH_PASS"),TELEGRAM_TOKEN:val("TELEGRAM_TOKEN"),
     RELAY_ENABLED:chkVal("RELAY_ENABLED"),PRINTER_ENABLED:chkVal("PRINTER_ENABLED"),
-    MEDIA_SERVER_ENABLED:chkVal("MEDIA_SERVER_ENABLED"),
     NAS_ENABLED:chkVal("NAS_ENABLED"),NAS_URL:val("NAS_URL"),NAS_USER:val("NAS_USER"),
     NAS_PASS:val("NAS_PASS"),EMAIL_HOST:val("EMAIL_HOST"),EMAIL_USER:val("EMAIL_USER"),
     EMAIL_PASS:val("EMAIL_PASS"),EMAIL_FROM:val("EMAIL_FROM")}};
@@ -4733,18 +4691,11 @@ function renderDone(){
     sshblock="<label>"+h(t("done_ssh"))+"</label><div class='cmd'>ssh "+
       h(p.ssh.user)+"@"+h(p.ssh.host)+"</div>";
   }
-  var consoleblock="";
-  if(p.console&&p.console.password){
-    consoleblock="<label>"+h(t("done_console"))+"</label><div class='cmd'>"+
-      h(p.console.user)+" / "+h(p.console.password)+"</div>"+
-      "<div class='hint'>"+h(t("done_console_hint"))+"</div>";
-  }
   var _nm=(p.owner_name||"").trim();
   var loginHint=_nm ? h(t("done_login_name")).replace("%NAME%", h(_nm)) : h(t("done_login"));
   $("view").innerHTML=
     "<div class='step-title'>✓ "+h(t("done_title"))+"</div>"+warn+
     pinblock+
-    consoleblock+
     "<div class='hint'><b>"+loginHint+"</b></div>"+
     "<label>"+h(t("done_portal"))+"</label><p class='urls'>"+urls+"</p>"+
     "<div class='hint'>"+h(t("done_cert_note"))+"</div>"+
@@ -5225,7 +5176,6 @@ def run_tty(cfg, lang):
     cfg["VOICE_ENABLED"] = 1 if _tty_yesno("%s?" % T("voice"), True) else 0
 
     if _tty_yesno("\nConfigure advanced options?", False):
-        print("  %s" % T("adv_note"))
         if _tty_yesno("%s?" % T("ha"), False):
             cfg["HA_ENABLED"] = 1
             cfg["HA_VIP"] = _tty_ask(T("ha_vip"), "", validate_ipv4)
@@ -5237,12 +5187,7 @@ def run_tty(cfg, lang):
                             else (False, "invalid token")), secret=True)
         cfg["TELEGRAM_TOKEN"] = tg
         cfg["RELAY_ENABLED"] = 1 if _tty_yesno("%s?" % T("relay"), False) else 0
-        
-        
-        print("  %s" % T("media_hint"))
-        print("  %s" % T("media_hint2"))
-        cfg["MEDIA_SERVER_ENABLED"] = 1 if _tty_yesno("%s?" % T("media"), False) else 0
-        
+
         cfg["PRINTER_ENABLED"] = 0
         print("  %s: %s" % (T("printer"), T("printer_unavail")))
         if _tty_yesno("%s?" % T("nas"), False):
@@ -5389,15 +5334,6 @@ def _read_initial_pw():
             return v or None
     except OSError:
         return None
-
-
-def _write_access_file(user, pw):
-    try:
-        with open(ACCESS_FILE, "w", encoding="utf-8") as f:
-            f.write("user: %s\npassword: %s\nroot: sudo -i\n" % (user, pw))
-        os.chmod(ACCESS_FILE, 0o600)
-    except OSError:
-        pass
 
 def _read_setup_code():
 
