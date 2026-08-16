@@ -41,6 +41,11 @@ pub struct HeadlessFb {
     frame: u64,
 
     tap: Arc<Mutex<FrameSlot>>,
+
+    
+    
+    
+    kacheln: Vec<u64>,
 }
 
 impl HeadlessFb {
@@ -49,7 +54,7 @@ impl HeadlessFb {
         let pitch = width.saturating_mul(4);
         let len = (pitch as usize).saturating_mul(height as usize);
         let tap = Arc::new(Mutex::new(FrameSlot { rgba: Vec::new(), width, height, generation: 0 }));
-        Ok(HeadlessFb { width, height, pitch, buf: vec![0u8; len], frame: 0, tap })
+        Ok(HeadlessFb { width, height, pitch, buf: vec![0u8; len], frame: 0, tap, kacheln: Vec::new() })
     }
 
     pub fn frame_tap(&self) -> FrameTap {
@@ -144,6 +149,21 @@ impl HeadlessFb {
         self.frame = self.frame.wrapping_add(1);
 
         let rgba = self.snapshot_rgba();
+        
+        
+        
+        if crate::sehwerk::aktiv() {
+            let (geaendert, _rect) = crate::sehwerk::kacheln_fortschreiben(
+                &rgba,
+                self.width as usize,
+                self.height as usize,
+                &mut self.kacheln,
+            );
+            crate::sehwerk::praesentiert(self.frame, geaendert);
+            if geaendert > 0 {
+                crate::sehwerk::puls_schlag();
+            }
+        }
         if let Ok(mut s) = self.tap.lock() {
             s.rgba = rgba;
             s.width = self.width;

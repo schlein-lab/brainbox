@@ -53,18 +53,25 @@ pub(crate) fn xwl_associate(shared: &Shared, serial: u64, surface: u32, parent_c
         pending_attach: HashMap::new(),
         surf_buffer: HashMap::new(),
         surf_damage: HashMap::new(),
+        pend_damage: HashMap::new(),
         xdg_surf_wl: HashMap::new(),
         popup_surf: HashSet::new(),
+        popup_objs: HashMap::new(),
         subsurface_obj: std::collections::HashMap::new(),
         subsurf_parent: std::collections::HashMap::new(),
         subsurf_pos: std::collections::HashMap::new(),
         keylog: String::new(),
         xparent: Some(parent_cid),
+        commits: 0,
     };
     let vcid = CLIENT_SEQ.fetch_add(1, Ordering::Relaxed);
     g.insert(vcid, vst);
     reg.vcid.insert(serial, vcid);
     eprintln!("[h{parent_cid}] X11 window serial={serial} surface=#{surface} → virtual cid={vcid}");
+    let pid = g.get(&vcid).and_then(|s| s.pid).unwrap_or(-1);
+    crate::winbus::melde(&format!(
+        "\"ereignis\":\"window_added\",\"cid\":{vcid},\"traeger\":{parent_cid},\"pid\":{pid},\"x11\":true"
+    ));
 }
 
 pub(crate) fn xwl_set_title(shared: &Shared, serial: u64, title: &str) -> bool {
@@ -73,7 +80,35 @@ pub(crate) fn xwl_set_title(shared: &Shared, serial: u64, title: &str) -> bool {
         if let Some(st) = shared.lock().unwrap().get_mut(&vcid) {
             if !title.is_empty() {
                 st.title = Some(title.to_string());
+                crate::winbus::melde(&format!(
+                    "\"ereignis\":\"title_changed\",\"cid\":{vcid},\"x11\":true,\"titel\":\"{}\"",
+                    crate::winbus::json_str(title)
+                ));
             }
+            return true;
+        }
+    }
+    false
+}
+
+
+pub(crate) fn xwl_set_meta(shared: &Shared, serial: u64, pid: Option<i32>, klasse: &str) -> bool {
+    let vcid = { xreg().lock().unwrap().vcid.get(&serial).copied() };
+    if let Some(vcid) = vcid {
+        if let Some(st) = shared.lock().unwrap().get_mut(&vcid) {
+            if let Some(p) = pid {
+                if p > 0 {
+                    st.pid = Some(p);
+                }
+            }
+            if !klasse.is_empty() {
+                st.app_id = Some(klasse.to_string());
+            }
+            crate::winbus::melde(&format!(
+                "\"ereignis\":\"window_meta\",\"cid\":{vcid},\"x11\":true,\"pid\":{},\"app\":\"{}\"",
+                pid.unwrap_or(-1),
+                crate::winbus::json_str(klasse)
+            ));
             return true;
         }
     }

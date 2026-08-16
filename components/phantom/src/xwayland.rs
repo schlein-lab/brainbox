@@ -167,6 +167,27 @@ fn report_title(runtime: &str, serial: u64, title: &str) {
     }
 }
 
+
+fn report_meta(runtime: &str, serial: u64, pid: u32, klasse: &str) {
+    if pid == 0 && klasse.is_empty() {
+        return;
+    }
+    let path = format!("{runtime}/phantom.ctl");
+    if let Ok(mut s) = UnixStream::connect(&path) {
+        let _ = s.write_all(format!("xmeta {serial} {pid} {klasse}\n").as_bytes());
+        let _ = s.shutdown(std::net::Shutdown::Write);
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+    }
+}
+
+
+fn wm_class_name(roh: &[u8]) -> String {
+    let teile: Vec<&[u8]> = roh.split(|b| *b == 0).filter(|t| !t.is_empty()).collect();
+    let wahl = teile.get(1).or_else(|| teile.first()).copied().unwrap_or(&[]);
+    String::from_utf8_lossy(wahl).trim().to_string()
+}
+
 fn manage(mut s: UnixStream, runtime: String, rootless: bool) {
 
     let setup: [u8; 12] = [0x6c, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -226,7 +247,9 @@ fn manage(mut s: UnixStream, runtime: String, rootless: bool) {
 
     let serial_atom = intern_atom(&mut s, "WL_SURFACE_SERIAL", &mut pending);
     let net_wm_name = intern_atom(&mut s, "_NET_WM_NAME", &mut pending);
+    let net_wm_pid = intern_atom(&mut s, "_NET_WM_PID", &mut pending);
     const WM_NAME: u32 = 39;
+    const WM_CLASS: u32 = 67;
 
     loop {
         let ev = match pending.pop_front() {
@@ -276,6 +299,17 @@ fn manage(mut s: UnixStream, runtime: String, rootless: bool) {
                         eprintln!("phantom-xwm: window 0x{win:x} serial={serial} title={title:?}");
                     }
                     report_title(&runtime, serial, &title);
+                    
+                    
+                    
+                    let pid_prop = get_property(&mut s, win, net_wm_pid, &mut pending);
+                    let pid = if pid_prop.len() >= 4 {
+                        u32::from_le_bytes([pid_prop[0], pid_prop[1], pid_prop[2], pid_prop[3]])
+                    } else {
+                        0
+                    };
+                    let klasse = wm_class_name(&get_property(&mut s, win, WM_CLASS, &mut pending));
+                    report_meta(&runtime, serial, pid, &klasse);
                 }
             }
             _ => {}
@@ -429,4 +463,20 @@ fn configure_from_request(ev: &[u8; 32]) -> Vec<u8> {
     v.extend_from_slice(&h.to_le_bytes());
     v.extend_from_slice(&bw.to_le_bytes());
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wm_class_name;
+
+    #[test]
+    fn wm_class_nimmt_die_klasse_nicht_die_instanz() {
+        assert_eq!(wm_class_name(b"soffice\0libreoffice-calc\0"), "libreoffice-calc");
+    }
+
+    #[test]
+    fn wm_class_faellt_auf_die_instanz_zurueck() {
+        assert_eq!(wm_class_name(b"nur-instanz\0"), "nur-instanz");
+        assert_eq!(wm_class_name(b""), "");
+    }
 }

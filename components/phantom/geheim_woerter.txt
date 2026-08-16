@@ -1,0 +1,24 @@
+password
+passwort
+passphrase
+kennwort
+pin
+token
+secret
+geheim
+credential
+zugangsdaten
+api key
+api-key
+apikey
+schluessel
+schlüssel
+private key
+seed
+recovery
+wiederherstellung
+otp
+2fa
+mfa
+cvv
+cvc

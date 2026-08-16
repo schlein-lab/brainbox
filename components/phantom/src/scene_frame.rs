@@ -5,7 +5,7 @@ use phantom::headless_fb::FrameTap;
 use phantom::render_placement::{decide_placement, ClientCaps, PlacementPolicy, ServerCaps};
 use phantom::streamd::SceneSource;
 
-use crate::compositor::{drain_foreground_damage, foreground_scene_layers};
+use crate::compositor::foreground_scene_layers;
 use crate::state::BufferInfo;
 use crate::Shared;
 
@@ -182,7 +182,7 @@ fn assemble(packed: &[Packed], keyframe: bool, screen_w: u16, screen_h: u16, sea
 
 #[allow(dead_code)]
 pub fn build_scene_frame(shared: &Shared, screen_w: u16, screen_h: u16, seat_generation: u32) -> Option<Vec<u8>> {
-    build_scene_frame_ex(shared, screen_w, screen_h, seat_generation, false)
+    build_scene_frame_ex(shared, screen_w, screen_h, seat_generation, false, "_legacy")
 }
 
 pub fn build_scene_frame_ex(
@@ -191,13 +191,16 @@ pub fn build_scene_frame_ex(
     screen_h: u16,
     seat_generation: u32,
     force_keyframe: bool,
+    leser: &str,
 ) -> Option<Vec<u8>> {
     let layers = foreground_scene_layers(shared);
     if layers.is_empty() {
         return None;
     }
 
-    let damage = drain_foreground_damage(shared);
+    
+    
+    let damage = crate::compositor::damage_seit(shared, leser);
 
     let now = now_ms();
     let interval = keyframe_interval_ms();
@@ -331,8 +334,8 @@ fn client_caps_from_query(query: &str) -> ClientCaps {
 }
 
 impl SceneSource for BoxSceneSource {
-    fn scene_frame(&self, force_keyframe: bool) -> Option<Vec<u8>> {
-        build_scene_frame_ex(&self.shared, self.screen_w, self.screen_h, self.seat_generation(), force_keyframe)
+    fn scene_frame(&self, force_keyframe: bool, leser: &str) -> Option<Vec<u8>> {
+        build_scene_frame_ex(&self.shared, self.screen_w, self.screen_h, self.seat_generation(), force_keyframe, leser)
     }
 
     fn seat_generation(&self) -> u32 {

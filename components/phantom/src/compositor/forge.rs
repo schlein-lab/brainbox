@@ -13,10 +13,22 @@ pub(crate) fn modbit(code: u16) -> u32 {
     }
 }
 
+
+fn traeger(g: &std::collections::HashMap<u64, crate::ClientState>, cid: u64) -> Option<(u64, u32)> {
+    let st = g.get(&cid)?;
+    let surface = st.surface?;
+    let conn = match st.xparent {
+        Some(p) if g.contains_key(&p) => p,
+        Some(_) => return None,
+        None => cid,
+    };
+    Some((conn, surface))
+}
+
 pub(crate) fn forge_enter(shared: &Shared, cid: u64) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
-    let Some(surface) = st.surface else { return };
+    let Some((conn, surface)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let kbds = kbd_ids(st);
     if kbds.is_empty() {
         return;
@@ -32,14 +44,15 @@ pub(crate) fn forge_enter(shared: &Shared, cid: u64) {
         out.extend(event(*kbd, 1, &p));
     }
     st.serial = serial + 1;
+    crate::winreg::fokus_wechsel(conn, surface);
     let _w = writer.lock().unwrap();
     let _ = sys::send_with_fds(fd, &out, &[]);
 }
 
 pub(crate) fn forge_leave(shared: &Shared, cid: u64) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
-    let Some(surface) = st.surface else { return };
+    let Some((conn, surface)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let kbds = kbd_ids(st);
     if kbds.is_empty() {
         return;
@@ -54,13 +67,15 @@ pub(crate) fn forge_leave(shared: &Shared, cid: u64) {
         out.extend(event(*kbd, 2, &p));
     }
     st.serial = serial + 1;
+    crate::winreg::fokus_loeschen(conn);
     let _w = writer.lock().unwrap();
     let _ = sys::send_with_fds(fd, &out, &[]);
 }
 
 pub(crate) fn route_key(shared: &Shared, cid: u64, code: u16, down: bool, mask: u32, old_mask: u32) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
+    let Some((conn, _)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let kbds = kbd_ids(st);
     if kbds.is_empty() {
         return;
@@ -117,7 +132,8 @@ fn kbd_ids(st: &crate::ClientState) -> Vec<u32> {
 
 pub(crate) fn pointer_enter(shared: &Shared, cid: u64, surface: u32, sx: f64, sy: f64) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
+    let Some((conn, _)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let ptrs = ptr_ids(st);
     if ptrs.is_empty() {
         return;
@@ -142,7 +158,8 @@ pub(crate) fn pointer_enter(shared: &Shared, cid: u64, surface: u32, sx: f64, sy
 
 pub(crate) fn pointer_leave(shared: &Shared, cid: u64, surface: u32) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
+    let Some((conn, _)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let ptrs = ptr_ids(st);
     if ptrs.is_empty() {
         return;
@@ -163,7 +180,8 @@ pub(crate) fn pointer_leave(shared: &Shared, cid: u64, surface: u32) {
 
 pub(crate) fn pointer_motion(shared: &Shared, cid: u64, sx: f64, sy: f64) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
+    let Some((conn, _)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let ptrs = ptr_ids(st);
     if ptrs.is_empty() {
         return;
@@ -186,7 +204,8 @@ pub(crate) fn pointer_motion(shared: &Shared, cid: u64, sx: f64, sy: f64) {
 
 pub(crate) fn pointer_button(shared: &Shared, cid: u64, code: u16, down: bool) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
+    let Some((conn, _)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let ptrs = ptr_ids(st);
     if ptrs.is_empty() {
         return;
@@ -213,7 +232,8 @@ pub(crate) fn pointer_button(shared: &Shared, cid: u64, code: u16, down: bool) {
 
 pub(crate) fn pointer_axis(shared: &Shared, cid: u64, notches: i32) {
     let mut g = shared.lock().unwrap();
-    let Some(st) = g.get_mut(&cid) else { return };
+    let Some((conn, _)) = traeger(&g, cid) else { return };
+    let Some(st) = g.get_mut(&conn) else { return };
     let ptrs = ptr_ids(st);
     if ptrs.is_empty() {
         return;
@@ -238,11 +258,15 @@ pub fn act_pointer(shared: &Shared, cid: u64, action: &str, args: &[&str]) -> Re
 
     let surface = {
         let g = shared.lock().unwrap();
-        let st = g.get(&cid).ok_or_else(|| format!("no client cid={cid}"))?;
-        if st.pointer.is_none() {
+        if g.get(&cid).is_none() {
+            return Err(format!("no client cid={cid}"));
+        }
+        let (conn, surface) =
+            traeger(&g, cid).ok_or_else(|| format!("cid={cid} has no surface"))?;
+        if g.get(&conn).and_then(|st| st.pointer).is_none() {
             return Err(format!("cid={cid} has no wl_pointer (client never called get_pointer)"));
         }
-        st.surface.ok_or_else(|| format!("cid={cid} has no surface"))?
+        surface
     };
     let num = |i: usize| -> Result<f64, String> {
         let s = args.get(i).ok_or_else(|| "missing coordinate".to_string())?;

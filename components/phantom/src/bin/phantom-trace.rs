@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::io::Write;
-use std::os::raw::{c_int, c_long, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_void};
 
 type Pid = i32;
 
@@ -35,7 +35,7 @@ struct IoVec {
 extern "C" {
     fn ptrace(request: c_long, pid: Pid, addr: *mut c_void, data: *mut c_void) -> c_long;
     fn fork() -> Pid;
-    fn execvp(file: *const i8, argv: *const *const i8) -> c_int;
+    fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
     fn waitpid(pid: Pid, status: *mut c_int, options: c_int) -> Pid;
     fn _exit(code: c_int) -> !;
     fn process_vm_readv(
@@ -99,6 +99,12 @@ fn show(bytes: &[u8]) -> String {
 }
 
 fn main() {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        eprintln!("phantom-trace: nur auf x86_64 unterstuetzt (ptrace-Registerlayout ist arch-spezifisch)");
+        std::process::exit(2);
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     let split = args.iter().position(|a| a == "--");
@@ -113,7 +119,7 @@ fn main() {
     };
 
     let cstrs: Vec<CString> = cmd.iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
-    let mut cargv: Vec<*const i8> = cstrs.iter().map(|c| c.as_ptr()).collect();
+    let mut cargv: Vec<*const c_char> = cstrs.iter().map(|c| c.as_ptr()).collect();
     cargv.push(std::ptr::null());
 
     let inject = std::env::var("PHANTOM_INJECT").ok().map(|s| s.replace("\\n", "\n").into_bytes());

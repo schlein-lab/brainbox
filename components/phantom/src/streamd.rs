@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 pub trait SceneSource: Send + Sync {
 
-    fn scene_frame(&self, force_keyframe: bool) -> Option<Vec<u8>>;
+    
+    
+    
+    fn scene_frame(&self, force_keyframe: bool, leser: &str) -> Option<Vec<u8>>;
 
     fn seat_generation(&self) -> u32;
 
@@ -431,7 +434,13 @@ fn serve_scene_bin(stream: &mut TcpStream, scene: &dyn SceneSource, query: &str)
         .split('&')
         .filter_map(|kv| kv.split_once('='))
         .any(|(k, v)| k == "keyframe" && (v == "1" || v.eq_ignore_ascii_case("true")));
-    match scene.scene_frame(force_keyframe) {
+    let leser = query
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| *k == "leser")
+        .map(|(_, v)| v)
+        .unwrap_or("_legacy");
+    match scene.scene_frame(force_keyframe, leser) {
         Some(bytes) => {
             let (w, h) = scene.screen_size();
             let gen = scene.seat_generation();
@@ -477,7 +486,16 @@ fn serve_state(stream: &mut TcpStream, tap: &FrameTap, verdict: &WatchdogVerdict
     let (state, nonblank, generation) = match tap.snapshot() {
         Some((rgba, w, h, gen)) => {
             let nb = nonblank_fraction(&rgba, w, h);
-            let st = verdict.get().unwrap_or_else(|| live.probe(gen));
+            
+            
+            
+            let st = verdict.get().unwrap_or_else(|| {
+                if crate::sehwerk::aktiv() {
+                    zustand_zu_state(crate::sehwerk::blick().1)
+                } else {
+                    live.probe(gen)
+                }
+            });
             (st, nb, gen)
         }
         None => (verdict.get().unwrap_or(State::Idle), 0.0, 0),
@@ -546,9 +564,18 @@ fn serve_mjpeg(
             }
         };
 
-        let fp = seam_fingerprint(&rgba, w, h);
-        let changed = last_fp.map(|p| p != fp).unwrap_or(true);
-        let presented = gen != last_gen;
+        
+        
+        let (changed, presented) = if crate::sehwerk::aktiv() {
+            let (_, z, alter_ms) = crate::sehwerk::blick();
+            let _ = z;
+            (alter_ms < 200, gen != last_gen)
+        } else {
+            let fp = seam_fingerprint(&rgba, w, h);
+            let c = last_fp.map(|p| p != fp).unwrap_or(true);
+            last_fp = Some(fp);
+            (c, gen != last_gen)
+        };
         if changed {
             last_change = Instant::now();
         }
@@ -559,7 +586,6 @@ fn serve_mjpeg(
         if presented {
             last_present = Instant::now();
         }
-        last_fp = Some(fp);
         last_gen = gen;
 
         let still_for = last_change.elapsed();
@@ -570,7 +596,13 @@ fn serve_mjpeg(
         } else {
             State::Idle
         };
-        let state = verdict.get().unwrap_or(heuristic);
+        let state = verdict.get().unwrap_or_else(|| {
+            if crate::sehwerk::aktiv() {
+                zustand_zu_state(crate::sehwerk::blick().1)
+            } else {
+                heuristic
+            }
+        });
 
         live.publish(state, gen, changed);
 
@@ -592,6 +624,14 @@ fn serve_mjpeg(
 
         let frame_ms = (1000.0 / fps.max(0.1)) as u64;
         std::thread::sleep(Duration::from_millis(frame_ms.clamp(66, 1000)));
+    }
+}
+
+fn zustand_zu_state(z: crate::sehwerk::Zustand) -> State {
+    match z {
+        crate::sehwerk::Zustand::Working => State::Working,
+        crate::sehwerk::Zustand::Idle => State::Idle,
+        crate::sehwerk::Zustand::Stuck => State::Stuck,
     }
 }
 

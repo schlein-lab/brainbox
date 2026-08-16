@@ -45,11 +45,22 @@ pub(crate) struct ClientState {
     pub(crate) pending_attach: HashMap<u32, u32>,
     pub(crate) surf_buffer: HashMap<u32, u32>,
 
-    pub(crate) surf_damage: HashMap<u32, Vec<(i32, i32, i32, i32)>>,
+    
+    
+    
+    
+    
+    pub(crate) surf_damage: HashMap<u32, Vec<phantom::sehwerk::Schaden>>,
+    pub(crate) pend_damage: HashMap<u32, Vec<(phantom::sehwerk::Raum, (i32, i32, i32, i32))>>,
 
     pub(crate) xdg_surf_wl: HashMap<u32, u32>,
 
     pub(crate) popup_surf: HashSet<u32>,
+
+    
+    
+    
+    pub(crate) popup_objs: HashMap<u32, u32>,
 
     pub(crate) subsurface_obj: HashMap<u32, u32>,
 
@@ -60,6 +71,14 @@ pub(crate) struct ClientState {
     pub(crate) keylog: String,
 
     pub(crate) xparent: Option<u64>,
+
+    
+    
+    
+    
+    
+    
+    pub(crate) commits: u64,
 }
 
 pub(crate) type Shared = Arc<Mutex<HashMap<u64, ClientState>>>;

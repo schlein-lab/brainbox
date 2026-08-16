@@ -20,6 +20,8 @@ mod proxy;
 mod scene_frame;
 mod rfb_input;
 mod state;
+mod winbus;
+mod winreg;
 mod xwl;
 
 use control::control_server;
@@ -30,9 +32,12 @@ pub(crate) use act::uid_to_name;
 pub(crate) use state::{BufferInfo, ClientState, Shared, CLIENT_SEQ};
 pub(crate) use xwl::{xwl_associate, xwl_parent_gone, xwl_surface_gone};
 
+
 const CONTROL_VERBS: &[&str] = &[
-    "list", "clients", "act", "sense", "kbd", "focus", "snapshot", "inject", "inject-title",
-    "keys", "dock", "room", "launch", "spawn", "spielwiese", "scene", "screen", "cap-status",
+    "list", "clients", "act", "sense", "kbd", "focus", "popup-zu", "snapshot", "inject", "inject-title",
+    "keys", "dock", "room", "launch", "spawn", "spielwiese", "foreground", "fg", "scene",
+    "screen", "cap", "cap-status", "xwin", "record", "await", "verbs", "delta", "xmeta",
+    "zoom", "som", "notiz",
 ];
 
 fn print_help() {
@@ -188,7 +193,9 @@ fn main() {
 
     let resolve = |n: &str| if n.starts_with('/') { n.to_string() } else { format!("{runtime}/{n}") };
     let listen_path = resolve(&listen_name);
-    let ctl_path = format!("{runtime}/phantom.ctl");
+    
+    
+    let ctl_path = std::env::var("PHANTOM_CTL").unwrap_or_else(|_| format!("{runtime}/phantom.ctl"));
 
     let shared: Shared = Arc::new(Mutex::new(HashMap::new()));
 
@@ -196,6 +203,15 @@ fn main() {
         let shared = shared.clone();
         let ctl_path = ctl_path.clone();
         thread::spawn(move || control_server(&ctl_path, shared));
+    }
+
+    
+    
+    
+    match std::env::var("PHANTOM_WINEVENTS").ok().as_deref() {
+        Some("0") => {}
+        Some(p) if !p.is_empty() => winbus::starte(&resolve(p)),
+        _ => winbus::starte(&format!("{runtime}/phantom.events")),
     }
 
     let run_app = l("App starten mit", "run an app with");
@@ -208,6 +224,7 @@ fn main() {
     }
 
     if headless {
+        eprintln!("phantom: stand 2026-08-14b (shm-pool-raeumung)");
         eprintln!("phantom: headless {listen_path}  {}", l("(kein Upstream — phantom IST das Display)", "(no upstream — phantom IS the display)"));
         eprintln!("phantom: control {ctl_path}");
         eprintln!("phantom: {run_app}:  WAYLAND_DISPLAY={listen_name} <app>");
@@ -222,6 +239,19 @@ fn main() {
         std::process::exit(1);
     }
 
+    
+    
+    
+    
+    if !listen_name.contains('/') && !listen_name.starts_with("wayland") {
+        eprintln!(
+            "phantom: '{listen_name}' {}",
+            l(
+                "ist KEIN verb — starte PROXY-anzeigeserver dieses namens. verbs: `phantomctl verbs`; abbruch: Strg-C.",
+                "is NOT a verb — starting a PROXY display server of that name. verbs: `phantomctl verbs`; abort: Ctrl-C."
+            )
+        );
+    }
     let _ = std::fs::remove_file(&listen_path);
     let listener = match UnixListener::bind(&listen_path) {
         Ok(l) => l,
@@ -244,6 +274,7 @@ fn main() {
                 eprintln!("[c{cid}] {e}");
             }
             shared.lock().unwrap().remove(&cid);
+            crate::compositor::focus_override_tot(cid);
             eprintln!("[c{cid}] closed");
         });
     }

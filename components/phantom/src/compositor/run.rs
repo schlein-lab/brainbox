@@ -727,6 +727,11 @@ pub fn run(listen_path: &str, shared: Shared) {
         present.present();
 
         d.present();
+        
+        
+        if let Some(z) = phantom::sehwerk::wechsel_abholen() {
+            crate::winbus::melde(&format!("\"ereignis\":\"state\",\"zustand\":\"{}\"", z.wort()));
+        }
 
         if let Some(p) = &shot_path {
             if last_shot.elapsed() > Duration::from_millis(1000) {

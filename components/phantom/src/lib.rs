@@ -1,4 +1,6 @@
 pub mod cap;
+pub mod redakt;
+pub mod sehwerk;
 pub mod drm;
 pub mod headless_fb;
 pub mod evdev;

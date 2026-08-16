@@ -18,6 +18,16 @@ pub(crate) fn take_focus_dirty() -> bool {
     FOCUS_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
+
+pub fn focus_override_tot(cid: u64) -> bool {
+    if FOCUSED.load(std::sync::atomic::Ordering::Relaxed) == cid {
+        FOCUSED.store(FOCUS_AUTO, std::sync::atomic::Ordering::Relaxed);
+        FOCUS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
 pub(crate) static DOCK_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn set_dock_mode(mode: u8) {

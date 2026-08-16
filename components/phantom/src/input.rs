@@ -86,6 +86,10 @@ impl VirtualInput {
         };
         sys::ioctl_val(fd, UI_DEV_SETUP, &setup as *const _ as u64)?;
         sys::ioctl_val(fd, UI_DEV_CREATE, 0)?;
+        
+        
+        
+        std::thread::sleep(std::time::Duration::from_millis(300));
         Ok(Self { dev })
     }
 
@@ -107,6 +111,31 @@ impl VirtualInput {
         self.syn()?;
         self.emit(EV_KEY, code, 0)?;
         self.syn()
+    }
+
+    
+    
+    
+    
+    pub fn kombi(&mut self, code: u16, maske: u32) -> io::Result<()> {
+        let modi: &[(u32, u16)] = &[(1, 42), (4, 29), (8, 56), (128, 100)];
+        for &(bit, mcode) in modi {
+            if maske & bit != 0 {
+                self.emit(EV_KEY, mcode, 1)?;
+                self.syn()?;
+            }
+        }
+        self.emit(EV_KEY, code, 1)?;
+        self.syn()?;
+        self.emit(EV_KEY, code, 0)?;
+        self.syn()?;
+        for &(bit, mcode) in modi.iter().rev() {
+            if maske & bit != 0 {
+                self.emit(EV_KEY, mcode, 0)?;
+                self.syn()?;
+            }
+        }
+        Ok(())
     }
 
     pub fn enter(&mut self) -> io::Result<()> {
@@ -271,6 +300,19 @@ pub enum Modifier {
     None,
     Shift,
     AltGr,
+    
+    
+    Ctrl,
+}
+
+
+pub fn modifier_maske(m: Modifier) -> u32 {
+    match m {
+        Modifier::None => 0,
+        Modifier::Shift => 1,
+        Modifier::Ctrl => 4,
+        Modifier::AltGr => 128,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -379,7 +421,7 @@ pub fn char_to_key_de(ch: char) -> Option<(u16, Modifier)> {
         '[' => (9, AltGr),
         ']' => (10, AltGr),
         '}' => (11, AltGr),
-        '\\' => (12, AltGr), // AltGr + ß
+        '\\' => (12, AltGr), 
         '|' => (86, AltGr),
         '~' => (27, AltGr),
         _ => return None,

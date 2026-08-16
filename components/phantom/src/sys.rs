@@ -46,6 +46,11 @@ const MAP_SHARED: c_int = 0x1;
 pub struct Mmap {
     ptr: *mut c_void,
     len: usize,
+    
+    
+    
+    
+    fd: Option<std::os::fd::OwnedFd>,
 }
 
 unsafe impl Send for Mmap {}
@@ -60,8 +65,27 @@ impl Mmap {
         if ptr as isize == -1 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Mmap { ptr, len })
+        Ok(Mmap { ptr, len, fd: None })
     }
+
+    
+    pub fn map_read_owned(fd: std::os::fd::OwnedFd, len: usize) -> io::Result<Mmap> {
+        use std::os::fd::AsRawFd;
+        let mut m = Mmap::map_read(fd.as_raw_fd(), len)?;
+        m.fd = Some(fd);
+        Ok(m)
+    }
+
+    
+    pub fn neu_spannen(&self, len: usize) -> io::Result<Mmap> {
+        use std::os::fd::AsRawFd;
+        let Some(fd) = self.fd.as_ref() else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "Abbildung ohne Deskriptor"));
+        };
+        let neu = fd.try_clone()?;
+        Mmap::map_read_owned(neu, len)
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
     }

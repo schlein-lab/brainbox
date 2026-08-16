@@ -60,7 +60,20 @@ const GLOBALS: &[(u32, &str, u32)] = &[
     (7, "wl_subcompositor", 1),
 
     (8, "xwayland_shell_v1", 1),
+
+    
+    
+    
+    
+    (9, "zxdg_decoration_manager_v1", 1),
 ];
+
+
+const DEKO_SERVER_SEITE: u32 = 2;
+
+fn deko_angeboten() -> bool {
+    std::env::var_os("PHANTOM_NO_DECORATION").is_none()
+}
 
 fn keymap_string() -> String {
     let sym = match active_layout() {
@@ -78,7 +91,93 @@ fn keymap_string() -> String {
 }
 
 pub fn run(listen_path: &str, shared: Shared) {
+    {
+        let sh = shared.clone();
+        thread::spawn(move || geraete_eingaben(sh));
+    }
     run_with(listen_path, shared, None, None)
+}
+
+
+fn eingabegeraete_anzahl() -> usize {
+    std::fs::read_dir("/dev/input")
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with("event"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+
+fn geraete_eingaben(shared: Shared) {
+    use phantom::evdev::{InputEv, InputHub};
+
+    let mut mods: u32 = 0;
+    let mut entered: Option<u64> = None;
+    let mut hub: Option<InputHub> = None;
+    let mut fds: Vec<c_int> = Vec::new();
+    
+    
+    
+    
+    
+    let mut zuletzt_gemeldet: Option<usize> = None;
+    let mut versucht_bei: Option<usize> = None;
+
+    loop {
+        let da = eingabegeraete_anzahl();
+        let offen = hub.as_ref().map(|h| h.device_count()).unwrap_or(0);
+        if da != offen && versucht_bei != Some(da) {
+            versucht_bei = Some(da);
+            hub = if da > 0 { InputHub::open_all(false).ok() } else { None };
+            fds = hub.as_ref().map(|h| h.fds()).unwrap_or_default();
+            let jetzt = hub.as_ref().map(|h| h.device_count()).unwrap_or(0);
+            if zuletzt_gemeldet != Some(jetzt) {
+                zuletzt_gemeldet = Some(jetzt);
+                if jetzt > 0 {
+                    eprintln!("headless: {jetzt} Eingabegeraet(e) -- kbd landet im \
+                               fokussierten Fenster");
+                } else if da > 0 {
+                    
+                    
+                    eprintln!("headless: {da} Geraet(e) in /dev/input, aber keines zu oeffnen \
+                               -- `phantom kbd` bleibt wirkungslos (Rechte? Gruppe 'input'?). \
+                               `phantom act <cid>` ist davon nicht betroffen.");
+                }
+            }
+        }
+        if fds.is_empty() {
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let bereit = match sys::poll_readable_timeout(&fds, 200) {
+            Ok(Some(i)) => i,
+            _ => continue,
+        };
+        let Some(h) = hub.as_mut() else { continue };
+        for ev in h.read(bereit) {
+            let InputEv::Key { code, down } = ev else { continue };
+            let mb = crate::compositor::modbit(code);
+            let alt = mods;
+            if mb != 0 {
+                if down {
+                    mods |= mb;
+                } else {
+                    mods &= !mb;
+                }
+            }
+            let Some(cid) = crate::compositor::focused_cid(&shared) else { continue };
+            if entered != Some(cid) {
+                if let Some(vorher) = entered {
+                    crate::compositor::forge_leave(&shared, vorher);
+                }
+                crate::compositor::forge_enter(&shared, cid);
+                entered = Some(cid);
+            }
+            crate::compositor::route_key(&shared, cid, code, down, mods, alt);
+        }
+    }
 }
 
 pub fn run_with(listen_path: &str, shared: Shared, damage: Option<SharedDamage>, present: Option<Presenter>) {
@@ -99,8 +198,15 @@ pub fn run_with(listen_path: &str, shared: Shared, damage: Option<SharedDamage>,
             let cid = crate::CLIENT_SEQ.fetch_add(1, Ordering::Relaxed);
             serve_client(client, cid, shared.clone(), damage, present);
             crate::xwl_parent_gone(&shared, cid);
+            crate::winreg::conn_gone(&shared, cid);
             shared.lock().unwrap().remove(&cid);
             eprintln!("[h{cid}] closed");
+            crate::winbus::melde(&format!("\"ereignis\":\"connection_closed\",\"cid\":{cid}"));
+            if crate::compositor::focus_override_tot(cid) {
+                crate::winbus::melde(&format!(
+                    "\"ereignis\":\"focus_auto_heilung\",\"cid\":{cid}"
+                ));
+            }
         });
     }
 }
@@ -131,13 +237,16 @@ fn serve_client(stream: UnixStream, cid: u64, shared: Shared, damage: Option<Sha
             pending_attach: HashMap::new(),
             surf_buffer: HashMap::new(),
             surf_damage: HashMap::new(),
+            pend_damage: HashMap::new(),
             xdg_surf_wl: HashMap::new(),
             popup_surf: HashSet::new(),
+            popup_objs: HashMap::new(),
             subsurface_obj: HashMap::new(),
             subsurf_parent: HashMap::new(),
             subsurf_pos: HashMap::new(),
             keylog: String::new(),
             xparent: None,
+            commits: 0,
         };
         shared.lock().unwrap().insert(cid, st);
     }
@@ -213,6 +322,7 @@ fn serve_client(stream: UnixStream, cid: u64, shared: Shared, damage: Option<Sha
         entered: HashSet::new(),
         debug: std::env::var_os("PHANTOM_DEBUG").is_some(),
         xwl_surf: HashMap::new(),
+        toplevel_surface: HashMap::new(),
     };
 
     let mut acc: Vec<u8> = Vec::new();
@@ -273,12 +383,24 @@ struct Srv {
     entered: HashSet<u32>,
     debug: bool,
     xwl_surf: HashMap<u32, u32>,
+    
+    
+    toplevel_surface: HashMap<u32, u32>,
 }
 
 impl Srv {
     fn with_state<R>(&self, f: impl FnOnce(&mut ClientState) -> R) -> Option<R> {
         let mut g = self.shared.lock().unwrap();
         g.get_mut(&self.cid).map(f)
+    }
+
+    
+    
+    fn window_cid(&self, toplevel: u32) -> u64 {
+        match self.toplevel_surface.get(&toplevel) {
+            Some(&surf) => crate::winreg::cid_for_surface(self.cid, surf),
+            None => self.cid,
+        }
     }
 
     fn next_serial(&self) -> u32 {
@@ -318,6 +440,9 @@ impl Srv {
                 let reg = u32le(payload, 0);
                 self.objects.insert(reg, "wl_registry".into());
                 for &(name, ifc, ver) in GLOBALS {
+                    if ifc == "zxdg_decoration_manager_v1" && !deko_angeboten() {
+                        continue;
+                    }
                     let mut p = Vec::new();
                     p_u32(&mut p, name);
                     p_str(&mut p, ifc);
@@ -369,7 +494,9 @@ impl Srv {
                 self.objects.insert(pool, "wl_shm_pool".into());
                 if !self.pending.is_empty() {
                     let fd = self.pending.remove(0);
-                    if let Ok(m) = sys::Mmap::map_read(fd.as_raw_fd(), size) {
+                    
+                    
+                    if let Ok(m) = sys::Mmap::map_read_owned(fd, size) {
                         let m = Arc::new(m);
                         self.with_state(|st| {
                             st.pools.insert(pool, m);
@@ -392,6 +519,60 @@ impl Srv {
                 self.with_state(|st| {
                     st.buffers.insert(id, info);
                 });
+            }
+
+            
+            
+            
+            ("wl_shm_pool", 2) => {
+                let size = u32le(payload, 0) as usize;
+                self.with_state(|st| {
+                    let Some(alt) = st.pools.get(&sender) else { return };
+                    if size <= alt.len() {
+                        return; 
+                    }
+                    match alt.neu_spannen(size) {
+                        Ok(neu) => {
+                            st.pools.insert(sender, Arc::new(neu));
+                        }
+                        Err(e) => eprintln!("[h] wl_shm_pool.resize {size}: {e}"),
+                    }
+                });
+            }
+
+            
+            
+            
+            
+            
+            ("wl_shm_pool", 1) => {
+                self.objects.remove(&sender);
+                self.with_state(|st| {
+                    if !st.buffers.values().any(|b| b.pool == sender) {
+                        st.pools.remove(&sender);
+                    }
+                });
+            }
+
+            
+            
+            ("wl_buffer", 0) => {
+                self.objects.remove(&sender);
+                let verwaist = self
+                    .with_state(|st| match st.buffers.remove(&sender) {
+                        Some(info) if !st.buffers.values().any(|b| b.pool == info.pool) => {
+                            Some(info.pool)
+                        }
+                        _ => None,
+                    })
+                    .flatten();
+                if let Some(pool) = verwaist {
+                    if !self.objects.contains_key(&pool) {
+                        self.with_state(|st| {
+                            st.pools.remove(&pool);
+                        });
+                    }
+                }
             }
 
             ("wl_seat", 0) => {
@@ -454,6 +635,28 @@ impl Srv {
             ("xdg_wm_base", 1) => {
                 self.objects.insert(u32le(payload, 0), "xdg_positioner".into());
             }
+
+            
+            
+            
+            
+            ("zxdg_decoration_manager_v1", 1) => {
+                let deko = u32le(payload, 0);
+                self.objects.insert(deko, "zxdg_toplevel_decoration_v1".into());
+                let mut p = Vec::new();
+                p_u32(&mut p, DEKO_SERVER_SEITE);
+                out.extend(event(deko, 0, &p));
+            }
+            
+            
+            ("zxdg_toplevel_decoration_v1", 1) | ("zxdg_toplevel_decoration_v1", 2) => {
+                let mut p = Vec::new();
+                p_u32(&mut p, DEKO_SERVER_SEITE);
+                out.extend(event(sender, 0, &p));
+            }
+            ("zxdg_toplevel_decoration_v1", 0) => {
+                self.objects.remove(&sender);
+            }
             ("xdg_wm_base", 2) => {
 
                 let xs = u32le(payload, 0);
@@ -470,27 +673,73 @@ impl Srv {
                 if let Some(surf) = self.surface_xdg.iter().find(|(_, &x)| x == sender).map(|(&s, _)| s) {
                     self.with_state(|st| {
                         st.popup_surf.remove(&surf);
-                        st.surface = Some(surf);
+                        st.popup_objs.remove(&surf);
                     });
+                    
+                    
+                    
+                    
+                    self.toplevel_surface.insert(tl, surf);
+                    crate::winreg::window_added(&self.shared, self.cid, surf);
                 }
+            }
+            ("xdg_toplevel", 0) => {
+
+                if let Some(surf) = self.toplevel_surface.remove(&sender) {
+                    crate::winreg::window_gone(&self.shared, self.cid, surf);
+                }
+                self.objects.remove(&sender);
             }
             ("xdg_surface", 2) => {
 
-                self.objects.insert(u32le(payload, 0), "xdg_popup".into());
+                let popup_obj = u32le(payload, 0);
+                self.objects.insert(popup_obj, "xdg_popup".into());
                 if let Some(surf) = self.surface_xdg.iter().find(|(_, &x)| x == sender).map(|(&s, _)| s) {
                     self.with_state(|st| {
                         st.popup_surf.insert(surf);
+                        st.popup_objs.insert(surf, popup_obj);
                     });
                 }
             }
+            ("xdg_popup", 0) => {
+                
+                
+                self.objects.remove(&sender);
+                self.with_state(|st| {
+                    if let Some((&surf, _)) =
+                        st.popup_objs.iter().find(|(_, &o)| o == sender)
+                    {
+                        st.popup_objs.remove(&surf);
+                        st.popup_surf.remove(&surf);
+                    }
+                });
+            }
 
+            
+            
+            
+            
             ("xdg_toplevel", 2) => {
                 let t = read_str(payload, 0);
-                self.with_state(|st| st.title = Some(t));
+                let ziel = self.window_cid(sender);
+                crate::winbus::melde(&format!(
+                    "\"ereignis\":\"title_changed\",\"cid\":{ziel},\"titel\":\"{}\"",
+                    crate::winbus::json_str(&t)
+                ));
+                if let Some(st) = self.shared.lock().unwrap().get_mut(&ziel) {
+                    st.title = Some(t);
+                }
             }
             ("xdg_toplevel", 3) => {
                 let a = read_str(payload, 0);
-                self.with_state(|st| st.app_id = Some(a));
+                let ziel = self.window_cid(sender);
+                crate::winbus::melde(&format!(
+                    "\"ereignis\":\"app_id_set\",\"cid\":{ziel},\"app_id\":\"{}\"",
+                    crate::winbus::json_str(&a)
+                ));
+                if let Some(st) = self.shared.lock().unwrap().get_mut(&ziel) {
+                    st.app_id = Some(a);
+                }
             }
 
             ("wl_surface", 1) => {
@@ -505,26 +754,29 @@ impl Srv {
                 });
             }
             ("wl_surface", 2) => {
-
+                
+                
+                
                 let x = u32le(payload, 0) as i32;
                 let y = u32le(payload, 4) as i32;
                 let w = u32le(payload, 8) as i32;
                 let h = u32le(payload, 12) as i32;
                 if w > 0 && h > 0 {
                     self.with_state(|st| {
-                        st.surf_damage.entry(sender).or_default().push((x, y, w, h));
+                        pend_schaden(st, sender, phantom::sehwerk::Raum::Surface, (x, y, w, h));
                     });
                 }
             }
             ("wl_surface", 9) => {
-
+                
+                
                 let x = u32le(payload, 0) as i32;
                 let y = u32le(payload, 4) as i32;
                 let w = u32le(payload, 8) as i32;
                 let h = u32le(payload, 12) as i32;
                 if w > 0 && h > 0 {
                     self.with_state(|st| {
-                        st.surf_damage.entry(sender).or_default().push((x, y, w, h));
+                        pend_schaden(st, sender, phantom::sehwerk::Raum::Buffer, (x, y, w, h));
                     });
                 }
             }
@@ -573,9 +825,62 @@ impl Srv {
                             out.extend(event(prev, 0, &[]));
                         }
                     }
-                    self.with_state(|st| {
-                        st.surf_buffer.insert(sender, b);
-                    });
+                    
+                    
+                    
+                    
+                    
+                    let seq = phantom::sehwerk::naechste_seq();
+                    let mut rects_fuer_meldung: Vec<(i32, i32, i32, i32)> = Vec::new();
+                    let mut flaeche = (0i32, 0i32);
+                    let mut titel_fuer_meldung = String::new();
+                    {
+                        let mut g = self.shared.lock().unwrap();
+                        if let Some(st) = g.get_mut(&self.cid) {
+                            
+                            
+                            
+                            titel_fuer_meldung = st.title.clone().unwrap_or_default();
+                            st.surf_buffer.insert(sender, b);
+                            let f = st
+                                .buffers
+                                .get(&b)
+                                .map(|i| (i.width, i.height))
+                                .unwrap_or((0, 0));
+                            flaeche = f;
+                            let pend = st.pend_damage.remove(&sender).unwrap_or_default();
+                            let ring = st.surf_damage.entry(sender).or_default();
+                            for (raum, r) in pend {
+                                let r = if r.2 < 0 {
+                                    
+                                    (0, 0, f.0.max(1), f.1.max(1))
+                                } else {
+                                    r
+                                };
+                                phantom::sehwerk::schaden_anfuegen(ring, raum, r, seq, f);
+                                rects_fuer_meldung.push(r);
+                            }
+                        }
+                        
+                        
+                        
+                        let fd = g.get(&self.cid).map(|st| st.client_fd);
+                        if let Some(fd) = fd {
+                            for st in g.values_mut() {
+                                if st.client_fd == fd {
+                                    st.commits = st.commits.wrapping_add(1);
+                                }
+                            }
+                        }
+                    }
+                    melde_commit_koalesziert(
+                        self.cid,
+                        seq,
+                        &rects_fuer_meldung,
+                        flaeche,
+                        &titel_fuer_meldung,
+                    );
+                    phantom::sehwerk::puls_schlag();
 
                     if let Some(d) = &self.damage {
                         d.mark();
@@ -617,6 +922,10 @@ impl Srv {
             ("wl_surface", 0) => {
 
                 crate::xwl_surface_gone(&self.shared, self.cid, sender);
+                
+                
+                self.toplevel_surface.retain(|_, &mut s| s != sender);
+                crate::winreg::window_gone(&self.shared, self.cid, sender);
             }
 
             ("wl_data_device_manager", 0) => {
@@ -689,4 +998,64 @@ fn output_events(id: u32) -> Vec<u8> {
 
     out.extend(event(id, 2, &[]));
     out
+}
+
+
+fn pend_schaden(
+    st: &mut crate::state::ClientState,
+    surface: u32,
+    raum: phantom::sehwerk::Raum,
+    r: (i32, i32, i32, i32),
+) {
+    let pend = st.pend_damage.entry(surface).or_default();
+    if pend.len() >= phantom::sehwerk::RING_DECKEL {
+        pend.clear();
+        pend.push((phantom::sehwerk::Raum::Surface, (0, 0, -1, -1)));
+        return;
+    }
+    if let Some(l) = pend.last() {
+        if l.1 .2 < 0 {
+            return; 
+        }
+    }
+    pend.push((raum, r));
+}
+
+
+fn melde_commit_koalesziert(
+    cid: u64,
+    seq: u64,
+    rects: &[(i32, i32, i32, i32)],
+    flaeche: (i32, i32),
+    titel: &str,
+) {
+    if rects.is_empty() {
+        return;
+    }
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    static LETZTE: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+    let m = LETZTE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let mut g = m.lock().unwrap_or_else(|p| p.into_inner());
+        let jetzt = Instant::now();
+        match g.get(&cid) {
+            Some(t) if jetzt.duration_since(*t) < Duration::from_millis(100) => return,
+            _ => {
+                g.insert(cid, jetzt);
+                
+                if g.len() > 64 {
+                    g.retain(|_, t| jetzt.duration_since(*t) < Duration::from_secs(60));
+                }
+            }
+        }
+    }
+    let wo = phantom::sehwerk::region_wort(rects, flaeche);
+    
+    let kurz: String = titel.chars().take(60).collect();
+    crate::winbus::melde(&format!(
+        "\"ereignis\":\"commit\",\"cid\":{cid},\"seq\":{seq},\"rects\":{},\"wo\":\"{wo}\",\"titel\":\"{}\"",
+        rects.len(),
+        crate::winbus::json_str(&kurz)
+    ));
 }

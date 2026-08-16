@@ -15,7 +15,17 @@ pub struct Gate {
     token_path: String,
 }
 
-const ALWAYS_OK: &[&str] = &["", "list", "clients", "help", "cap", "cap-status", "xwin"];
+const ALWAYS_OK: &[&str] = &["", "list", "clients", "help", "cap", "cap-status", "xwin", "xmeta"];
+
+
+const CONTENT_VERBS: &[&str] =
+    &["keys", "sense", "snapshot", "record", "delta", "sicht", "such", "shot", "zoom", "som"];
+
+
+pub fn immer_ok_verb(zeile: &str) -> bool {
+    let verb = zeile.split([' ', '\t']).next().unwrap_or("");
+    ALWAYS_OK.contains(&verb)
+}
 
 impl Gate {
     pub fn init(runtime: &str) -> Gate {
@@ -55,8 +65,11 @@ impl Gate {
         )
     }
 
-    pub fn authorize(&self, line: &str, peer_uid: Option<u32>) -> Result<String, String> {
-
+    
+    
+    
+    
+    pub fn authorize(&self, line: &str, peer_uid: Option<u32>) -> Result<(String, bool), String> {
         let (token_ok, eff) = match line.strip_prefix("tok:") {
             Some(rest) => {
                 let mut sp = rest.splitn(2, ' ');
@@ -67,9 +80,36 @@ impl Gate {
             None => (false, line.to_string()),
         };
 
-        let verb = eff.split([' ', '\t']).next().unwrap_or("");
+        
+        let ohne_sitz = eff.strip_prefix("sitz:").and_then(|r| r.split_once(' ').map(|(_, c)| c)).unwrap_or(&eff);
+        let verb = ohne_sitz.trim_start().split([' ', '\t']).next().unwrap_or("");
+
+        let vertraut = match self.policy {
+            Policy::Off => true,
+            _ => token_ok || peer_uid.map_or(false, |u| u == self.our_uid),
+        };
+
+        if CONTENT_VERBS.contains(&verb) {
+            
+            let allow = match self.policy {
+                Policy::Off => true,
+                Policy::SameUid => token_ok || peer_uid.map_or(false, |u| u == self.our_uid),
+                Policy::Cold => token_ok,
+            };
+            return if allow {
+                Ok((eff, vertraut))
+            } else {
+                Err(format!(
+                    "capability denied: '{verb}' liefert inhalte und braucht autorisierung \
+                     (PHANTOM_CAP={}). tok:<token> {verb} … — token: {} (0600).",
+                    self.policy_name(),
+                    self.token_path
+                ))
+            };
+        }
+
         if ALWAYS_OK.contains(&verb) {
-            return Ok(eff);
+            return Ok((eff, vertraut));
         }
 
         let allow = match self.policy {
@@ -81,7 +121,7 @@ impl Gate {
         };
 
         if allow {
-            Ok(eff)
+            Ok((eff, vertraut))
         } else {
             Err(format!(
                 "capability denied: '{verb}' requires authorization (PHANTOM_CAP={}). \

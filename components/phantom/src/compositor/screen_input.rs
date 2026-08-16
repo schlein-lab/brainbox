@@ -3,7 +3,7 @@ use super::pick::{focused_cid, focused_geom, foreground_cid, over_client};
 use super::state::{seat_size, wake_present};
 use crate::act::{do_inject, do_inject_keycode};
 use crate::Shared;
-use phantom::input::{active_layout, char_to_key_layout, Modifier};
+use phantom::input::{active_layout, char_to_key_layout};
 
 pub fn screen_input(shared: &Shared, action: &str, args: &[&str]) -> Result<String, String> {
     match action {
@@ -14,7 +14,11 @@ pub fn screen_input(shared: &Shared, action: &str, args: &[&str]) -> Result<Stri
                 return Err("text <string>".into());
             }
             let layout = active_layout();
-            let keys: Vec<(u16, Modifier)> = s.chars().filter_map(|c| char_to_key_layout(c, layout)).collect();
+            let keys: Vec<(u16, u32)> = s
+                .chars()
+                .filter_map(|c| char_to_key_layout(c, layout))
+                .map(|(code, m)| (code, phantom::input::modifier_maske(m)))
+                .collect();
             let cid = focused_cid(shared).ok_or("no focused window")?;
             let n = do_inject(shared, cid, &keys)?;
 
@@ -24,7 +28,7 @@ pub fn screen_input(shared: &Shared, action: &str, args: &[&str]) -> Result<Stri
         "key" => {
             let code: u16 = args.first().and_then(|s| s.parse().ok()).ok_or("key <evdev-code>")?;
             let cid = focused_cid(shared).ok_or("no focused window")?;
-            do_inject(shared, cid, &[(code, Modifier::None)])?;
+            do_inject(shared, cid, &[(code, 0)])?;
             wake_present();
             Ok(format!("ok: key {code} -> cid={cid}\n"))
         }
@@ -39,7 +43,7 @@ pub fn screen_input(shared: &Shared, action: &str, args: &[&str]) -> Result<Stri
         }
         "enter" => {
             let cid = focused_cid(shared).ok_or("no focused window")?;
-            do_inject(shared, cid, &[(28, Modifier::None)])?;
+            do_inject(shared, cid, &[(28, 0)])?;
             wake_present();
             Ok(format!("ok: enter -> cid={cid}\n"))
         }

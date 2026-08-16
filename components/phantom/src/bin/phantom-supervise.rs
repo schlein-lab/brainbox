@@ -6,13 +6,13 @@ use phantom::sys::{recv_with_fds, send_with_fds, vm_write};
 
 use std::ffi::CString;
 use std::io::Write;
-use std::os::raw::c_int;
+use std::os::raw::{c_char, c_int};
 
 type Pid = i32;
 
 extern "C" {
     fn fork() -> Pid;
-    fn execvp(file: *const i8, argv: *const *const i8) -> c_int;
+    fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
     fn waitpid(pid: Pid, status: *mut c_int, options: c_int) -> Pid;
     fn socketpair(domain: c_int, ty: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
@@ -177,7 +177,7 @@ fn launch_and_supervise(
         .iter()
         .map(|s| CString::new(s.as_str()).expect("argv has NUL"))
         .collect();
-    let mut cargv: Vec<*const i8> = cstrs.iter().map(|c| c.as_ptr()).collect();
+    let mut cargv: Vec<*const c_char> = cstrs.iter().map(|c| c.as_ptr()).collect();
     cargv.push(std::ptr::null());
 
     let mut sv = [0 as c_int; 2];

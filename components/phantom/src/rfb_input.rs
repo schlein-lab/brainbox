@@ -139,6 +139,7 @@ fn modifier_to_bit(m: Modifier) -> u32 {
         Modifier::None => 0,
         Modifier::Shift => M_SHIFT,
         Modifier::AltGr => M_ALTGR,
+        Modifier::Ctrl => M_CTRL,
     }
 }
 

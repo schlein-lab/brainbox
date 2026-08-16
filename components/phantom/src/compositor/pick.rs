@@ -2,7 +2,18 @@ use super::consts::MIN_SUBSTANTIAL;
 use super::state::focused_override;
 use crate::{BufferInfo, ClientState, Shared};
 use phantom::sys;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+
+fn eigner(g: &HashMap<u64, ClientState>, cid: u64) -> Option<(&ClientState, u32)> {
+    let st = g.get(&cid)?;
+    let surface = st.surface?;
+    match st.xparent {
+        Some(p) => Some((g.get(&p)?, surface)),
+        None => Some((st, surface)),
+    }
+}
 
 pub(crate) fn beats(ov: Option<u64>, cand: u64, best: Option<u64>) -> bool {
     match best {
@@ -39,24 +50,28 @@ fn subtree_substantial(st: &ClientState, parent: u32, min: i32, depth: u32) -> b
     false
 }
 
-fn client_has_content(st: &ClientState, min: i32) -> bool {
-    let Some(top) = st.surface else { return false };
-    if st.popup_surf.contains(&top) {
+fn cid_has_content(g: &HashMap<u64, ClientState>, cid: u64, min: i32) -> bool {
+    let Some((own, top)) = eigner(g, cid) else { return false };
+    if own.popup_surf.contains(&top) {
         return false;
     }
-    surf_substantial(st, top, min) || subtree_substantial(st, top, min, 0)
+    surf_substantial(own, top, min) || subtree_substantial(own, top, min, 0)
 }
 
-pub(crate) fn principal_cid(shared: &Shared) -> Option<u64> {
-    let g = shared.lock().unwrap();
+fn bestes_ziel(g: &HashMap<u64, ClientState>, min: i32) -> Option<u64> {
     let ov = focused_override();
     let mut best: Option<u64> = None;
-    for (&cid, st) in g.iter() {
-        if client_has_content(st, MIN_SUBSTANTIAL) && beats(ov, cid, best) {
+    for &cid in g.keys() {
+        if cid_has_content(g, cid, min) && beats(ov, cid, best) {
             best = Some(cid);
         }
     }
     best
+}
+
+pub(crate) fn principal_cid(shared: &Shared) -> Option<u64> {
+    let g = shared.lock().unwrap();
+    bestes_ziel(&g, MIN_SUBSTANTIAL)
 }
 
 pub fn foreground_cid(shared: &Shared) -> Option<u64> {
@@ -65,17 +80,8 @@ pub fn foreground_cid(shared: &Shared) -> Option<u64> {
 
 pub(crate) fn focused_buffer_min(shared: &Shared, min: i32) -> Option<(Arc<sys::Mmap>, BufferInfo)> {
     let g = shared.lock().unwrap();
-    let ov = focused_override();
-
-    let mut best: Option<u64> = None;
-    for (&cid, st) in g.iter() {
-        if client_has_content(st, min) && beats(ov, cid, best) {
-            best = Some(cid);
-        }
-    }
-    let cid = best?;
-    let st = g.get(&cid)?;
-    let surface = st.surface?;
+    let cid = bestes_ziel(&g, min)?;
+    let (st, surface) = eigner(&g, cid)?;
 
     let &buf_id = st.surf_buffer.get(&surface)?;
     let &info = st.buffers.get(&buf_id)?;
@@ -98,8 +104,7 @@ pub(crate) fn focused_buffer(shared: &Shared) -> Option<(Arc<sys::Mmap>, BufferI
 
 pub(crate) fn buffer_for_cid(shared: &Shared, cid: u64) -> Option<(Arc<sys::Mmap>, BufferInfo)> {
     let g = shared.lock().unwrap();
-    let st = g.get(&cid)?;
-    let surface = st.surface?;
+    let (st, surface) = eigner(&g, cid)?;
     let buf_id = *st.surf_buffer.get(&surface)?;
     let info = *st.buffers.get(&buf_id)?;
     let mmap = st.pools.get(&info.pool)?;
@@ -117,16 +122,8 @@ pub(crate) fn buffer_for_cid(shared: &Shared, cid: u64) -> Option<(Arc<sys::Mmap
 
 pub(crate) fn foreground_subsurfaces(shared: &Shared) -> Vec<(Arc<sys::Mmap>, BufferInfo, i32, i32)> {
     let g = shared.lock().unwrap();
-    let ov = focused_override();
-    let mut best: Option<u64> = None;
-    for (&cid, st) in g.iter() {
-        if client_has_content(st, MIN_SUBSTANTIAL) && beats(ov, cid, best) {
-            best = Some(cid);
-        }
-    }
-    let Some(cid) = best else { return Vec::new() };
-    let Some(st) = g.get(&cid) else { return Vec::new() };
-    let Some(primary) = st.surface else { return Vec::new() };
+    let Some(cid) = bestes_ziel(&g, MIN_SUBSTANTIAL) else { return Vec::new() };
+    let Some((st, primary)) = eigner(&g, cid) else { return Vec::new() };
     let mut out = Vec::new();
     collect_subsurfaces(st, primary, 0, 0, &mut out, 0);
     out
@@ -140,18 +137,36 @@ pub(crate) struct SceneLayer {
     pub(crate) y: i32,
 }
 
-pub(crate) fn foreground_scene_layers(shared: &Shared) -> Vec<SceneLayer> {
+
+pub(crate) fn scene_layers_for(shared: &Shared, cid: u64) -> Vec<SceneLayer> {
     let g = shared.lock().unwrap();
-    let ov = focused_override();
-    let mut best: Option<u64> = None;
-    for (&cid, st) in g.iter() {
-        if client_has_content(st, MIN_SUBSTANTIAL) && beats(ov, cid, best) {
-            best = Some(cid);
+    let Ok((rcid, primary)) = crate::xwl::window_resources(&g, cid) else {
+        return Vec::new();
+    };
+    let Some(st) = g.get(&rcid) else { return Vec::new() };
+    let mut out: Vec<SceneLayer> = Vec::new();
+    if let Some(&buf_id) = st.surf_buffer.get(&primary) {
+        if let Some(&info) = st.buffers.get(&buf_id) {
+            if info.width > 0 && info.height > 0 && info.stride > 0 {
+                if let Some(mmap) = st.pools.get(&info.pool) {
+                    let need = (info.offset as u64)
+                        .saturating_add((info.height as u64).saturating_sub(1).saturating_mul(info.stride as u64))
+                        .saturating_add((info.width as u64).saturating_mul(4));
+                    if need <= mmap.len() as u64 {
+                        out.push(SceneLayer { surface_id: primary, mmap: mmap.clone(), info, x: 0, y: 0 });
+                    }
+                }
+            }
         }
     }
-    let Some(cid) = best else { return Vec::new() };
-    let Some(st) = g.get(&cid) else { return Vec::new() };
-    let Some(primary) = st.surface else { return Vec::new() };
+    collect_scene_layers(st, primary, 0, 0, &mut out, 0);
+    out
+}
+
+pub(crate) fn foreground_scene_layers(shared: &Shared) -> Vec<SceneLayer> {
+    let g = shared.lock().unwrap();
+    let Some(cid) = bestes_ziel(&g, MIN_SUBSTANTIAL) else { return Vec::new() };
+    let Some((st, primary)) = eigner(&g, cid) else { return Vec::new() };
     let mut out: Vec<SceneLayer> = Vec::new();
 
     if let Some(&buf_id) = st.surf_buffer.get(&primary) {
@@ -173,19 +188,104 @@ pub(crate) fn foreground_scene_layers(shared: &Shared) -> Vec<SceneLayer> {
     out
 }
 
-pub(crate) fn drain_foreground_damage(shared: &Shared) -> std::collections::HashMap<u32, Vec<(i32, i32, i32, i32)>> {
-    let mut g = shared.lock().unwrap();
+
+pub(crate) fn welt_scene_layers(shared: &Shared, fest: Option<(i32, i32)>) -> (Vec<SceneLayer>, i32, i32) {
+    let g = shared.lock().unwrap();
     let ov = focused_override();
-    let mut best: Option<u64> = None;
-    for (&cid, st) in g.iter() {
-        if client_has_content(st, MIN_SUBSTANTIAL) && beats(ov, cid, best) {
-            best = Some(cid);
+    let mut cids: Vec<u64> = g
+        .keys()
+        .copied()
+        .filter(|&cid| cid_has_content(&g, cid, MIN_SUBSTANTIAL))
+        .collect();
+    cids.sort_unstable();
+    if let Some(f) = ov {
+        if let Some(pos) = cids.iter().position(|&c| c == f) {
+            let f = cids.remove(pos);
+            cids.push(f);
         }
     }
-    match best.and_then(|cid| g.get_mut(&cid)) {
-        Some(st) => std::mem::take(&mut st.surf_damage),
-        None => std::collections::HashMap::new(),
+    let mut fenster: Vec<(u64, u32, i32, i32)> = Vec::new();
+    let mut lw: i32 = 0;
+    let mut lh: i32 = 0;
+    for &cid in &cids {
+        let Some((st, primary)) = eigner(&g, cid) else { continue };
+        let Some(&buf_id) = st.surf_buffer.get(&primary) else { continue };
+        let Some(&info) = st.buffers.get(&buf_id) else { continue };
+        if info.width <= 0 || info.height <= 0 {
+            continue;
+        }
+        lw = lw.max(info.width);
+        lh = lh.max(info.height);
+        fenster.push((cid, primary, info.width, info.height));
     }
+    if let Some((fw, fh)) = fest {
+        lw = fw;
+        lh = fh;
+    }
+    if lw <= 0 || lh <= 0 || fenster.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+    let mut out: Vec<SceneLayer> = Vec::new();
+    for (cid, primary, fw, fh) in fenster {
+        let Some((st, _)) = eigner(&g, cid) else { continue };
+        let ox = (lw - fw) / 2;
+        let oy = (lh - fh) / 2;
+        if let Some(&buf_id) = st.surf_buffer.get(&primary) {
+            if let Some(&info) = st.buffers.get(&buf_id) {
+                if info.width > 0 && info.height > 0 && info.stride > 0 {
+                    if let Some(mmap) = st.pools.get(&info.pool) {
+                        let need = (info.offset as u64)
+                            .saturating_add((info.height as u64).saturating_sub(1).saturating_mul(info.stride as u64))
+                            .saturating_add((info.width as u64).saturating_mul(4));
+                        if need <= mmap.len() as u64 {
+                            out.push(SceneLayer { surface_id: primary, mmap: mmap.clone(), info, x: ox, y: oy });
+                        }
+                    }
+                }
+            }
+        }
+        collect_scene_layers(st, primary, ox, oy, &mut out, 0);
+    }
+    (out, lw, lh)
+}
+
+
+pub(crate) fn damage_seit(shared: &Shared, leser: &str) -> std::collections::HashMap<u32, Vec<(i32, i32, i32, i32)>> {
+    use std::sync::{Mutex, OnceLock};
+    static CURSOR: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
+    let cm = CURSOR.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+
+    let g = shared.lock().unwrap();
+    let ziel = bestes_ziel(&g, MIN_SUBSTANTIAL)
+        .map(|cid| g.get(&cid).and_then(|st| st.xparent).unwrap_or(cid));
+    let Some(st) = ziel.and_then(|cid| g.get(&cid)) else {
+        return std::collections::HashMap::new();
+    };
+
+    let mut c = cm.lock().unwrap_or_else(|p| p.into_inner());
+    if c.len() > 32 {
+        c.clear(); 
+    }
+    let stand = c.entry(leser.to_string()).or_insert(0);
+    let mut out = std::collections::HashMap::new();
+    let mut max = *stand;
+    for (surf, ring) in &st.surf_damage {
+        let (rects, m) = phantom::sehwerk::schaden_seit(ring, *stand);
+        if !rects.is_empty() {
+            out.insert(*surf, rects);
+        }
+        if m > max {
+            max = m;
+        }
+    }
+    *stand = max;
+    out
+}
+
+
+#[allow(dead_code)]
+pub(crate) fn drain_foreground_damage(shared: &Shared) -> std::collections::HashMap<u32, Vec<(i32, i32, i32, i32)>> {
+    damage_seit(shared, "_legacy")
 }
 
 fn collect_scene_layers(
@@ -268,8 +368,7 @@ fn collect_subsurfaces(
 
 pub(crate) fn subsurface_at(shared: &Shared, cid: u64, lx: f64, ly: f64) -> Option<(u32, i32, i32)> {
     let g = shared.lock().unwrap();
-    let st = g.get(&cid)?;
-    let primary = st.surface?;
+    let (st, primary) = eigner(&g, cid)?;
     let mut rects: Vec<(u32, i32, i32, u32, u32)> = Vec::new();
     collect_subsurface_rects(st, primary, 0, 0, &mut rects, 0);
     if std::env::var_os("PHANTOM_DEBUG").is_some() {
@@ -318,8 +417,8 @@ fn collect_subsurface_rects(
 
 pub(crate) fn any_client_surface(shared: &Shared) -> bool {
     let g = shared.lock().unwrap();
-    g.values().any(|st| match st.surface {
-        Some(s) => !st.popup_surf.contains(&s),
+    g.keys().any(|&cid| match eigner(&g, cid) {
+        Some((own, s)) => !own.popup_surf.contains(&s),
         None => false,
     })
 }
@@ -327,8 +426,8 @@ pub(crate) fn any_client_surface(shared: &Shared) -> bool {
 pub(crate) fn covering_buffer(shared: &Shared, sw: u32, sh: u32) -> Option<(Arc<sys::Mmap>, BufferInfo)> {
     let g = shared.lock().unwrap();
     let mut best: Option<(u64, Arc<sys::Mmap>, BufferInfo)> = None;
-    for (&cid, st) in g.iter() {
-        let Some(surface) = st.surface else { continue };
+    for &cid in g.keys() {
+        let Some((st, surface)) = eigner(&g, cid) else { continue };
         if st.popup_surf.contains(&surface) {
             continue;
         }
@@ -401,8 +500,10 @@ pub(crate) fn focused_cid(shared: &Shared) -> Option<u64> {
     let g = shared.lock().unwrap();
     let ov = focused_override();
     let mut best: Option<u64> = None;
-    for (&cid, st) in g.iter() {
-        if st.surface.is_some() && st.keyboard.is_some() && beats(ov, cid, best) {
+    
+    
+    for &cid in g.keys() {
+        if crate::xwl::cid_ready(&g, cid) && beats(ov, cid, best) {
             best = Some(cid);
         }
     }
@@ -413,11 +514,10 @@ pub(crate) fn focused_pointer(shared: &Shared) -> Option<(u64, u32)> {
     let g = shared.lock().unwrap();
     let ov = focused_override();
     let mut best: Option<(u64, u32)> = None;
-    for (&cid, st) in g.iter() {
-        if let (Some(surface), Some(_)) = (st.surface, st.pointer) {
-            if beats(ov, cid, best.map(|(c, _)| c)) {
-                best = Some((cid, surface));
-            }
+    for &cid in g.keys() {
+        let Some((own, surface)) = eigner(&g, cid) else { continue };
+        if own.pointer.is_some() && beats(ov, cid, best.map(|(c, _)| c)) {
+            best = Some((cid, surface));
         }
     }
     best

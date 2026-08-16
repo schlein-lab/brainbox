@@ -39,13 +39,16 @@ pub(crate) fn proxy_client(client: UnixStream, upstream_path: &str, cid: u64, sh
                 pending_attach: HashMap::new(),
                 surf_buffer: HashMap::new(),
                 surf_damage: HashMap::new(),
+                pend_damage: HashMap::new(),
                 xdg_surf_wl: HashMap::new(),
                 popup_surf: HashSet::new(),
+                popup_objs: HashMap::new(),
         subsurface_obj: std::collections::HashMap::new(),
         subsurf_parent: std::collections::HashMap::new(),
         subsurf_pos: std::collections::HashMap::new(),
                 keylog: String::new(),
                 xparent: None,
+                commits: 0,
             },
         );
     }
@@ -252,15 +255,25 @@ fn track_request(
             st.objects.insert(u32le(payload, 0), "xdg_toplevel".into());
             if let Some(&surf) = st.xdg_surf_wl.get(&sender) {
                 st.popup_surf.remove(&surf);
+                st.popup_objs.remove(&surf);
                 st.surface = Some(surf);
                 eprintln!("[c{cid}] toplevel surface #{surf}");
             }
         }
         ("xdg_surface", 2) => {
 
-            st.objects.insert(u32le(payload, 0), "xdg_popup".into());
+            let popup_obj = u32le(payload, 0);
+            st.objects.insert(popup_obj, "xdg_popup".into());
             if let Some(&surf) = st.xdg_surf_wl.get(&sender) {
                 st.popup_surf.insert(surf);
+                st.popup_objs.insert(surf, popup_obj);
+            }
+        }
+        ("xdg_popup", 0) => {
+            st.objects.remove(&sender);
+            if let Some((&surf, _)) = st.popup_objs.iter().find(|(_, &o)| o == sender) {
+                st.popup_objs.remove(&surf);
+                st.popup_surf.remove(&surf);
             }
         }
         ("xdg_toplevel", 2) => {
